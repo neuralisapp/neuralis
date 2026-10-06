@@ -57,13 +57,13 @@ Today sign-in uses email and password; OIDC and SAML single sign-on are not avai
 
 ## Start with a deployment that fits
 
-The intended distribution channels are `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a public host repository. They are not publicly available yet; current installations are built from source. The [installation guide](https://docs.neuralisapp.com/docs/getting-started/installation) describes prerequisites and platform limits. The setup wizard creates installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Native Linux terminal support needs Python, make and a C++ compiler.
+The Neuralis 0.1.0 beta is available through `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a validated, history-free public host repository snapshot. Review the beta maturity and platform limits before choosing a deployment. The [installation guide](https://docs.neuralisapp.com/docs/getting-started/installation) describes prerequisites and platform limits. The setup wizard creates installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Native Linux terminal support needs Python, make and a C++ compiler.
 
 Continue with [first run](https://docs.neuralisapp.com/docs/getting-started/first-run), the [workspace guide](https://docs.neuralisapp.com/docs/getting-started/workspace) and [package authoring](https://docs.neuralisapp.com/docs/package-system). Operator procedures live in the shipped operations skill; public source-domain READMEs explain the [workspace package bridge](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/packages), [widget lifecycle](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/widgets), [server package runtime](https://github.com/neuralisapp/neuralis/tree/main/src/server/packages) and [package API](https://github.com/neuralisapp/neuralis/tree/main/src/app/api/packages). Documentation is also available as [agent-readable text](https://docs.neuralisapp.com/llms.txt).
 
 ## Maturity
 
-As of 2026-10-05. Scores measure development against documented promises and plans; labels also reflect recorded live use, CI and availability. See the [maturity method](https://docs.neuralisapp.com/docs/getting-started/maturity).
+As of 2026-10-06. Scores measure development against documented promises and plans; labels also reflect recorded live use, CI and availability. See the [maturity method](https://docs.neuralisapp.com/docs/getting-started/maturity).
 
 | Subject | Level | Score | Main limitation |
 |---|---|---|---|
@@ -73,7 +73,7 @@ As of 2026-10-05. Scores measure development against documented promises and pla
 | Admin | stable | 85 | Admin adds no agent tools or slash commands; agents reach administration through its skills and the routes they wrap. |
 | Machine core | stable | 90 | Machines need access to a Docker engine; without one the platform runs with no machines. |
 | Host (neuralis) | stable | 90 | Sign-in is email and password; single sign-on (OIDC, SAML) is not available. |
-| Install channels | preview | 50 | No install channel is publicly available; installs are built from the source repository. |
+| Install channels | beta | 70 | The 0.1.0 beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded. |
 | Platform: Linux | experimental | 85 | No run on a standalone Linux host is recorded; the live-tested setup is Docker on WSL2. |
 | Platform: Windows with WSL2 | stable | 90 | Use an in-distro Docker engine; with Docker Desktop the host broker needs its loopback TCP fallback. |
 | Platform: macOS | experimental | 35 | Neuralis has not been run on macOS so far. |
