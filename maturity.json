@@ -1,0 +1,452 @@
+{
+  "method": {
+    "coverage": "Coverage = 100 x sum(w x f) / sum(w) over the subject's capability units: what its documentation, contract and README promise today, the work planned before a stable 1.0, and a few long-term vision items.",
+    "weights": {
+      "promise": 1,
+      "roadmap": 1,
+      "vision": 0.25
+    },
+    "factors": {
+      "works": 1,
+      "partial": 0.5,
+      "planned": 0
+    },
+    "score": "Score = coverage rounded down to a multiple of 5.",
+    "bands": [
+      {
+        "label": "stable",
+        "min": 85
+      },
+      {
+        "label": "beta",
+        "min": 65,
+        "max": 84
+      },
+      {
+        "label": "preview",
+        "min": 40,
+        "max": 64
+      },
+      {
+        "label": "experimental",
+        "max": 39
+      },
+      {
+        "label": "not available",
+        "rule": "d"
+      }
+    ],
+    "gates": [
+      {
+        "id": "G-a",
+        "cap": "beta",
+        "text": "A subject with an open high-severity security issue on one of its capabilities is at most beta."
+      },
+      {
+        "id": "G-b",
+        "cap": "experimental",
+        "text": "A platform or channel that has never run on a live installation is at most experimental."
+      },
+      {
+        "id": "G-c",
+        "cap": "preview",
+        "text": "An install channel or marketplace that is not publicly available is at most preview."
+      },
+      {
+        "id": "G-d",
+        "cap": "beta",
+        "text": "Until a green continuous-integration run is recorded, every subject is at most beta."
+      }
+    ],
+    "rules": [
+      {
+        "id": "a",
+        "text": "A capability is partial only when a promised part of it is missing or an open high-severity issue makes it unusable or unsafe; open defects never subtract from the score by count."
+      },
+      {
+        "id": "b",
+        "text": "A topic is a view over the capability units of every package that serves it; a unit counts once per topic and is never copied."
+      },
+      {
+        "id": "c",
+        "text": "Planned and long-term work enters the score only by an explicit owner decision per item."
+      },
+      {
+        "id": "d",
+        "text": "A subject is not available if and only if sum(w x f) = 0, that is, nothing of it works even in part."
+      }
+    ]
+  },
+  "asOf": "2026-10-05",
+  "pages": {
+    "getting-started/maturity": {
+      "form": "table"
+    },
+    "package-system/index": {
+      "form": "callout",
+      "ids": [
+        "package-system"
+      ]
+    },
+    "agent-core/index": {
+      "form": "callout",
+      "ids": [
+        "agent-core"
+      ]
+    },
+    "admin/index": {
+      "form": "callout",
+      "ids": [
+        "admin"
+      ]
+    },
+    "brain-core/index": {
+      "form": "callout",
+      "ids": [
+        "brain-core"
+      ]
+    },
+    "machine-core/index": {
+      "form": "callout",
+      "ids": [
+        "machine-core"
+      ]
+    },
+    "getting-started/index": {
+      "form": "callout",
+      "ids": [
+        "neuralis",
+        "install-channels"
+      ]
+    },
+    "getting-started/installation": {
+      "form": "table",
+      "ids": [
+        "install-channels",
+        "platform-linux",
+        "platform-wsl2",
+        "platform-macos",
+        "platform-windows"
+      ]
+    },
+    "enterprise/index": {
+      "form": "callout",
+      "ids": [
+        "enterprise-security",
+        "sign-in"
+      ]
+    },
+    "enterprise/deployment": {
+      "form": "table",
+      "ids": [
+        "neuralis",
+        "platform-linux",
+        "platform-wsl2",
+        "platform-macos",
+        "platform-windows"
+      ]
+    },
+    "enterprise/security-model": {
+      "form": "callout",
+      "ids": [
+        "enterprise-security"
+      ]
+    },
+    "enterprise/mcp-access": {
+      "form": "callout",
+      "ids": [
+        "mcp"
+      ]
+    },
+    "package-system/marketplace": {
+      "form": "callout",
+      "ids": [
+        "marketplace"
+      ]
+    },
+    "package-system/source-packages": {
+      "form": "callout",
+      "ids": [
+        "ecosystem-import"
+      ]
+    },
+    "agent-core/workflows": {
+      "form": "callout",
+      "ids": [
+        "workflows"
+      ]
+    },
+    "agent-core/channels": {
+      "form": "callout",
+      "ids": [
+        "channels"
+      ]
+    }
+  },
+  "subjects": [
+    {
+      "id": "package-system",
+      "kind": "package",
+      "title": "Package system",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "One manifest contract for installed, sandboxed and markdown-only packages, with schema-first tools, feature-gated routes, path policies, connectors and UI surfaces validated at load.",
+      "limits": [
+        "Source packages are markdown only; code from a synced source runs only when an owner flags that source as a package source, and then in the WebAssembly sandbox.",
+        "Below first-party trust, package code runs only in the WebAssembly sandbox, which offers no process execution.",
+        "Events, config settings, provided services and prebuilt UI modules are honoured only for first-party packages.",
+        "Tool names are global per deployment; there is no per-package tool namespace."
+      ]
+    },
+    {
+      "id": "agent-core",
+      "kind": "package",
+      "title": "Agent core",
+      "label": "beta",
+      "score": 80,
+      "gates": [],
+      "summary": "One durable agent stream across many model providers, with a sandboxed execute shell, Agent Skills, delegation, approvals, MCP in both directions, workflows, channels, a terminal and limits on every run.",
+      "limits": [
+        "Confined shells need a Linux host kernel with Landlock support; without it, lower-trust shells are refused rather than run unconfined.",
+        "Workflows and channels run in a single process; a second replica would run every schedule twice.",
+        "Subscription model usage is not metered in money, so money spend caps do not bind it.",
+        "Container terminal sessions end when the app restarts."
+      ]
+    },
+    {
+      "id": "brain-core",
+      "kind": "package",
+      "title": "Brain core",
+      "label": "stable",
+      "score": 90,
+      "gates": [],
+      "summary": "One URI-addressed filesystem over every project source, kept searchable in a scoped vector index, with every read and write governed per path.",
+      "limits": [
+        "Git remote operations use HTTPS only; SSH remotes are not supported.",
+        "There is no clone or force-push through the governed git routes.",
+        "One vector collection serves every project; switching the embedding model is an explicit rebuild that temporarily doubles storage.",
+        "Embedding credentials are platform-wide; members cannot bring their own embedding key."
+      ]
+    },
+    {
+      "id": "admin",
+      "kind": "package",
+      "title": "Admin",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "One dashboard for owners and administrators to manage projects, members, roles, credentials, platform config, usage, audit and health, every action gated server-side.",
+      "limits": [
+        "Admin adds no agent tools or slash commands; agents reach administration through its skills and the routes they wrap.",
+        "Stored credential values are write-only; no screen or route reads a secret back.",
+        "Credential-use limits apply platform-wide per credential; model provider keys are governed by spend limits instead.",
+        "A vector reset is platform-wide and also deletes all brain:// content and its version history."
+      ]
+    },
+    {
+      "id": "machine-core",
+      "kind": "package",
+      "title": "Machine core",
+      "label": "stable",
+      "score": 90,
+      "gates": [],
+      "summary": "A sandboxed Linux desktop for a user or a project that agents drive through browser and desktop automation, with a shell through the shared execute tool, a live stream in the workspace and a file source.",
+      "limits": [
+        "Machines need access to a Docker engine; without one the platform runs with no machines.",
+        "The first beta bundles an Ubuntu XFCE desktop; operators may configure a compatible custom image. Windows or macOS guest desktops are not offered.",
+        "A shell inside a machine is root-equivalent there; the boundary is the container sandbox, the machine shell grant and network isolation, not per-path rules inside the machine.",
+        "A project machine shares one browser profile among everyone who starts it."
+      ]
+    },
+    {
+      "id": "neuralis",
+      "kind": "package",
+      "title": "Host (neuralis)",
+      "label": "stable",
+      "score": 90,
+      "gates": [],
+      "summary": "The host provides sign-in, projects with membership, roles and spend limits, package bootstrap and routing, the workspace shell and the operator commands, and leaves every product capability to packages.",
+      "limits": [
+        "Sign-in is email and password; single sign-on (OIDC, SAML) is not available.",
+        "The host access plane needs a Linux kernel (Linux or WSL2); it is unavailable on macOS and native Windows.",
+        "A package added to the host dependencies runs in-process with full first-party trust; vet it like any dependency.",
+        "Encrypted credentials depend on the master key file; back it up with the data directory."
+      ]
+    },
+    {
+      "id": "install-channels",
+      "kind": "topic",
+      "title": "Install channels",
+      "label": "preview",
+      "score": 50,
+      "gates": [
+        "G-c"
+      ],
+      "summary": "Neuralis is built to ship through npm create neuralis, a Docker image and a public host repository; none of the three is published today, so installs are built from source.",
+      "limits": [
+        "No install channel is publicly available; installs are built from the source repository.",
+        "Native installs on Linux compile the terminal module and need python3, make and a C++ compiler."
+      ]
+    },
+    {
+      "id": "platform-linux",
+      "kind": "topic",
+      "title": "Platform: Linux",
+      "label": "experimental",
+      "score": 85,
+      "gates": [
+        "G-b"
+      ],
+      "summary": "On Linux the full stack is built to run in Docker or natively, including confined shells and the host access broker; the Linux kernel it has been live-tested on is the one under WSL2.",
+      "limits": [
+        "No run on a standalone Linux host is recorded; the live-tested setup is Docker on WSL2.",
+        "Confined shells need a kernel with Landlock support; on older kernels confined commands are refused."
+      ]
+    },
+    {
+      "id": "platform-wsl2",
+      "kind": "topic",
+      "title": "Platform: Windows with WSL2",
+      "label": "stable",
+      "score": 90,
+      "gates": [],
+      "summary": "WSL2 with an in-distro Docker engine is the platform Neuralis is developed and live-tested on, including confined shells and the host access broker.",
+      "limits": [
+        "Use an in-distro Docker engine; with Docker Desktop the host broker needs its loopback TCP fallback."
+      ]
+    },
+    {
+      "id": "platform-macos",
+      "kind": "topic",
+      "title": "Platform: macOS",
+      "label": "experimental",
+      "score": 35,
+      "gates": [
+        "G-b"
+      ],
+      "summary": "On macOS Neuralis is built to run in Docker Desktop or natively, without confined shells or the host access plane.",
+      "limits": [
+        "Neuralis has not been run on macOS so far.",
+        "Confined shells are refused on macOS and the host access plane is unavailable."
+      ]
+    },
+    {
+      "id": "platform-windows",
+      "kind": "topic",
+      "title": "Platform: Windows (native)",
+      "label": "experimental",
+      "score": 35,
+      "gates": [
+        "G-b"
+      ],
+      "summary": "Native Windows is not supported end to end; use WSL2.",
+      "limits": [
+        "Neuralis has not been run on native Windows so far.",
+        "Confined shells and the host access plane are unavailable on native Windows."
+      ]
+    },
+    {
+      "id": "enterprise-security",
+      "kind": "topic",
+      "title": "Enterprise security and governance",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "Every request, from a person, an agent, a skill script, a scheduled run or an external MCP client, passes the same deny-by-default layers: one session identity, project membership, role and feature grants, path policy, package trust and audit.",
+      "limits": [
+        "Give the host access plane only to a single trusted operator's machine.",
+        "A package added to the host dependencies runs with full first-party trust; vet it like any dependency.",
+        "Login lockout is kept per process; a multi-node deployment gets proportionally more login attempts.",
+        "Encrypted credentials depend on the master key file; back it up with the data directory."
+      ]
+    },
+    {
+      "id": "sign-in",
+      "kind": "topic",
+      "title": "Sign-in",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "Users sign in with email and password, sessions end the moment a user is disabled or removed, and external MCP clients sign in through OAuth.",
+      "limits": [
+        "Single sign-on (OIDC, SAML) is not available; sign-in is email and password.",
+        "Behind a reverse proxy, declare it in NEURALIS_TRUSTED_PROXIES so login rate limits see the real client address.",
+        "Login lockout is kept per process; a multi-node deployment gets proportionally more login attempts."
+      ]
+    },
+    {
+      "id": "mcp",
+      "kind": "topic",
+      "title": "MCP",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "Each agent's gated tools are served to outside MCP clients with OAuth 2.1 or per-agent keys, and agents use external MCP servers and interactive MCP App cards.",
+      "limits": [
+        "Keep the MCP port private unless remote MCP clients are intended.",
+        "Treat a per-agent MCP key like its creator's own credential.",
+        "The MCP Apps of one user share a single sandbox origin per deployment."
+      ]
+    },
+    {
+      "id": "workflows",
+      "kind": "topic",
+      "title": "Workflows and scheduling",
+      "label": "beta",
+      "score": 75,
+      "gates": [],
+      "summary": "Workflows run agent work on schedules, webhooks, channel messages or on demand, as their creator, with a Calendar view, upgradable templates and run notifications.",
+      "limits": [
+        "Workflows run in a single process; a second replica would run every schedule twice.",
+        "Platform events cannot trigger a workflow.",
+        "Installing a workflow template copies it; installed copies are upgraded explicitly, never live-linked."
+      ]
+    },
+    {
+      "id": "channels",
+      "kind": "topic",
+      "title": "Messaging channels",
+      "label": "preview",
+      "score": 55,
+      "gates": [],
+      "summary": "Telegram and WhatsApp connect a person's messaging account to project workflows: unknown senders pair first, messages fire workflows under the normal permission and quota rules, and answers return to the same chat.",
+      "limits": [
+        "Telegram and WhatsApp are the only messaging platforms.",
+        "Delivery sends finished answers, not a live stream.",
+        "Channels run in a single process; a second replica would answer every message twice."
+      ]
+    },
+    {
+      "id": "ecosystem-import",
+      "kind": "topic",
+      "title": "Ecosystem import",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "Skills, rules, agents and instruction files in the Claude Code, Cursor, Codex, Gemini and Copilot conventions load straight from any synced source, without an install step and under the same scope as every other package.",
+      "limits": [
+        "Imported content is markdown only: hooks and MCP server definitions in a foreign layout are not loaded.",
+        "Rules are always on; glob-scoped rules are not supported.",
+        "Skill arguments and per-skill model preferences from other ecosystems are accepted but not applied."
+      ]
+    },
+    {
+      "id": "marketplace",
+      "kind": "topic",
+      "title": "Marketplace",
+      "label": "preview",
+      "score": 70,
+      "gates": [
+        "G-c"
+      ],
+      "summary": "The marketplace registers or uploads packages, vets them in stages, serves them with integrity digests and a signed revocation feed, and is used through a CLI and an MCP registry facet.",
+      "limits": [
+        "The marketplace is not publicly hosted; it runs as a local deployment only.",
+        "The marketplace never assigns trust; trust stays the installing host's decision.",
+        "Direct uploads are declarative only; packages that carry code publish through npm.",
+        "Publisher sign-in with GitHub is not available."
+      ]
+    }
+  ]
+}

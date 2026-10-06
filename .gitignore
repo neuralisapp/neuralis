@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+
+# build
+dist/
+
+# runtime data (user-specific, not versioned)
+data/
+!data/README.md
+!data/**/
+!data/**/.gitkeep
+
+# env
+.env
+.env.local
+
+# setup-generated machine-specific topology (pnpm neuralis:setup — C6).
+# Root-anchored: only the neuralis/ base compose, same artifact family as .env.
+/docker-compose.yml
+
+# misc
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts

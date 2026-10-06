@@ -1,0 +1,46 @@
+{
+  // Type gate for `neuralis/scripts/**`.
+  //
+  // The host tsconfig's `include` is `**/*.ts`, and that pattern matches NEITHER
+  // `.mts` NOR `.mjs` — so every operator script (setup, mount, rebuild, sync,
+  // pkg, host-broker, reset-vector) was checked by nothing at all. "tsc is clean"
+  // was true and meaningless for the files an operator actually runs.
+  //
+  // It cost a real defect: a refactor renamed a parameter and left one reference
+  // to the old name inside a rarely-taken refusal branch. Nothing failed — not
+  // the build, not the tests, not the resolution guard (which checks specifiers
+  // and path arithmetic, not identifier scope) — and the first person to hit that
+  // branch would have got a ReferenceError where a friendly refusal belonged.
+  //
+  // Resolution deliberately matches the host config (`bundler`), NOT `nodenext`.
+  // Three scripts import across the boundary into `../src/**`, and nodenext would
+  // apply ESM extension rules to that whole tree — hundreds of errors about the
+  // app's own imports, which tsx resolves fine at runtime and which the app build
+  // already type-checks its own way. The question this gate exists to answer is
+  // "does the script's own code type-check", and extension hygiene is already
+  // covered: `scripts/__tests__/scriptResolution.test.mts` proves every relative
+  // specifier resolves to a real file on disk.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "paths": { "@/*": ["./src/*"] },
+    // `.mjs` build steps are parsed for their exports (sync.mts imports
+    // treeDigest.mjs) but not themselves type-checked — they are plain JS by
+    // choice, so the Dockerfile can run them with bare node.
+    "allowJs": true,
+    "checkJs": false,
+    "incremental": false,
+    "isolatedModules": false,
+    // setup.mts imports its helpers with explicit .mts extensions, which is what
+    // tsx resolves at runtime. Allowed because this project never emits.
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true
+  },
+  "include": ["scripts/**/*.mts", "scripts/**/*.ts", "scripts/**/*.mjs"],
+  "exclude": ["node_modules"]
+}

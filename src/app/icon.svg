@@ -1,0 +1,18 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- The Neuralis mark: an "N" as a four-node graph. No tile behind it — the
+       glyph sits directly on the browser's own tab background. Mirrors
+       components/brand-logo.tsx and lib/og-brand.tsx; keep the three in sync. -->
+  <defs>
+    <linearGradient id="nrs" x1="7" y1="0" x2="25" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#54dbb5"/>
+      <stop offset="1" stop-color="#64adff"/>
+    </linearGradient>
+  </defs>
+  <g stroke="url(#nrs)" fill="url(#nrs)">
+    <path d="M8.5 23.5 L8.5 8.5 L23.5 23.5 L23.5 8.5" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+    <circle cx="8.5" cy="8.5" r="3.3" stroke="none"/>
+    <circle cx="8.5" cy="23.5" r="3.3" stroke="none"/>
+    <circle cx="23.5" cy="8.5" r="3.3" stroke="none"/>
+    <circle cx="23.5" cy="23.5" r="3.3" stroke="none"/>
+  </g>
+</svg>
