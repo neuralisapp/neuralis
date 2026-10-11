@@ -235,3 +235,60 @@ describe('title and nav', () => {
     expect(notificationNav({ nav: 'calendar' })).toBeUndefined();
   });
 });
+
+describe('one subject in order; a recovery resolves the failure it clears', () => {
+  const FAILED = 'agent-core.workflow.run.failed';
+  const RECOVERED = 'agent-core.workflow.run.recovered';
+  let recoveredDecl: PackageEventDeclaration;
+  beforeEach(() => {
+    recoveredDecl = declaration({ id: 'workflow.run.recovered', title: 'Workflow recovered',
+      notify: { default: 'off', tone: 'success', clears: ['workflow.run.failed'] } });
+    events.declarationOf.mockImplementation((type: string) =>
+      type === FAILED ? { packageId: PACKAGE, type, declaration: decl }
+        : type === RECOVERED ? { packageId: PACKAGE, type, declaration: recoveredDecl } : undefined);
+  });
+  const unread = async (userId: string) => {
+    const path = join(projectsRoot, 'p1', 'notifications', userId, 'state.json');
+    if (!existsSync(path)) return [] as string[];
+    return Object.values(JSON.parse(await readFile(path, 'utf-8')).unread as Record<string, { key: string }>).map((e) => e.key);
+  };
+
+  it('failure → recovery → failure lands in publish order even when the first predicate is slow', async () => {
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    events.isVisible.mockImplementationOnce(async (_e: NeuralisEvent, s: SessionContext) => { await slow; return visibleTo.has(s.userId); });
+    const first = materializeEvent(events, event({ id: 'f1' }));
+    const recovery = materializeEvent(events, event({ id: 'r1', type: RECOVERED }));
+    const again = materializeEvent(events, event({ id: 'f2' }));
+    // Another subject never waits behind the slow one.
+    expect(await materializeEvent(events, event({ id: 'other', subjectId: 'wf-2' }))).toBe(1);
+    releaseSlow();
+    await Promise.all([first, recovery, again]);
+    const rows = await lines('p1', 'alice');
+    expect(rows.filter((row) => row.subjectId === 'wf-1').map((row) => row.type)).toEqual([FAILED, FAILED]);
+    // The recovery resolved the first failure; the later failure is a NEW unread row.
+    expect((await unread('alice')).filter((key) => key.endsWith('\u0000wf-1'))).toHaveLength(1);
+  });
+
+  it('reaches a former recipient who neither follows nor is addressed — and one who muted it — writing them no recovery row', async () => {
+    await materializeEvent(events, event({ audience: { userIds: ['alice', 'carol'] } }));
+    await writeNotificationPrefs('p1', 'carol', { mute: [RECOVERED], follow: [] });
+    await materializeEvent(events, event({ type: RECOVERED, audience: { userIds: [] } }));
+    expect(await unread('alice')).toEqual([]);
+    expect(await unread('carol')).toEqual([]);
+    expect((await lines('p1', 'alice')).map((row) => row.type)).toEqual([FAILED]);
+    expect((await lines('p1', 'carol')).map((row) => row.type)).toEqual([FAILED]);
+  });
+
+  it('clears nothing on an undecided verdict, for a revoked member, or about another subject', async () => {
+    await materializeEvent(events, event({ audience: { userIds: ['alice', 'carol'] } }));
+    await materializeEvent(events, event({ subjectId: 'wf-2' }));
+    visibleTo = new Set(['carol']);
+    MEMBERS.carol = [];
+    try {
+      await materializeEvent(events, event({ type: RECOVERED, audience: { userIds: [] } }));
+    } finally { MEMBERS.carol = ['p1']; }
+    expect(await unread('alice')).toHaveLength(2);
+    expect(await unread('carol')).toHaveLength(1);
+  });
+});

@@ -42,8 +42,7 @@ export type RoleDefinition = {
    *
    * Gates role assignment: a caller may only assign/define a role whose
    * `priority` is `>=` their own. Built-in priorities are immutable; custom
-   * roles carry their own. Backfilled and re-anchored on load by
-   * `migrateProjectRecord` (role-grant version 12) for legacy records.
+   * roles carry their own.
    */
   priority: number;
 };
@@ -90,6 +89,8 @@ export type ProjectRecord = {
    */
   archivedAt?: string;
   roleGrantVersion?: number;
+  /** The record's format marker (`neuralis/project`), independent of `roleGrantVersion`. */
+  formatVersion?: number;
   /**
    * Provenance for non-builtin package `defaultRoleGrants` (C7a): packageId →
    * the package version whose grants were already merged into `roles`. Makes
@@ -99,6 +100,8 @@ export type ProjectRecord = {
    * entry is cleared when the package is uninstalled (grants are revoked).
    */
   appliedPackageGrants?: Record<string, string>;
+  /** Package-origin feature claims per instance and role; manual-preexisting grants are excluded. */
+  packageGrantFeatures?: Record<string, Record<string, string[]>>;
   createdAt: string;
   updatedAt: string;
 };
@@ -116,7 +119,6 @@ export const DEFAULT_ROLES: Record<string, RoleDefinition> = {
   // gone. This flag was previously `false` while the name set said "yes", i.e.
   // the stored flag was LYING about admin's real power. Flipping it to `true`
   // is what keeps the behaviour identical after the name set is deleted.
-  // Existing projects get the same repair from migration version 12 (P5).
   //
   // D-C — `admin` no longer ships with the `'*'` wildcard. It receives the
   // manifest-declared union instead, exactly like manager/member/viewer: every
@@ -124,8 +126,7 @@ export const DEFAULT_ROLES: Record<string, RoleDefinition> = {
   // crosses the project boundary). The list is never hand-typed — each package
   // declares its own `requires.defaultRoleGrants.admin`, and
   // `packages/package-system/test/adminGrantCoverage.test.ts` fails the build if
-  // a non-`platform.*` feature is declared without one. Existing projects are
-  // de-wildcarded by migration version 13 (P4).
+  // a non-`platform.*` feature is declared without one.
   //
   // Consequence, stated: a project-dropped `_packages/` package's features are
   // NOT automatically inherited by admin (the `'*'` used to match them). They

@@ -504,6 +504,60 @@ export async function markNotificationsRead(
 }
 
 /**
+ * A RESOLUTION: mark read every unread row of the given event types about one
+ * subject (a recovery resolving its failure — `notify.clears`). In the user's
+ * chain, so it orders with the deliveries around it; the rows stay in history.
+ * Returns how many unread rows it resolved; the live signal fires only when
+ * one did.
+ */
+export async function resolveUnread(
+  projectId: string,
+  userId: string,
+  types: readonly string[],
+  subjectId: string,
+): Promise<number> {
+  const log = userFile(projectId, userId, 'log.jsonl');
+  const statePath = userFile(projectId, userId, 'state.json');
+  if (!log || !statePath || types.length === 0) return 0;
+  const keys = new Set(types.map((type) => mergeKey(type, subjectId)));
+  const result = await serialize(chainKey(projectId, userId), async () => {
+    const state = await readState(statePath, log);
+    let resolved = 0;
+    for (const [id, entry] of Object.entries(state.unread)) {
+      if (!keys.has(entry.key)) continue;
+      delete state.unread[id];
+      resolved += 1;
+    }
+    if (resolved > 0) await writeState(statePath, state);
+    return { counts: countsOf(state), resolved };
+  });
+  if (result.resolved > 0) emitCounts({ projectId, userId, unread: result.counts });
+  return result.resolved;
+}
+
+/**
+ * Does the user hold an unread row of one of these types about this subject?
+ * One small file read, outside the chain — a hint for who a resolution may
+ * concern, never the write (that is {@link resolveUnread}, in the chain).
+ */
+export async function hasUnreadOf(
+  projectId: string,
+  userId: string,
+  types: readonly string[],
+  subjectId: string,
+): Promise<boolean> {
+  const statePath = userFile(projectId, userId, 'state.json');
+  if (!statePath || types.length === 0) return false;
+  const keys = new Set(types.map((type) => mergeKey(type, subjectId)));
+  try {
+    const parsed = JSON.parse(await readFile(statePath.realPath, 'utf-8')) as NotificationState;
+    return Object.values(parsed.unread ?? {}).some((entry) => keys.has(entry.key));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Delete the caller's own rows — one app's ({@link notificationGroupKey}) or
  * all — unread ones included: the log is rewritten without them and their
  * unread and merge entries go with them. Returns the counts after; the live

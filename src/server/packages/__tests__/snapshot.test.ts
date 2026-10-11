@@ -199,13 +199,15 @@ describe('a synthetic external MCP package never reaches a project-scoped snapsh
   });
 });
 
-describe('base-access feature gate on the CLIENT snapshot (F1 — manifest-id override translation)', () => {
-  // The registry/loader id is scope-namespaced; the admin override map is keyed by
-  // the RAW manifest id. The snapshot base-access gate MUST translate namespaced→
-  // manifest or it stops honoring the override (split-brain vs the stream path).
-  const NS_ID = 'p.proj-a.project.securepkg'; // scope-namespaced loader id
-  const MANIFEST_ID = 'securepkg';            // the admin key
-  const secureDef = makeDef(NS_ID);
+describe('base-access feature gate on the CLIENT snapshot — the exact instance key', () => {
+  // The registry/loader id IS the canonical instance URI, and the admin override
+  // map is keyed by that same id. A manifest-keyed entry is not an authority the
+  // gate consults: un-migrated (manifest-keyed) data never reaches this code,
+  // because the data-format admission floor refuses the boot until the offline
+  // upgrade has re-keyed it.
+  const INSTANCE_ID = 'packages://securepkg?project=proj-a&scope=project';
+  const MANIFEST_ID = 'securepkg';
+  const secureDef = makeDef(INSTANCE_ID);
 
   beforeEach(() => {
     delete (globalThis as any).__neuralis_snapshot_service__;
@@ -221,29 +223,36 @@ describe('base-access feature gate on the CLIENT snapshot (F1 — manifest-id ov
       listPackages: () => [secureDef],
     });
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
-      getProjectPackageIds: () => new Set([NS_ID]),
+      getProjectPackageIds: () => new Set([INSTANCE_ID]),
       getPackageOwnerScope: () => undefined, // project scope ⇒ not scope-hidden
-      // The translation the F1 fix relies on: namespaced loader id → manifest id.
-      getPackageManifestId: (_p: string, id: string) => (id === NS_ID ? MANIFEST_ID : undefined),
+      getPackageManifestId: (_p: string, id: string) => (id === INSTANCE_ID ? MANIFEST_ID : undefined),
       getLoader: () => ({ getStatus: () => undefined }),
     });
   });
 
-  it('HIDES a package whose MANIFEST-id-keyed override the caller lacks', () => {
+  it('HIDES a package whose INSTANCE-keyed override the caller lacks', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [MANIFEST_ID]: 'secure.access' } },
+      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
       [], // caller holds no features
     );
-    expect(snap.surfaces.map((s) => s.packageId)).not.toContain(NS_ID);
-    expect(snap.commands.map((c) => c.packageId)).not.toContain(NS_ID);
+    expect(snap.surfaces.map((s) => s.packageId)).not.toContain(INSTANCE_ID);
+    expect(snap.commands.map((c) => c.packageId)).not.toContain(INSTANCE_ID);
   });
 
-  it('SHOWS the same package when the caller holds the override feature', () => {
+  it('PAIRED CONTROL — SHOWS the same package when the caller holds the override feature', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [MANIFEST_ID]: 'secure.access' } },
+      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
       ['secure.access'],
     );
-    expect(snap.surfaces.map((s) => s.packageId)).toContain(NS_ID);
+    expect(snap.surfaces.map((s) => s.packageId)).toContain(INSTANCE_ID);
+  });
+
+  it('a MANIFEST-keyed entry is not consulted — the authored name is no override key', () => {
+    const snap = getPackageSnapshot(
+      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [MANIFEST_ID]: 'secure.access' } },
+      [],
+    );
+    expect(snap.surfaces.map((s) => s.packageId)).toContain(INSTANCE_ID);
   });
 });
 

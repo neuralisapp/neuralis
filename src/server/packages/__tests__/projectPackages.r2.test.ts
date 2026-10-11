@@ -30,21 +30,21 @@ function root(overrides: Partial<PackageSourceRoot>): PackageSourceRoot {
 describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
   it('selects a project-scope, flagged, enabled, local source with its scope', () => {
     expect(selectFlaggedPackageRoots([root({})])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'project' } },
+      { dir: '/projects/p1/acme', ownerScope: { kind: 'project' }, uriRoot: 'acme://' },
     ]);
   });
 
   it('R2b — a user-scoped flagged source is INCLUDED, carrying its user scope', () => {
     const userScoped = root({ slug: 'pkg-alice', scope: { kind: 'user', userId: 'alice' } });
     expect(selectFlaggedPackageRoots([userScoped])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'user', userId: 'alice' } },
+      { dir: '/projects/p1/acme', ownerScope: { kind: 'user', userId: 'alice' }, uriRoot: 'acme://' },
     ]);
   });
 
   it('R2b — an agent-scoped flagged source is INCLUDED, carrying its agent scope', () => {
     const agentScoped = root({ slug: 'pkg-a1', scope: { kind: 'agent', userId: 'alice', agentId: 'a1' } });
     expect(selectFlaggedPackageRoots([agentScoped])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'agent', userId: 'alice', agentId: 'a1' } },
+      { dir: '/projects/p1/acme', ownerScope: { kind: 'agent', userId: 'alice', agentId: 'a1' }, uriRoot: 'acme://' },
     ]);
   });
 
@@ -75,8 +75,8 @@ describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
       root({ slug: 'b', containerRoot: '/p/b', enabled: false }),
     ]);
     expect(dirs).toEqual([
-      { dir: '/p/a', ownerScope: { kind: 'project' } },
-      { dir: '/p/alice', ownerScope: { kind: 'user', userId: 'alice' } },
+      { dir: '/p/a', ownerScope: { kind: 'project' }, uriRoot: 'acme://' },
+      { dir: '/p/alice', ownerScope: { kind: 'user', userId: 'alice' }, uriRoot: 'acme://' },
     ]);
   });
 });

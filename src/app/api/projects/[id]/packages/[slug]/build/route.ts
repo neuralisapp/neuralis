@@ -10,15 +10,14 @@
  * reloads the package so the freshly built `dist/package.wasm` picks up.
  */
 
+import { canAccessScope } from '@neuralis/package-system/contracts';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/server/auth/session';
 import { getProjectById } from '@/server/store/ProjectStore';
 import { writeAuditLog } from '@/server/store/AuditStore';
 import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
-import { getProjectPackageScanner } from '@/server/packages/ProjectPackageScanner';
-import { getEnv } from '@/server/config/env';
+import { resolveProjectPackageInstance } from '@/server/packages/projectPackages';
 import { getLogger } from '@/server/logging/setup';
-import { resolveProjectRoot } from '@neuralis/package-system/paths';
 import {
   buildWasmPackage,
   hasSourceCode,
@@ -54,14 +53,9 @@ export async function POST(_req: NextRequest, { params }: Params): Promise<NextR
     return NextResponse.json({ error: 'Forbidden: package management permission required' }, { status: 403 });
   }
 
-  const env = getEnv();
   const logger = getLogger().child('package-build');
-  const projectRoot = resolveProjectRoot(env.projectsRoot, projectId);
-  const scanner = getProjectPackageScanner(projectRoot, logger);
-  await scanner.scan();
-
-  const record = scanner.getPackage(slug);
-  if (!record) {
+  const record = await resolveProjectPackageInstance(projectId, slug);
+  if (!record?.packageRoot || !canAccessScope(record.ownerScope ?? { kind: 'project' }, access.session, 'write')) {
     return NextResponse.json(
       { error: `Package "${slug}" not found in project "${projectId}"` },
       { status: 404 },

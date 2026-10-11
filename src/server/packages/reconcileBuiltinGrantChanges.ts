@@ -27,11 +27,12 @@
  * Data, config values and credentials stay on removal: they are user data, and
  * the CLI printed how to delete them.
  *
- * Cost: one `stat` per boot when no record exists; with records, one read of a
- * file bounded by the operator's pending `pkg add`/`remove` count, one project
- * list and one producer write per project per applied record, once.
+ * Cost: two reads per boot (the removal proof before the runtime boots, the
+ * reconcile after) of a file bounded by the pending `pkg add`/`remove` count — ENOENT
+ * when none; one project list and one producer write per project per applied record, once.
  */
 
+import { parsePackageInstanceId } from '@neuralis/package-system/contracts';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { providedFeatureIds } from '@neuralis/package-system';
@@ -69,16 +70,20 @@ export function applyGrantsPatch(
   if (project.appliedPackageGrants?.[packageId] === version) return null;
 
   let updated = false;
+  const added: Record<string, string[]> = {};
   const roles = { ...project.roles };
   for (const [roleName, features] of Object.entries(grants)) {
     const role = roles[roleName];
     if (!role || !canReceive(roleName, role)) continue;
     const existing = new Set(role.grantedFeatures);
+    const packageOrigin = new Set(Object.values(project.packageGrantFeatures ?? {}).flatMap((claims) => claims[roleName] ?? []));
     let roleChanged = false;
     for (const feature of features) {
       if (feature === '*' || !providedFeatures.has(feature)) continue;
+      if (existing.has(feature) && packageOrigin.has(feature)) (added[roleName] ??= []).push(feature);
       if (!existing.has(feature)) {
         existing.add(feature);
+        (added[roleName] ??= []).push(feature);
         roleChanged = true;
       }
     }
@@ -91,6 +96,7 @@ export function applyGrantsPatch(
   return {
     ...(updated ? { roles } : {}),
     appliedPackageGrants: { ...project.appliedPackageGrants, [packageId]: version },
+    ...(parsePackageInstanceId(packageId) ? { packageGrantFeatures: { ...project.packageGrantFeatures, [packageId]: added } } : {}),
   };
 }
 
@@ -120,7 +126,9 @@ export function revokeGrantsPatch(
     // path back. Keyed on resolved PRIORITY, mirroring the migration's own
     // apex skip (P4), so it is name-free and covers a custom priority-1 role.
     if (rolePriority(roleName, role.priority) <= BUILTIN_ROLE_PRIORITY.owner) continue;
-    const next = role.grantedFeatures.filter((f) => !revoke.has(f));
+    const owned = parsePackageInstanceId(packageId) ? new Set(project.packageGrantFeatures?.[packageId]?.[roleName] ?? []) : revoke;
+    const siblingClaims = new Set(Object.entries(project.packageGrantFeatures ?? {}).filter(([id]) => id !== packageId).flatMap(([, claims]) => claims[roleName] ?? []));
+    const next = role.grantedFeatures.filter((f) => !(revoke.has(f) && owned.has(f) && !siblingClaims.has(f)));
     if (next.length !== role.grantedFeatures.length) {
       roles[roleName] = { ...role, grantedFeatures: next };
       updated = true;
@@ -131,8 +139,11 @@ export function revokeGrantsPatch(
   const hadMarker = packageId in appliedPackageGrants;
   delete appliedPackageGrants[packageId];
 
-  if (!updated && !hadMarker) return null;
-  return { ...(updated ? { roles } : {}), appliedPackageGrants };
+  const packageGrantFeatures = { ...project.packageGrantFeatures };
+  const hadFeatures = packageId in packageGrantFeatures;
+  delete packageGrantFeatures[packageId];
+  if (!updated && !hadMarker && !hadFeatures) return null;
+  return { ...(updated ? { roles } : {}), appliedPackageGrants, ...(hadFeatures ? { packageGrantFeatures } : {}) };
 }
 
 /** The record file, relative to the app root (`~/.neuralis/app`). */
@@ -177,6 +188,26 @@ function parseRecords(text: string): { removals: BuiltinRemovalRecord[]; additio
       )
     : [];
   return { removals, additions };
+}
+
+/**
+ * The removal PROOF the runtime prunes per-agent overrides by: the ids of the
+ * `removals[]` records this boot applies (package still absent from the deps).
+ * Read before the runtime boots, because `reconcileBuiltinGrantChanges` drops
+ * the record after it applies it. No record, or an unreadable one, proves nothing.
+ */
+export async function readBuiltinRemovalProof(appRoot: string, builtinIds: ReadonlySet<string>): Promise<string[]> {
+  let text: string;
+  try {
+    text = await readFile(join(appRoot, BUILTIN_GRANT_CHANGES_FILE), 'utf-8');
+  } catch {
+    return [];
+  }
+  try {
+    return [...new Set(parseRecords(text).removals.map((r) => r.packageId).filter((id) => !builtinIds.has(id)))];
+  } catch {
+    return [];
+  }
 }
 
 export async function reconcileBuiltinGrantChanges(deps: Deps): Promise<void> {

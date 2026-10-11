@@ -182,7 +182,7 @@ export const HOST_CONFIG_SETTINGS: PackageConfigSetting[] = [
     key: 'dataCheckpointKeep',
     label: 'Data Checkpoints Kept',
     description:
-      'How many control-plane checkpoints to keep under <NEURALIS_HOME>/checkpoints/. One is taken automatically, at boot, before a stored data format is raised to what a newer build writes; restoring one (`pnpm neuralis:checkpoint restore <id>`, app stopped) is how an operator goes back to the previous build. Older ones are pruned when a new one is taken. Read at boot.',
+      'Retention count for control-plane checkpoints under <NEURALIS_HOME>/checkpoints/; restoring one (`npx neuralis checkpoint restore <id>`, app stopped) is how an operator goes back to the previous build. The running app takes no checkpoint: a stored data format is raised only by `npx neuralis upgrade --apply`, which takes its own before it writes and then prunes the checkpoints to this count.',
     type: 'number',
     default: 5,
     min: 1,

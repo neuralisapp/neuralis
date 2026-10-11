@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Inbox } from 'lucide-react';
+import { ChevronRight, Inbox } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { getWidgetDefinition } from '../widgets/registry';
@@ -182,7 +182,8 @@ export function NotificationPopover({
 /**
  * One notification: a 3 px tone rail, the title (named after the work), the
  * time and `×N` when repeats were merged into it. The rail fades once read.
- * Shared by the popover and the inbox.
+ * A row that opens something (`nav`) ends in a chevron — the Inbox group
+ * header's chevron, sized and toned alike. Shared by the popover and the inbox.
  */
 export function NotificationRowButton({
   row, faded, onOpen,
@@ -216,6 +217,13 @@ export function NotificationRowButton({
           {row.count > 1 ? <span className="rounded px-1 bg-white/[0.08] text-white/55 tabular-nums">×{row.count}</span> : null}
         </span>
       </span>
+      {opens ? (
+        <ChevronRight
+          data-notification-opens=""
+          className="w-3.5 h-3.5 shrink-0 self-center text-white/45 group-hover:text-white transition-colors"
+          aria-hidden="true"
+        />
+      ) : null}
     </button>
   );
 }

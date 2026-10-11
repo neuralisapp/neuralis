@@ -9,10 +9,10 @@
  * in `bootstrap.ts`.
  */
 
-import type { CredentialResolver } from '@neuralis/package-system/contracts';
+import type { CredentialResolver, CredentialTier } from '@neuralis/package-system/contracts';
 import type { SuppliedScope } from '@neuralis/package-system/access';
 import { isSafePathSegment } from '@neuralis/package-system/paths';
-import { AGENT_SCOPE_PREFIX, GLOBAL_SCOPE, UNRESOLVED_AGENT_DIR, USER_SCOPE_PREFIX } from '../store/CredentialStore';
+import { AGENT_SCOPE_PREFIX, GLOBAL_SCOPE, USER_SCOPE_PREFIX } from '../store/CredentialStore';
 
 /**
  * An id that names a store directory. The store REFUSES anything else by throwing
@@ -54,22 +54,27 @@ export function buildCredentialResolver(): CredentialResolver {
       // project-scope override keeps beating a user-scope value. The agent tier
       // needs BOTH ids: an agent slug is per-project, so an agent id alone
       // names no directory.
+      //
+      // `scope.tiers` is the caller's ceiling: absent = the whole cascade, `[]` =
+      // nothing (undefined), otherwise only the listed tiers — the global read
+      // included, so a ceiling below global can never fall through to it.
+      const allowed = (tier: CredentialTier): boolean => !scope?.tiers || scope.tiers.includes(tier);
       const { getCredentialStore } = await import('../store/credentialStoreInstance');
       const store = getCredentialStore();
       const projectId = projectTierId(scope?.projectId) ? scope.projectId : undefined;
-      if (projectId && projectId !== UNRESOLVED_AGENT_DIR && locatable(scope?.agentId)) {
+      if (allowed('agent') && projectId && locatable(scope?.agentId)) {
         const value = await store.readAgent(projectId, scope.agentId, id);
         if (value) return value;
       }
-      if (projectId) {
+      if (allowed('project') && projectId) {
         const value = await store.read(projectId, id);
         if (value) return value;
       }
-      if (locatable(scope?.userId)) {
+      if (allowed('user') && locatable(scope?.userId)) {
         const value = await store.readUser(scope.userId, id);
         if (value) return value;
       }
-      return store.readGlobal(id);
+      return allowed('global') ? store.readGlobal(id) : undefined;
     },
     async resolveForKind(_kind, _scope) {
       // Channel-shaped credential bundles are resolved per-connection from the

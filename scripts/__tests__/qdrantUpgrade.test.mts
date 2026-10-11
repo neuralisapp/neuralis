@@ -216,6 +216,7 @@ function setup(opts: SetupOpts = {}) {
   const ctx: UpgradeContext = {
     neuralisHome: home,
     neuralisDir: home,
+    packageDir: home,
     composeProject: 'neuralis',
     apiKey: KEY,
     from: opts.stateVersion ?? '1.13.6',

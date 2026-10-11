@@ -29,7 +29,7 @@ vi.mock('../../config/env', () => ({
 // fixture, not its subject — the id choice is.
 vi.mock('../../projects/projectInit', () => ({ initProjectDirectory: vi.fn() }));
 
-const { updateProject, getProjectById, createProject, markProjectIdPurged, ProjectUpdateError } = await import('../ProjectStore');
+const { updateProject, getProjectById, createProject, markProjectIdPurged, ProjectUpdateError, removeDeletedPackageReferences } = await import('../ProjectStore');
 const { updateUser } = await import('../UserStore');
 import type { ProjectRecord } from '../projectTypes';
 
@@ -59,7 +59,7 @@ function seedRecord(id: string, over: Partial<ProjectRecord> = {}): ProjectRecor
     },
     agentOwnership: {},
     limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} } },
-    roleGrantVersion: 18,
+    roleGrantVersion: 19,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...over,
@@ -155,10 +155,10 @@ describe('updateProject — the PRODUCER form is atomic per record', () => {
   });
 
   it('(e) getAndMigrate\'s put-on-READ cannot overwrite a concurrent write', async () => {
-    // An OLD roleGrantVersion makes `getProjectById` persist (that is the
-    // put-on-read). Before the fix it wrote the record it had read BEFORE the
-    // update, so the update\'s field disappeared.
-    await seed('migrate-race', { roleGrantVersion: 1 } as Partial<ProjectRecord>);
+    // An UNSEEDED record (what setup writes) makes `getProjectById` persist the
+    // seed (that is the put-on-read). Before the fix it wrote the record it had
+    // read BEFORE the update, so the update\'s field disappeared.
+    await seed('migrate-race', { roles: {}, roleGrantVersion: undefined } as Partial<ProjectRecord>);
     await Promise.all([
       getProjectById('migrate-race'),
       updateProject('migrate-race', () => ({ description: 'written-during-migration' })),
@@ -310,12 +310,43 @@ describe('a record from a NEWER build, and limits keys this build does not know'
     expect((await readOnDisk('p-newer')).roleGrantVersion).toBe(99);
   });
 
-  it('PAIRED CONTROL — the same legacy record at this build\'s version IS migrated and writable', async () => {
-    await seed('p-current', { roleGrantVersion: 18, limits: { daily: { projectTotal: 3 } } as never });
+  it('PAIRED CONTROL — the same record at this build\'s version is read WITHOUT conversion and stays writable', async () => {
+    await seed('p-current', { roleGrantVersion: 19, limits: { daily: { projectTotal: 3 } } as never });
+    const before = await readFile(join(appRoot, 'projects', 'p-current.json'), 'utf-8');
     await getProjectById('p-current');
-    const migrated = (await readOnDisk('p-current')) as unknown as { limits: Record<string, unknown>; roleGrantVersion: number };
-    expect(migrated.limits.daily).toBeUndefined();
-    expect(migrated.roleGrantVersion).toBeGreaterThan(18);
+    expect(await readFile(join(appRoot, 'projects', 'p-current.json'), 'utf-8')).toBe(before);
     await expect(updateProject('p-current', { name: 'renamed' })).resolves.toMatchObject({ name: 'renamed' });
   });
+});
+
+
+describe('confirmed package deletion', () => {
+  it('clears only the deleted instance from all maps, preserving sibling/manual grants and idempotent bytes', async () => {
+    const gone = 'packages://gone?project=identity-delete&scope=project';
+    const sibling = 'packages://sibling?project=identity-delete&scope=project';
+    await seed('identity-delete', { packageTrust: { [gone]: 'trusted', [sibling]: 'trusted' }, packageAccessFeature: { [gone]: 'gate', [sibling]: 'gate' }, appliedPackageGrants: { [gone]: '1', [sibling]: '1' } });
+    await removeDeletedPackageReferences('identity-delete', gone, new Set());
+    const first = await readFile(join(appRoot, 'projects', 'identity-delete.json'), 'utf-8');
+    const record = JSON.parse(first);
+    expect(record.packageTrust).toEqual({ [sibling]: 'trusted' });
+    expect(record.packageAccessFeature).toEqual({ [sibling]: 'gate' });
+    expect(record.appliedPackageGrants).toEqual({ [sibling]: '1' });
+    await removeDeletedPackageReferences('identity-delete', gone, new Set());
+    expect(await readFile(join(appRoot, 'projects', 'identity-delete.json'), 'utf-8')).toBe(first);
+  });
+});
+
+it('a human removal then manual re-add drops the automatic claim before package removal', async () => {
+  const id = 'packages://auto?project=identity-manual&scope=project';
+  const roles = { member: { agents: 'own' as const, canInvite: false, canManageRoles: false, grantedFeatures: ['x'], priority: 20 }, owner: { agents: '*' as const, canInvite: true, canManageRoles: true, grantedFeatures: ['*'], priority: 1 } };
+  await seed('identity-manual', { roles, appliedPackageGrants: { [id]: '1' }, packageGrantFeatures: { [id]: { member: ['x'] } } });
+  await updateProject('identity-manual', (current) => ({ roles: { ...current.roles, member: { ...current.roles.member, grantedFeatures: [] } } }));
+  await updateProject('identity-manual', (current) => ({ roles: { ...current.roles, member: { ...current.roles.member, grantedFeatures: ['x'] } } }));
+  await removeDeletedPackageReferences('identity-manual', id, new Set(['x']));
+  expect((await readOnDisk('identity-manual')).roles.member.grantedFeatures).toEqual(['x']);
+});
+
+it('rejects caller-supplied package grant provenance in a project patch', async () => {
+  const { parseProjectPatch } = await import('../../projects/access');
+  expect(parseProjectPatch({ packageGrantFeatures: {} })).toEqual({ error: 'Unsupported project patch field: packageGrantFeatures', privileged: false });
 });

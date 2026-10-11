@@ -23,6 +23,11 @@ const fileStoreDouble = {
   }),
 };
 
+// A per-run root: the real data-format claim writes its ledger under `appRoot`, and a
+// FIXED path keeps that ledger across runs — a later build's format raise then reads
+// as "stored data predates this build" on every machine that ran the suite before.
+const TEST_ROOT = vi.hoisted(() => `/tmp/nrs-${process.pid}-${Math.random().toString(36).slice(2)}`);
+
 vi.mock('../FileStore', () => ({
   FileStore: class {
     constructor() {
@@ -32,7 +37,7 @@ vi.mock('../FileStore', () => ({
 }));
 
 vi.mock('../../config/env', () => ({
-  getEnv: () => ({ appRoot: '/tmp/appRoot', projectsRoot: '/tmp/projectsRoot' }),
+  getEnv: () => ({ appRoot: `${TEST_ROOT}/appRoot`, projectsRoot: `${TEST_ROOT}/projectsRoot` }),
 }));
 
 import {

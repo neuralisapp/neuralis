@@ -23,6 +23,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { feedPrivateScopeRecord, npmrcProblems, planLocalSources, sha256Text } from '../build/build-workspace.mjs';
+import { spell } from '../cli/spelling.mts';
 
 export type ComposeEmitInput = {
   /** Compose project name — prefixes volumes, networks and container names. */
@@ -88,16 +89,23 @@ export type ComposeEmitInput = {
    */
   imageTag: string | null;
   /**
-   * What the monorepo build is handed beside its context (`resolveBuildInputs`):
+   * What a build is handed beside its context (`resolveBuildInputs`):
    * one named context per local package source (`localpkg<slot>`, overriding the
    * Dockerfile's empty stage of that name), the build-state folder (the exported
    * build lock, used when it fits the tracked lock, and the private-scope record),
    * and the operator's `.npmrc` as a BuildKit secret — a path,
-   * never its content. Ignored on the image channels, which never build.
+   * never its content. On an image channel they feed the derived image only.
    */
   build: BuildInputs;
   /**
-   * Host-access plane (native-nightjar). When the operator has provisioned the
+   * The npm install folder's derived image (`planOperatorImage`): its operator
+   * packages over `neuralisapp/neuralis:<imageTag>`, built from a generated
+   * context beside this file. `null` — no operator package, or not an install
+   * folder — keeps the plain `image:` line.
+   */
+  operatorImage: OperatorImage | null;
+  /**
+   * Host-access plane. When the operator has provisioned the
    * broker, compose bind-mounts its runtime directory (Unix socket + secret)
    * read-only into the app container. THIS BIND IS THE REAL GATE: no in-app
    * role can add a mount or start a host unit, so an attacker who flips every
@@ -139,7 +147,7 @@ export function resolveBuildInputs(params: {
 }): BuildInputs {
   const errors: string[] = [];
   const hostManifest = JSON.parse(readFileSync(join(params.hostDir, 'package.json'), 'utf-8')) as unknown;
-  const plan = planLocalSources(hostManifest, params.hostDir, { existsSync, statSync, realpathSync });
+  const plan = planLocalSources(hostManifest, params.hostDir, { existsSync, statSync, realpathSync }, spell);
   errors.push(...plan.errors);
 
   let npmrcFile: string | null = null;
@@ -205,6 +213,89 @@ export function communityImage(tag: string): string {
   return `neuralisapp/neuralis:${tag}`;
 }
 
+/** The derived image's generated build context, beside docker-compose.yml. */
+export const OPERATOR_IMAGE_DIR = 'operator-image';
+
+/**
+ * The operator packages of an npm install folder — every dependency line of its
+ * `package.json` but `neuralis` itself (`{}` when it registers none) — or `null`
+ * when the manifest is no install folder (the host package itself: the monorepo
+ * member, a public clone, the image's own `/neuralis`).
+ */
+export function operatorDependencies(manifest: unknown): Record<string, string> | null {
+  const m = manifest as { name?: unknown; dependencies?: Record<string, unknown> } | null;
+  const deps = m?.dependencies;
+  if (!deps || typeof deps.neuralis !== 'string' || m?.name === 'neuralis') return null;
+  return Object.fromEntries(
+    Object.entries(deps)
+      .filter((entry): entry is [string, string] => entry[0] !== 'neuralis' && typeof entry[1] === 'string')
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
+
+export type OperatorImage = {
+  /**
+   * `neuralis-<project>:<release tag>-<hash of the context>` — a new operator
+   * set or release is a new name, so a stale derived image is visibly stale in
+   * `docker images`, and an unchanged one builds from cache.
+   */
+  name: string;
+  /** The generated build context directory. */
+  contextDir: string;
+  /** Its files, name → text: the Dockerfile, `operator.json`, the build helper. */
+  files: Readonly<Record<string, string>>;
+};
+
+/**
+ * The derived image of an npm install folder: the release image this install
+ * runs, plus the packages its own validated `package.json` registers — nothing
+ * else (never an env list). The Dockerfile names one stage per local source
+ * slot (`build.localSources`, the same slots and named contexts as the
+ * monorepo build) and the private-scope record; one layer, as root, runs the
+ * build helper's `operator-install` with a build-tools layer for native
+ * dependencies and the `.npmrc` as a BuildKit secret. `null` when the folder
+ * registers no operator package: then there is nothing to build.
+ */
+export function planOperatorImage(p: {
+  installManifest: unknown;
+  contextDir: string;
+  composeProject: string;
+  imageTag: string;
+  build: BuildInputs;
+  /** `scripts/build/build-workspace.mjs` of the installed host package — copied, never generated; read only when there is an image to build. */
+  readBuildHelper: () => string;
+}): OperatorImage | null {
+  const deps = operatorDependencies(p.installManifest);
+  if (!deps || Object.keys(deps).length === 0) return null;
+  const slots = p.build.localSources.map((s) => s.slot);
+  const lock = p.build.buildLockDir !== null;
+  const dockerfile = [
+    '# syntax=docker/dockerfile:1',
+    '# GENERATED by `neuralis setup --compose-only` — do not hand-edit; `neuralis rebuild`',
+    '# regenerates and builds it. The release image this install runs, plus the operator',
+    "# packages its package.json registers (operator.json), installed by the build helper's",
+    '# operator-install into /neuralis/_operator and linked into /neuralis/node_modules.',
+    `FROM ${communityImage(p.imageTag)} AS release`,
+    ...slots.map((s) => `FROM scratch AS localpkg${s}`),
+    ...(lock ? ['FROM scratch AS buildlock'] : []),
+    'FROM release',
+    'USER root',
+    'COPY operator.json build-workspace.mjs /tmp/operator/',
+    ...slots.map((s) => `COPY --from=localpkg${s} / /tmp/operator/slots/${s}/`),
+    ...(lock ? ['COPY --from=buildlock / /tmp/operator/buildlock/'] : []),
+    'RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \\',
+    '    apk add --no-cache --virtual .operator-build python3 make g++ && \\',
+    '    node /tmp/operator/build-workspace.mjs operator-install /tmp/operator /neuralis /root/.npmrc && \\',
+    '    apk del .operator-build && rm -rf /tmp/operator /root/.npm /root/.cache',
+    'USER nextjs',
+    '',
+  ].join('\n');
+  const operatorJson = `${JSON.stringify({ dependencies: deps }, null, 2)}\n`;
+  const files = { Dockerfile: dockerfile, 'operator.json': operatorJson, 'build-workspace.mjs': p.readBuildHelper() };
+  const hash = sha256Text(Object.entries(files).map(([name, text]) => `${name}\0${text}`).join('\0')).slice(0, 12);
+  return { name: `neuralis-${p.composeProject}:${p.imageTag}-${hash}`, contextDir: p.contextDir, files };
+}
+
 /**
  * Rewrites a loopback URL into a form the neuralis container can reach when
  * running in docker. Setup runs from the host shell where `127.0.0.1` points
@@ -223,17 +314,51 @@ export function hostReachableUrl(url: string, mode: 'native' | 'docker'): string
     .replace(/^(https?:\/\/)localhost(?=[:/]|$)/i, '$1host.docker.internal');
 }
 
+/**
+ * A build block's inputs: one named context per local package source and the
+ * build-state folder, each overriding the Dockerfile stage of its name, and the
+ * `.npmrc` secret — shared by the monorepo build and the derived image.
+ */
+function buildInputLines(build: BuildInputs): string[] {
+  const lines: string[] = [];
+  const contexts = [
+    ...build.localSources.map((s) => [`localpkg${s.slot}`, s.contextDir, s.name] as const),
+    ...(build.buildLockDir ? [['buildlock', build.buildLockDir, 'the exported build lock + private-scope record'] as const] : []),
+  ];
+  if (contexts.length > 0) {
+    lines.push(
+      '      # Local package sources (file: dependencies of package.json) and the',
+      '      # build-state folder, each overriding the Dockerfile stage of its name.',
+      '      additional_contexts:',
+      ...contexts.map(([key, dir, what]) => `        ${key}: ${JSON.stringify(dir)} # ${what}`),
+    );
+  }
+  if (build.npmrcFile) {
+    lines.push(
+      '      # The private-registry .npmrc, mounted for the install steps only —',
+      '      # a BuildKit secret, never a layer (.env NEURALIS_BUILD_NPMRC).',
+      '      secrets:',
+      '        - npmrc',
+      '      # A registry on THIS machine is reached from the build the way the app',
+      '      # reaches host services: http://host.docker.internal:<port> in the .npmrc.',
+      '      extra_hosts:',
+      '        - "host.docker.internal:host-gateway"',
+    );
+  }
+  return lines;
+}
+
 export function buildComposeContent(input: ComposeEmitInput, stamp: { date: string; version: string }): string {
   const m = input.machine;
   const lines: string[] = [
-    `# GENERATED by pnpm neuralis:setup (${stamp.date}, neuralis ${stamp.version}) — do not hand-edit.`,
-    '# Re-run setup (or `pnpm neuralis:setup --compose-only`) to regenerate after',
+    `# GENERATED by neuralis setup (${stamp.date}, neuralis ${stamp.version}) — do not hand-edit.`,
+    '# Re-run setup (or `neuralis setup --compose-only`) to regenerate after',
     '# changing .env or topology. Values are emitted concrete on purpose: this file',
     '# is machine-specific and gitignored; .env holds the setup inputs. The kept',
     '# interpolations are NEXTAUTH_SECRET and QDRANT_API_KEY — both secrets live in',
-    '# .env, never here — and the build args `pnpm neuralis:rebuild` sets per build.',
+    '# .env, never here — and the build args `neuralis rebuild` sets per build.',
     '# Machine-local mounts + the --neuralis overlay live in docker-compose.override.yml',
-    '# (written by `pnpm neuralis:mount`, auto-merged by Compose — survives updates).',
+    '# (written by `neuralis mount`, auto-merged by Compose — survives updates).',
     '',
     '# Explicit project name: the file location is channel-dependent; without this a',
     '# directory move would re-prefix the named volumes and orphan qdrant-data.',
@@ -250,38 +375,26 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
       '      context: ..',
       '      dockerfile: neuralis/Dockerfile',
       '      # Version + commit shown in the admin environment table and the image',
-      '      # labels. Cosmetic: `pnpm neuralis:rebuild` sets both per build.',
+      '      # labels. Cosmetic: `neuralis rebuild` sets both per build.',
       '      args:',
       '        NEURALIS_VERSION: ${NEURALIS_VERSION:-0.0.0-dev}',
       '        NEURALIS_REVISION: ${NEURALIS_REVISION:-unknown}',
     );
-    const contexts = [
-      ...input.build.localSources.map((s) => [`localpkg${s.slot}`, s.contextDir, s.name] as const),
-      ...(input.build.buildLockDir ? [['buildlock', input.build.buildLockDir, 'the exported build lock + private-scope record'] as const] : []),
-    ];
-    if (contexts.length > 0) {
-      lines.push(
-        '      # Local package sources (file: dependencies of neuralis/package.json) and',
-        '      # the exported build lock, each overriding the Dockerfile stage of its name.',
-        '      additional_contexts:',
-        ...contexts.map(([key, dir, what]) => `        ${key}: ${JSON.stringify(dir)} # ${what}`),
-      );
-    }
-    if (input.build.npmrcFile) {
-      lines.push(
-        '      # The private-registry .npmrc, mounted for the install/deploy steps only —',
-        '      # a BuildKit secret, never a layer (.env NEURALIS_BUILD_NPMRC).',
-        '      secrets:',
-        '        - npmrc',
-        '      # A registry on THIS machine is reached from the build the way the app',
-        '      # reaches host services: http://host.docker.internal:<port> in the .npmrc.',
-        '      extra_hosts:',
-        '        - "host.docker.internal:host-gateway"',
-      );
-    }
+    lines.push(...buildInputLines(input.build));
   } else {
     if (!input.imageTag) throw new Error('image-channel compose needs the recorded NEURALIS_IMAGE_TAG; none was resolved.');
-    lines.push(`    image: ${communityImage(input.imageTag)}`);
+    if (input.operatorImage) {
+      lines.push(
+        '    # The operator packages of package.json over the release image — the',
+        `    # generated ${OPERATOR_IMAGE_DIR}/ context; \`neuralis rebuild\` builds it.`,
+        '    build:',
+        `      context: ${JSON.stringify(input.operatorImage.contextDir)}`,
+        ...buildInputLines(input.build),
+        `    image: ${input.operatorImage.name}`,
+      );
+    } else {
+      lines.push(`    image: ${communityImage(input.imageTag)}`);
+    }
   }
 
   lines.push(`    user: "${input.uid}:${input.gid}"`);
@@ -331,6 +444,10 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '    volumes:',
     `      - ${input.neuralisHome}/app:/.neuralis/app`,
     `      - ${input.neuralisHome}/projects:/.neuralis/projects`,
+    '      # Checkpoints (boot-time format raises, `upgrade --apply`, a restore) are',
+    '      # the way back one build: on the host, never in the writable layer a',
+    '      # recreate or `run --rm` discards.',
+    `      - ${input.neuralisHome}/checkpoints:/.neuralis/checkpoints`,
     '      # machine-core: host Docker socket so MachineSessionManager can spawn',
     '      # per-user Webtop containers. Remove to disable the machine widget.',
     '      - /var/run/docker.sock:/var/run/docker.sock',
@@ -338,7 +455,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
 
   if (input.hostBroker.enabled) {
     lines.push(
-      '      # native-nightjar host plane — mount the broker runtime DIRECTORY',
+      '      # The host-access plane — mount the broker runtime DIRECTORY',
       '      # read-only. A broker restart may replace the socket inode; mounting',
       '      # only the socket file would leave the container bound to a stale one.',
       '      # Removing this bind disables the plane; no app role can recreate it.',
@@ -372,7 +489,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '      # paths back to host paths for vectors and UI.',
     `      - NEURALIS_HOST_HOME=${input.neuralisHome}`,
     `      - NEXTAUTH_URL=${input.nextAuthUrl}`,
-    '      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?Run pnpm neuralis:setup first}',
+    '      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?Run neuralis setup first}',
     `      - BRAIN_INFRA_MODE=${input.brainInfraMode}`,
     '      # 1 = colour-coded, uri-aware line per meaningful Qdrant vector op to',
     "      # this container log (writes + searches; scroll suppressed). 'all' adds",
@@ -453,7 +570,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
       '  # The image is the version the storage of THIS install is on, digest-',
       '  # pinned (recorded in <NEURALIS_HOME>/qdrant-version.json). Qdrant',
       '  # storage is forward-only and upgrades one minor at a time, so never',
-      '  # edit this line: `pnpm neuralis:qdrant-upgrade` walks every minor with',
+      '  # edit this line: `neuralis qdrant-upgrade` walks every minor with',
       '  # a cold backup and a rollback, then regenerates this file.',
       '  # Recovery is that backup, never `down -v` (that deletes the',
       '  # qdrant-data volume and every embedding with it — re-embedding is the',
@@ -478,7 +595,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
       '      # Server-side API key: EVERY request must carry it (only /healthz,',
       '      # /readyz, /livez, / and the dashboard statics are exempt upstream).',
       '      # The value stays in .env — the compose file never carries a secret.',
-      '      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Run pnpm neuralis:setup (the key lives in .env)}',
+      '      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Run neuralis setup (the key lives in .env)}',
       '      # On-prem: no phone-home. Qdrant reports anonymous usage upstream',
       '      # unless told not to.',
       '      - QDRANT__TELEMETRY_DISABLED=true',
@@ -564,7 +681,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     lines.push('', 'volumes:', ...volumeLines);
   }
 
-  if (input.monorepo && input.build.npmrcFile) {
+  if ((input.monorepo || input.operatorImage) && input.build.npmrcFile) {
     lines.push('', 'secrets:', '  npmrc:', `    file: ${JSON.stringify(input.build.npmrcFile)}`);
   }
 

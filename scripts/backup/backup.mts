@@ -26,6 +26,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { assertVolumeIdle, checkDisk, coldTar, mustExec, restoreTar, volumeBytes, type Exec } from '../qdrant-upgrade/upgrade.mts';
 import type { ComposeAnswer } from '../checkpoint.mts';
 import { qdrantVolumeName } from '../setup/qdrantVersion.mts';
+import { spell } from '../cli/spelling.mts';
 
 export type QdrantMode = 'docker' | 'binary' | 'external' | 'skip';
 export type OfflineVerdict = { offline: true } | { offline: false; reason: string };
@@ -36,7 +37,7 @@ export type BackupPorts = {
   freeBytes: (dir: string) => Promise<number>;
   now: () => Date;
   monotonicMs: () => number;
-  /** `docker compose ps --status running --services` in a folder (`composeProbe`, checkpoint.mts). */
+  /** The folder's app + vector store and what runs (`readComposeStack`, host-broker/helper.mts — the one reader). */
   composeRunning: (cwd: string) => Promise<ComposeAnswer>;
   /** The app is not running (port + compose — `checkOffline`, checkpoint.mts). */
   appOffline: () => Promise<OfflineVerdict>;
@@ -153,8 +154,7 @@ export async function runBackup(ports: BackupPorts, facts: InstallFacts, opts: B
   await checkDisk(ports, total, existingAncestor(dir), 1, 'the backup');
 
   const compose = await ports.composeRunning(facts.configDir);
-  const running = compose.kind === 'services' ? compose.running : [];
-  const stop = ['neuralis', 'qdrant'].filter((s) => running.includes(s));
+  const stop = compose.kind === 'services' ? [compose.app, compose.vectorstore].filter((s): s is string => s !== null && compose.running.includes(s)) : [];
   const parts: BackupPart[] = [];
   try {
     for (const service of stop) await mustExec(ports, ['compose', 'stop', service], `stop ${service}`, { cwd: facts.configDir });
@@ -394,7 +394,7 @@ export async function runRestore(ports: BackupPorts, facts: InstallFacts, opts: 
 
   if (live) {
     // The restored .env names the image tag the backup was taken on, so the compose file is regenerated in every case.
-    ports.log('next: `pnpm neuralis:setup --compose-only`, then `docker compose up -d -V`');
+    ports.log(`next: \`${spell('setup --compose-only')}\`, then \`docker compose up -d -V\``);
   } else {
     ports.log(`the backup's .env and override stay in ${dir} — this target is not the live install`);
   }

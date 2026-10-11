@@ -43,7 +43,7 @@ paths (`.next/`, `public/`, `required-server-files.json`) resolve under
 deployed package. `_runtime/build/` holds the image build's report: `validate.json`
 (the builtins the build refused — the boot reads it), `ui-compat.json` and, when
 local packages were built, the lock they resolved to (both read by
-`pnpm neuralis:rebuild` only).
+`npx neuralis rebuild` only).
 
 `node_modules/` deliberately lives at `/neuralis/node_modules/` (NOT inside
 `_runtime/`) so skills/tooling that reference
@@ -71,7 +71,7 @@ folder/tarball    judge the tree (bindings, overrides, UI,                      
 **One workspace for every package.** The platform's own packages, a folder registered
 with `--path`, a tarball registered with `--tarball` and a registry version all go through
 the same pnpm install and the same `pnpm deploy`, and land in the runner as real
-directories at `node_modules/<name>` — any scope or none. `pnpm neuralis:rebuild`
+directories at `node_modules/<name>` — any scope or none. `npx neuralis rebuild`
 regenerates the compose first, which hands each registered folder or tarball to the build
 as a named context (at most eight). A folder becomes a workspace member and is built like
 a platform package (its `build`, then its UI module when it declares one); a tarball is
@@ -97,7 +97,7 @@ against this host, and judges every package with the runtime's own admission che
 a set, for two packages claiming one service, OAuth prefix or configuration key. A package
 this build built (platform or folder) that fails fails the build; a registry package that
 fails is refused, named, recorded in `_runtime/build/validate.json`, and the platform starts
-without it. `pnpm neuralis:rebuild` prints every refusal.
+without it. `npx neuralis rebuild` prints every refusal.
 
 ## The two-gate rule
 
@@ -138,7 +138,7 @@ need nothing.
 The virtual desktop image is built separately and a host rebuild does **not** touch it;
 its build command lives in its Dockerfile header, and a change to it is invisible until
 that image is rebuilt and its sessions respawned. The MCP sidecar image is also a separate
-image, but `pnpm neuralis:rebuild` builds it after a green app build whenever it is missing
+image, but `npx neuralis rebuild` builds it after a green app build whenever it is missing
 or its source-hash label differs from its directory; running sidecars keep the old shim
 until they are reaped and re-ensured.
 

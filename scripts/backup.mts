@@ -7,10 +7,11 @@
 
 import { existsSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { appPort, checkOffline, composeProbe, httpProbe } from './checkpoint.mts';
+import type { CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import { detectIsClone, loadHostEnv, resolveConfigDir } from './setup/detect.mts';
 import { readEnvFile } from './setup/envFile.mts';
 import { askLine } from './setup/ownerCheck.mts';
@@ -26,12 +27,12 @@ import {
   type QdrantMode,
 } from './backup/backup.mts';
 
-const HELP = `pnpm neuralis:backup [options]            stop the app + Qdrant, copy the install, start them again
+const HELP = `${spell('backup [options]')}            stop the app + Qdrant, copy the install, start them again
   --out <dir>                 where the backup goes (default: <home>-backups/<time>, beside the home)
   --include-volume <name>     also copy this Docker volume (repeatable): <project>_qdrant-snapshots,
                               a neuralis-machine-* desktop profile, <project>_ollama-data
-pnpm neuralis:backup list                 the complete backups under the default folder, newest first
-pnpm neuralis:restore <dir> [options]     put a backup back (the app must be stopped; asks to confirm)
+${spell('backup list')}                 the complete backups under the default folder, newest first
+${spell('restore <dir> [options]')}     put a backup back (the app must be stopped; asks to confirm)
   --home <dir>                restore the home there instead of the live one (a throwaway target)
   --volume <name>             restore the Qdrant volume into this one (required with --home)
 
@@ -43,9 +44,6 @@ volume is saved to <home>.before-restore-<volume>.tar before it is replaced; .en
 override move to *.before-restore. An earlier rescue copy in any of those places is refused, never
 overwritten. A backup fails (no manifest, the stopped services started again) when tar reports a file
 that changed while it was read — stop whatever still writes under the home and run it again.`;
-
-/** neuralis/ — the compose cwd (never `-f`). */
-const neuralisDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 type Args =
   | { command: 'backup'; out: string | null; include: string[] }
@@ -72,13 +70,14 @@ function parseArgs(argv: string[], cwd: string): Args {
   if (command === 'backup') return { command, out: path(one('--out')), include: values.get('--include-volume') ?? [] };
   if (command === 'list') return { command };
   if (command === 'restore') {
-    if (!operand) throw new Error('restore needs the backup directory: pnpm neuralis:restore <dir>');
+    if (!operand) throw new Error(`restore needs the backup directory: ${spell('restore <dir>')}`);
     return { command, dir: resolve(cwd, operand), home: path(one('--home')), volume: one('--volume') };
   }
   throw new Error(`Unknown command ${command}.\n${HELP}`);
 }
 
-async function facts(): Promise<InstallFacts> {
+/** `installDir` — the compose cwd (never `-f`). */
+async function facts(neuralisDir: string): Promise<InstallFacts> {
   const neuralisHome = resolveNeuralisHome().home;
   const isClone = await detectIsClone(neuralisDir);
   const configDir = resolveConfigDir({ isClone, projectRoot: neuralisDir, neuralisHome }, null);
@@ -88,7 +87,7 @@ async function facts(): Promise<InstallFacts> {
   let toolImage: string | null = null;
   if (qdrantMode === 'docker') {
     const state = await readQdrantState(qdrantStatePath(neuralisHome));
-    if (!state) throw new Error(`${qdrantStatePath(neuralisHome)} is missing — run \`pnpm neuralis:setup --compose-only\` first.`);
+    if (!state) throw new Error(`${qdrantStatePath(neuralisHome)} is missing — run \`${spell('setup --compose-only')}\` first.`);
     toolImage = qdrantImageRef(state.version);
   }
   // The monorepo image build's context is the repo root (`build: context: ..`).
@@ -115,17 +114,16 @@ function ports(install: InstallFacts, qdrantUrl: string): BackupPorts {
   };
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(HELP);
-    return;
+    return 0;
   }
-  // pnpm runs the script in neuralis/; a relative path means the folder the operator typed it in.
-  const args = parseArgs(argv, process.env.INIT_CWD ?? process.cwd());
+  // A relative path means the folder the operator typed the command in.
+  const args = parseArgs(argv, ctx.cwd);
   // The app port and NEURALIS_HOME the probes and paths use come from the deployment's .env.
-  await loadHostEnv(neuralisDir);
-  const install = await facts();
+  await loadHostEnv(ctx.installDir);
+  const install = await facts(ctx.installDir);
   if (args.command === 'list') {
     const root = defaultBackupRoot(install.neuralisHome);
     const found = await listBackups(root);
@@ -134,19 +132,15 @@ async function main(): Promise<void> {
       const bytes = manifest.parts.reduce((sum, p) => sum + p.bytes, 0);
       console.log(`  ${dir}  ${manifest.createdAt}  ${(bytes / 1e6).toFixed(1)} MB  ${manifest.parts.map((p) => p.kind).join(', ')}`);
     }
-    return;
+    return 0;
   }
   const env = await readEnvFile(install.configDir);
   const p = ports(install, env.QDRANT_URL?.trim() || 'http://localhost:6333');
   if (args.command === 'backup') {
     await runBackup(p, install, { outDir: args.out, includeVolumes: args.include });
     console.log('  Keep this folder private: it holds the session secret, the Qdrant key and the credential master key.');
-    return;
+    return 0;
   }
   await runRestore(p, install, { dir: args.dir, home: args.home, volume: args.volume });
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`\n  ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-});

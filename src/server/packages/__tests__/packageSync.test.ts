@@ -28,10 +28,15 @@ const h = vi.hoisted(() => ({
   projectsRoot: '',
   sources: new Map<string, { dir: string; scope: Record<string, string> }>(),
   trust: new Map<string, Record<string, string>>(),
+  deletions: [] as Array<{ projectId: string; packageId: string }>,
   updates: [] as Array<{ id: string; patch: unknown }>,
   log: [] as Array<{ level: string; msg: string; meta?: Record<string, unknown> }>,
   core: null as unknown,
   onLog: null as null | ((msg: string, meta?: Record<string, unknown>) => void),
+  /** The source-roots provider's change subscribers, its listing calls, and a gate that holds a listing. */
+  listeners: new Set<(projectId: string) => void>(),
+  listCalls: [] as string[],
+  gate: null as Promise<void> | null,
 }));
 
 function mkLogger(prefix: string): Record<string, unknown> {
@@ -52,6 +57,12 @@ vi.mock('../../config/env', () => ({ getEnv: () => ({ projectsRoot: h.projectsRo
 vi.mock('../../logging/setup', () => ({ getLogger: () => mkLogger('[host] ') }));
 vi.mock('../../store/ProjectStore', () => ({
   getProjectById: async (id: string) => ({ id, roles: {}, packageTrust: h.trust.get(id) ?? {} }),
+  removeDeletedPackageReferences: async (projectId: string, packageId: string) => {
+    h.deletions.push({ projectId, packageId });
+    const trust = { ...h.trust.get(projectId) };
+    delete trust[packageId];
+    h.trust.set(projectId, trust);
+  },
   updateProject: async (id: string, producer: (current: unknown) => unknown) => {
     h.updates.push({
       id,
@@ -71,11 +82,14 @@ vi.mock('../../projects/access', async (importOriginal) => ({
 import { PackageRegistry } from '@neuralis/package-system';
 import type { PackageDefinition, RuntimeLoaderPort, RuntimePackageStatus } from '@neuralis/package-system/contracts';
 import { getFsWatchHub } from '@neuralis/package-system/data';
-import { ensureProjectPackagesLoaded, resetProjectPackageActivation } from '../projectPackages';
+import { ensureProjectPackagesLoaded, resetProjectPackageActivation, resolveProjectPackageInstance, listAllActivatedPackages } from '../projectPackages';
 import { rescanProjectPackages } from '../rescanProjectPackages';
 import { getPackageRuntimeManager } from '../PackageRuntimeManager';
-import { getProjectPackageScanner, getScannerForDir } from '../ProjectPackageScanner';
+import { getProjectPackageScanner, getScannerForDir, ProjectPackageScanner } from '../ProjectPackageScanner';
 import { toResolvedRecord } from '../packageRecords';
+import { packageInstanceId } from '@neuralis/package-system/contracts';
+
+const packageInstanceIdFor = (originUri: string, pid: string): string => packageInstanceId({ originUri, projectId: pid, scope: { kind: 'project' } });
 
 /** The loader surface the sync calls, with the real loader's two hazards (see the header). */
 class FakeLoader implements RuntimeLoaderPort {
@@ -198,7 +212,7 @@ function reloadsOf(spy: { mock: { calls: unknown[][] } }, id: string): number {
 }
 
 function projectId(dir: string, pid: string): string {
-  return toResolvedRecord(getScannerForDir(dir).listPackages()[0]!, pid, { kind: 'project' }).packageId;
+  return toResolvedRecord(getScannerForDir(dir).listPackages()[0]!, pid, { kind: 'project' }, { directory: dir, uriRoot: dir.endsWith('_packages') ? 'packages://' : 'testpackages://' }).packageId;
 }
 
 beforeAll(async () => {
@@ -216,7 +230,9 @@ beforeAll(async () => {
         'package-source-roots',
         {
           listPackageSourceRoots: async (pid: string) => {
+            h.listCalls.push(pid);
             const src = h.sources.get(pid);
+            if (h.gate) await h.gate;
             return src
               ? [{
                   slug: 'testpackages', uriRoot: 'testpackages://', containerRoot: src.dir,
@@ -224,11 +240,28 @@ beforeAll(async () => {
                 }]
               : [];
           },
+          subscribePackageSourceRoots: (listener: (projectId: string) => void) => {
+            h.listeners.add(listener);
+            return () => { h.listeners.delete(listener); };
+          },
         },
       ],
     ]),
   };
 });
+
+/** What brain-core does after a source-config commit for `pid`. */
+function sourceChanged(pid: string): void {
+  for (const listener of h.listeners) listener(pid);
+}
+
+async function until(predicate: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 beforeEach(() => {
   h.updates.length = 0;
@@ -258,6 +291,25 @@ describe('a rescan syncs EVERY scanner of the project', () => {
   });
 });
 
+describe('a directory name no instance URI can carry', () => {
+  it('is skipped and named while its valid sibling loads in the same sync', async () => {
+    const pid = 'bad-name';
+    const drops = path.join(h.projectsRoot, pid, '_packages');
+    await writePkg(path.join(drops, 'good-a'), 'good-a', 'node');
+    await writePkg(path.join(drops, 'bad?name'), 'bad-name-pkg', 'node');
+    await ensureProjectPackagesLoaded(pid);
+    const good = packageInstanceIdFor('packages://good-a', pid);
+    expect(loader.isLoaded(good)).toBe(true);
+    expect(getPackageRuntimeManager().getProjectPackageIds(pid).has(good)).toBe(true);
+    expect(listAllActivatedPackages(pid).map((row) => row.packageId)).toEqual([good]);
+    expect(h.log.some((row) => row.msg.includes('refused during sync') && row.meta?.packageId === 'bad-name-pkg')).toBe(true);
+    const result = await rescanProjectPackages('u1', pid);
+    expect(result.scanned).toBe(2);
+    expect(result.packageErrors?.map((e) => e.packageId)).toEqual(['bad-name-pkg']);
+    expect(loader.isLoaded(good)).toBe(true);
+  });
+});
+
 describe('a sync reloads only what changed on disk', () => {
   it('an unchanged rescan reloads nothing (declarative AND wasm)', async () => {
     const pid = 'unchanged';
@@ -279,7 +331,7 @@ describe('a sync reloads only what changed on disk', () => {
     const mgr = getPackageRuntimeManager();
     for (let i = 0; i < 3; i++) {
       await scanner.rescan();
-      const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }));
+      const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
       expect((await mgr.syncProjectPackagesToRuntime(pid, records)).errors).toEqual([]);
     }
     expect(reload).not.toHaveBeenCalled();
@@ -336,7 +388,7 @@ describe('a sync reloads only what changed on disk', () => {
     await writePkg(path.join(h.projectsRoot, pid, '_packages', 'esc-a'), 'esc-a', 'node');
     await ensureProjectPackagesLoaded(pid);
     const id = projectId(path.join(h.projectsRoot, pid, '_packages'), pid);
-    h.trust.set(pid, { 'esc-a': 'trusted' });
+    h.trust.set(pid, { [id]: 'trusted' });
     const reload = vi.spyOn(loader, 'reload');
     await rescanProjectPackages('u1', pid);
     expect(reloadsOf(reload, id)).toBe(0);
@@ -355,7 +407,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(src, pid);
     await editDescription(path.join(src, 'hello-r2'), 'changed');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
     const mgr = getPackageRuntimeManager();
     const [a, b] = await Promise.all([
       mgr.syncProjectPackagesToRuntime(pid, records),
@@ -375,7 +427,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(src, pid);
     await editDescription(path.join(src, 'hello-r2'), 'changed');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
     const mgr = getPackageRuntimeManager();
     let second: ReturnType<typeof mgr.syncProjectPackagesToRuntime> | null = null;
     h.onLog = (msg, meta) => {
@@ -399,7 +451,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(drops, pid);
     await editDescription(path.join(drops, 'b-pkg'), 'rebuilt');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
     const mgr = getPackageRuntimeManager();
     const reload = vi.spyOn(loader, 'reload');
     let queued: ReturnType<typeof mgr.syncProjectPackagesToRuntime> | null = null;
@@ -408,7 +460,7 @@ describe('syncs and project reloads run one at a time per project', () => {
         queued = mgr.syncProjectPackagesToRuntime(pid, records);
       }
     };
-    await mgr.reloadProjectPackage(pid, 'b-pkg');
+    await mgr.reloadProjectPackage(pid, id);
     expect(queued).not.toBeNull();
     const after = await (queued as unknown as ReturnType<typeof mgr.syncProjectPackagesToRuntime>);
     expect(after.errors).toEqual([]);
@@ -428,6 +480,89 @@ describe('syncs and project reloads run one at a time per project', () => {
     await rescanProjectPackages('u1', pid);
     await settle();
     expect(loader.isLoaded(id)).toBe(true);
+  });
+});
+
+describe('a source change after activation re-derives the flagged roots', () => {
+  it('a flagged source attached after activation loads without clear-cache; unflagging drops it and its listener', async () => {
+    const pid = 'late-attach';
+    await writePkg(path.join(h.projectsRoot, pid, '_packages', 'drop-a'), 'drop-a', 'node');
+    await ensureProjectPackagesLoaded(pid);
+    const src = path.join(tmp, 'mounts', 'testpackages-late-attach');
+    await writePkg(path.join(src, 'late-src'), 'late-src', 'node');
+    const srcId = packageInstanceIdFor('testpackages://late-src', pid);
+    expect(loader.isLoaded(srcId)).toBe(false);
+
+    h.sources.set(pid, { dir: src, scope: { kind: 'project' } });
+    sourceChanged(pid);
+    await until(() => loader.isLoaded(srcId));
+    expect(getPackageRuntimeManager().getProjectPackageIds(pid).has(srcId)).toBe(true);
+    expect(getScannerForDir(src).listenerCount).toBe(1);
+
+    h.sources.delete(pid);
+    sourceChanged(pid);
+    await until(() => !loader.isLoaded(srcId));
+    expect(loader.isLoaded(packageInstanceIdFor('packages://drop-a', pid))).toBe(true);
+    expect(getScannerForDir(src).listenerCount).toBe(0);
+  });
+
+  it('an unchanged flagged set costs one listing and zero scans; a project never activated costs nothing', async () => {
+    const pid = 'unchanged-set';
+    const src = path.join(tmp, 'mounts', 'testpackages-unchanged-set');
+    h.sources.set(pid, { dir: src, scope: { kind: 'project' } });
+    await writePkg(path.join(src, 'kept'), 'kept', 'node');
+    await ensureProjectPackagesLoaded(pid);
+    const scans = vi.spyOn(ProjectPackageScanner.prototype, 'scan');
+    const listed = h.listCalls.length;
+    sourceChanged(pid);
+    await until(() => h.listCalls.length === listed + 1);
+    await settle(100);
+    expect(scans).not.toHaveBeenCalled();
+    sourceChanged('never-activated');
+    await settle(100);
+    expect(h.listCalls.length).toBe(listed + 1);
+    scans.mockRestore();
+  });
+
+  it('a commit landing while the project is still activating is applied after the activation', async () => {
+    const pid = 'mid-activation';
+    await writePkg(path.join(h.projectsRoot, pid, '_packages', 'drop-a'), 'drop-a', 'node');
+    const src = path.join(tmp, 'mounts', 'testpackages-mid-activation');
+    await writePkg(path.join(src, 'late-src'), 'late-src', 'node');
+    const srcId = packageInstanceIdFor('testpackages://late-src', pid);
+    let open!: () => void;
+    h.gate = new Promise<void>((resolve) => { open = resolve; });
+    const activation = ensureProjectPackagesLoaded(pid);
+    await until(() => h.listCalls.includes(pid)); // the activation read the list before the source existed
+    h.sources.set(pid, { dir: src, scope: { kind: 'project' } });
+    sourceChanged(pid);
+    h.gate = null;
+    open();
+    await activation;
+    await until(() => loader.isLoaded(srcId));
+  });
+
+  it('a directory shared by two projects holds ONE hub watcher and reloads BOTH projects on a change', async () => {
+    const owner = 'shared-owner';
+    const guest = 'shared-guest';
+    const shared = path.join(h.projectsRoot, owner, '_packages');
+    await writePkg(path.join(shared, 'shared-pkg'), 'shared-pkg', 'node');
+    h.sources.set(guest, { dir: shared, scope: { kind: 'project' } });
+    const acquire = vi.spyOn(getFsWatchHub(), 'acquire');
+    await ensureProjectPackagesLoaded(owner);
+    await ensureProjectPackagesLoaded(guest);
+    const ownerId = packageInstanceIdFor('packages://shared-pkg', owner);
+    const guestId = packageInstanceIdFor('testpackages://shared-pkg', guest);
+    expect(loader.isLoaded(ownerId)).toBe(true);
+    expect(loader.isLoaded(guestId)).toBe(true);
+    expect(acquire.mock.calls.filter((c) => c[0] === shared)).toHaveLength(1);
+    expect(getScannerForDir(shared).listenerCount).toBe(2);
+    acquire.mockRestore();
+
+    const reload = vi.spyOn(loader, 'reload');
+    await editDescription(path.join(shared, 'shared-pkg'), 'edited on disk');
+    await until(() => reloadsOf(reload, ownerId) > 0 && reloadsOf(reload, guestId) > 0);
+    reload.mockRestore();
   });
 });
 
@@ -505,4 +640,46 @@ describe('default role grants — project scope only', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]!.patch).toMatchObject({ roles: { member: { grantedFeatures: ['g.use'] } } });
   });
+});
+
+it('exact source/path instance preserves owning scope and trust; invalid/missing mount is not deletion, reachable child absence is', async () => {
+  const pid = 'exact-evidence';
+  const source = path.join(tmp, 'mounts', 'exact-evidence');
+  const drops = path.join(h.projectsRoot, pid, '_packages');
+  const scope = { kind: 'user', userId: 'alice' };
+  h.sources.set(pid, { dir: source, scope });
+  await writePkg(path.join(drops, 'same-folder'), 'same-name', 'node');
+  await writePkg(path.join(source, 'same-folder'), 'same-name', 'node');
+  await ensureProjectPackagesLoaded(pid);
+  const localId = 'packages://same-folder?project=exact-evidence&scope=project';
+  const sourceId = 'testpackages://same-folder?project=exact-evidence&scope=user&user=alice';
+  h.trust.set(pid, { [localId]: 'trusted' });
+  expect((await resolveProjectPackageInstance(pid, localId))?.definition.access?.trust).toBe('trusted');
+  const resolved = await resolveProjectPackageInstance(pid, sourceId);
+  expect(resolved?.definition.access?.trust).toBe('untrusted');
+  expect(resolved?.ownerScope).toEqual(scope);
+  expect(resolved?.packageRoot).toBe(path.join(source, 'same-folder'));
+  expect(await resolveProjectPackageInstance('foreign', sourceId)).toBeNull();
+  expect(listAllActivatedPackages(pid).map((record) => record.packageId).sort()).toEqual([localId, sourceId].sort());
+  expect(listAllActivatedPackages('foreign')).toEqual([]);
+  await getPackageRuntimeManager().reloadProjectPackage(pid, sourceId);
+  expect(loader.getStatus(sourceId)?.packageRoot).toBe(path.join(source, 'same-folder'));
+  h.trust.set(pid, { [sourceId]: 'trusted' });
+  const deletionStart = h.deletions.length;
+  await fs.writeFile(path.join(source, 'same-folder', 'package.json'), JSON.stringify({ neuralis: { id: 'bad://authored' } }));
+  await rescanProjectPackages('u1', pid);
+  expect(loader.isLoaded(sourceId)).toBe(false);
+  expect(h.deletions.length).toBe(deletionStart);
+  expect(h.trust.get(pid)?.[sourceId]).toBe('trusted');
+  await fs.rename(source, `${source}-offline`);
+  await rescanProjectPackages('u1', pid);
+  expect(h.deletions.length).toBe(deletionStart);
+  await fs.rename(`${source}-offline`, source);
+  await fs.rm(path.join(source, 'same-folder'), { recursive: true });
+  await rescanProjectPackages('u1', pid);
+  expect(h.deletions.slice(deletionStart)).toContainEqual({ projectId: pid, packageId: sourceId });
+  expect(h.trust.get(pid)?.[sourceId]).toBeUndefined();
+  await writePkg(path.join(source, 'same-folder'), 'same-name', 'node');
+  await rescanProjectPackages('u1', pid);
+  expect(loader.getStatus(sourceId)?.definition.access?.trust).toBe('untrusted');
 });

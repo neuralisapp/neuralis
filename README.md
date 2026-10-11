@@ -22,10 +22,10 @@ Shared projects do not imply simultaneous writes to one conversation or a highly
 
 The host supplies sign-in, project membership, roles, limits, the workspace shell and generic package routing. The product capabilities belong to packages:
 
-- **[Agent core](https://docs.neuralisapp.com/docs/agent-core)** runs agents across multiple model providers, with durable conversations, skills, delegation, approvals, workflows, scheduling, messaging channels and the terminal. Agents can use external MCP servers, and authorized external clients can reach their tools through MCP.
-- **[Brain core](https://docs.neuralisapp.com/docs/brain-core)** provides the shared URI-addressed filesystem and searchable vector memory. Connectors bring sources into that filesystem, with scope and path policies governing what each caller can read or change.
-- **[Admin](https://docs.neuralisapp.com/docs/admin)** provides project and platform administration: members, roles, credentials, configuration, usage, audit and health. Its server-side gates govern every action, including actions initiated outside its interface.
-- **[Machine core](https://docs.neuralisapp.com/docs/machine-core)** provides a Linux virtual desktop that people can view and authorized agents can drive through browser and desktop automation. Machines require a Docker engine and have their own grants and isolation boundaries.
+- **[Agent core](https://docs.neuralisapp.com/agent-core)** runs agents across multiple model providers, with durable conversations, skills, delegation, approvals, workflows, scheduling, messaging channels and the terminal. Agents can use external MCP servers, and authorized external clients can reach their tools through MCP.
+- **[Brain core](https://docs.neuralisapp.com/brain-core)** provides the shared URI-addressed filesystem, memory and search. Indexing, text search and source-discovered skills work without an embedding model or embedding API costs; an optional model adds semantic search. Connectors bring sources into the filesystem, with scope and path policies governing what each caller can read or change.
+- **[Admin](https://docs.neuralisapp.com/admin)** provides project and platform administration: members, roles, credentials, configuration, usage, audit and health. Its server-side gates govern every action, including actions initiated outside its interface.
+- **[Machine core](https://docs.neuralisapp.com/machine-core)** provides a Linux virtual desktop that people can view and authorized agents can drive through browser and desktop automation. Machines require a Docker engine and have their own grants and isolation boundaries.
 
 These packages share a contract without putting their business logic into the host.
 
@@ -35,7 +35,7 @@ A package declares what it contributes: skills, instructions, rules, agents, wor
 
 Packages reach an installation in three ways. Administrators can install real packages as host dependencies; these run with first-party trust and must be vetted like other dependencies. Project packages can be dropped into a project's `_packages/` directory, with code confined to the WebAssembly sandbox. Markdown source packages are discovered directly in synced sources, without a separate installation step.
 
-[Agent Skills](https://docs.neuralisapp.com/docs/package-system/skills) and recognized Claude Code, Cursor, Codex, Gemini and Copilot markdown conventions can join the same scoped catalog. This imports supported content, not entire foreign runtimes: hooks and MCP server definitions from those layouts are not loaded. The protocol is designed to connect an ecosystem of capabilities while keeping the installing host responsible for trust.
+[Agent Skills](https://docs.neuralisapp.com/package-system/skills) and recognized Claude Code, Cursor, Codex, Gemini and Copilot markdown conventions can join the same scoped catalog. This imports supported content, not entire foreign runtimes: hooks and MCP server definitions from those layouts are not loaded. The protocol is designed to connect an ecosystem of capabilities while keeping the installing host responsible for trust.
 
 ## Knowledge that stays connected to its source
 
@@ -53,17 +53,17 @@ Neuralis is intended for organizations running on their own machines, on-premise
 
 Requests from people, agents, scheduled workflows, skill scripts and external MCP clients pass the same deny-by-default boundaries. Identity, project membership, feature grants, package trust and path policies each have a role. Audit records make sensitive actions inspectable.
 
-Today sign-in uses email and password; OIDC and SAML single sign-on are not available. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane requires explicit operator provisioning and should be restricted to a trusted operator's machine. Review the [security model](https://docs.neuralisapp.com/docs/enterprise/security-model) and [deployment guide](https://docs.neuralisapp.com/docs/enterprise/deployment) before choosing a topology.
+Today sign-in uses email and password; OIDC and SAML single sign-on are not available. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane requires explicit operator provisioning and should be restricted to a trusted operator's machine. Review the [security model](https://docs.neuralisapp.com/enterprise/security-model) and [deployment guide](https://docs.neuralisapp.com/enterprise/deployment) before choosing a topology.
 
 ## Start with a deployment that fits
 
-The Neuralis 0.1.0 beta is available through `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a validated, history-free public host repository snapshot. Review the beta maturity and platform limits before choosing a deployment. The [installation guide](https://docs.neuralisapp.com/docs/getting-started/installation) describes prerequisites and platform limits. The setup wizard creates installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Native Linux terminal support needs Python, make and a C++ compiler.
+The Neuralis 0.2.0 beta is available through `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a validated, history-free public host repository snapshot. Review the beta maturity and platform limits before choosing a deployment. The [installation guide](https://docs.neuralisapp.com/getting-started/installation) describes prerequisites and platform limits. `npm create neuralis` makes an install folder that is an ordinary npm project depending on one exact `neuralis` release, with every operator command as `npx neuralis <command>`; `npx neuralis update` moves the folder, the image tag and the companion images to a published release line together. The setup wizard creates installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Native Linux terminal support needs Python, make and a C++ compiler.
 
-Continue with [first run](https://docs.neuralisapp.com/docs/getting-started/first-run), the [workspace guide](https://docs.neuralisapp.com/docs/getting-started/workspace) and [package authoring](https://docs.neuralisapp.com/docs/package-system). Operator procedures live in the shipped operations skill; public source-domain READMEs explain the [workspace package bridge](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/packages), [widget lifecycle](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/widgets), [server package runtime](https://github.com/neuralisapp/neuralis/tree/main/src/server/packages) and [package API](https://github.com/neuralisapp/neuralis/tree/main/src/app/api/packages). Documentation is also available as [agent-readable text](https://docs.neuralisapp.com/llms.txt).
+Continue with [first run](https://docs.neuralisapp.com/getting-started/first-run), the [workspace guide](https://docs.neuralisapp.com/getting-started/workspace) and [package authoring](https://docs.neuralisapp.com/package-system). Operator procedures live in the shipped operations skill; public source-domain READMEs explain the [workspace package bridge](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/packages), [widget lifecycle](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/widgets), [server package runtime](https://github.com/neuralisapp/neuralis/tree/main/src/server/packages) and [package API](https://github.com/neuralisapp/neuralis/tree/main/src/app/api/packages). Documentation is also available as [agent-readable text](https://docs.neuralisapp.com/llms.txt).
 
 ## Maturity
 
-As of 2026-10-06. Scores measure development against documented promises and plans; labels also reflect recorded live use, CI and availability. See the [maturity method](https://docs.neuralisapp.com/docs/getting-started/maturity).
+As of 2026-10-09. Scores measure development against documented promises and plans; labels also reflect recorded live use, CI and availability. See the [maturity method](https://docs.neuralisapp.com/getting-started/maturity).
 
 | Subject | Level | Score | Main limitation |
 |---|---|---|---|
@@ -73,12 +73,12 @@ As of 2026-10-06. Scores measure development against documented promises and pla
 | Admin | stable | 85 | Admin adds no agent tools or slash commands; agents reach administration through its skills and the routes they wrap. |
 | Machine core | stable | 90 | Machines need access to a Docker engine; without one the platform runs with no machines. |
 | Host (neuralis) | stable | 90 | Sign-in is email and password; single sign-on (OIDC, SAML) is not available. |
-| Install channels | beta | 70 | The 0.1.0 beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded. |
+| Install channels | beta | 70 | The 0.2.0 beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded. |
 | Platform: Linux | experimental | 85 | No run on a standalone Linux host is recorded; the live-tested setup is Docker on WSL2. |
 | Platform: Windows with WSL2 | stable | 90 | Use an in-distro Docker engine; with Docker Desktop the host broker needs its loopback TCP fallback. |
 | Platform: macOS | experimental | 35 | Neuralis has not been run on macOS so far. |
 | Platform: Windows (native) | experimental | 35 | Neuralis has not been run on native Windows so far. |
-| Enterprise security and governance | stable | 85 | Give the host access plane only to a single trusted operator's machine. |
+| Enterprise security and governance | stable | 90 | Give the host access plane only to a single trusted operator's machine. |
 | Sign-in | stable | 85 | Single sign-on (OIDC, SAML) is not available; sign-in is email and password. |
 | MCP | stable | 85 | Keep the MCP port private unless remote MCP clients are intended. |
 | Workflows and scheduling | beta | 75 | Workflows run in a single process; a second replica would run every schedule twice. |
@@ -88,4 +88,4 @@ As of 2026-10-06. Scores measure development against documented promises and pla
 
 ## License
 
-Neuralis uses FSL-1.1-ALv2, with each version converting to Apache-2.0 two years after release. The package-system contract layer is Apache-2.0. See [licensing](https://docs.neuralisapp.com/docs/enterprise/licensing) for terms and the distinction between the platform and packages you build against its contract.
+Neuralis uses FSL-1.1-ALv2, with each version converting to Apache-2.0 two years after release. The package-system contract layer is Apache-2.0. See [licensing](https://docs.neuralisapp.com/enterprise/licensing) for terms and the distinction between the platform and packages you build against its contract.

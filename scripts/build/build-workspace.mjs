@@ -19,7 +19,13 @@
  * - the HOST (`scripts/setup/compose.mts` via `setup.mts --compose-only`, which
  *   `pnpm neuralis:rebuild` re-runs before every build; `pkg.mts`) plans the
  *   sources and validates them before anything is written;
- * - the BUILDER (`neuralis/Dockerfile`) runs the subcommands below with bare node.
+ * - the BUILDER (`neuralis/Dockerfile`, and an npm install folder's derived image
+ *   for `operator-install`) runs the subcommands below with bare node.
+ *
+ * Plain ESM, so the host's command spelling (`scripts/cli/spelling.mts`) is
+ * not importable here: a message the builder prints names the neutral
+ * `neuralis <verb>`, and the one host-side planner, `planLocalSources`, takes
+ * the host's spelling as an argument.
  *
  * Layout inside the build: every directory source is a workspace MEMBER at
  * `/src/local/<dir-name>/` (the 12.x `pnpm deploy` refuses any lock path outside
@@ -45,6 +51,7 @@
  *   validate <deploy-root> <kernel-root> <host-manifest> <lock> <out-file>
  *   release-age-excludes <npmrc>           the private scopes' minimumReleaseAge exclusions
  *   overrides <pnpm-workspace.yaml> <deploy-root>
+ *   operator-install <ctx-dir> <host-root> <npmrc>  the derived image's operator packages (`operatorInstall`)
  */
 
 import { spawnSync } from 'node:child_process';
@@ -61,6 +68,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -81,7 +89,7 @@ export const LOCAL_TGZ_DIR = 'local-tgz';
  * nothing).
  */
 const DROPPED_DIRS = new Set(['node_modules', '.git', '.pnpm-store', 'dist', '.next', '.test-dist']);
-const isDropped = (name) => DROPPED_DIRS.has(name) || name.endsWith('.tsbuildinfo');
+export const isDropped = (name) => DROPPED_DIRS.has(name) || name.endsWith('.tsbuildinfo');
 
 /** Dependency maps whose `file:`/`link:` specs must resolve inside the build. */
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
@@ -116,16 +124,17 @@ export function listLocalSources(hostManifest) {
 /**
  * Plan the named contexts for the host manifest at `hostDir`: one slot per local
  * source, in `listLocalSources` order. Every problem is collected, so one run
- * names them all.
+ * names them all. `spell` is how the host prints a verb (`spell` in
+ * scripts/cli/spelling.mts); without one, the neutral `neuralis <verb>`.
  */
-export function planLocalSources(hostManifest, hostDir, fs = { existsSync, statSync, realpathSync }) {
+export function planLocalSources(hostManifest, hostDir, fs = { existsSync, statSync, realpathSync }, spell = (verb) => `neuralis ${verb}`) {
   const sources = [];
   const errors = [];
   const listed = listLocalSources(hostManifest);
   if (listed.length > LOCAL_SOURCE_SLOTS) {
     errors.push(
       `${listed.length} local packages are registered, the build takes at most ${LOCAL_SOURCE_SLOTS} ` +
-        `(neuralis/Dockerfile localpkg0…localpkg${LOCAL_SOURCE_SLOTS - 1}) — remove one with pnpm neuralis:pkg remove <name>`,
+        `(neuralis/Dockerfile localpkg0…localpkg${LOCAL_SOURCE_SLOTS - 1}) — remove one with ${spell('pkg remove <name>')}`,
     );
   }
   const seenDirNames = new Map();
@@ -138,7 +147,7 @@ export function planLocalSources(hostManifest, hostDir, fs = { existsSync, statS
     if (!fs.existsSync(hostPath)) {
       errors.push(
         `${source.name}: Could not install from "${hostPath}" as it does not exist ` +
-          `(${source.spec} in neuralis/package.json) — restore it, or run: pnpm neuralis:pkg remove ${source.name}`,
+          `(${source.spec} in the install folder's package.json) — restore it, or run: ${spell(`pkg remove ${source.name}`)}`,
       );
       return;
     }
@@ -198,7 +207,7 @@ export function prepareLocalManifest(manifest, ctx) {
       problems.push(
         `${ctx.name}: ${field}["${dep}"] = "${spec}" points outside the package and at no registered local ` +
           `package — the platform packages arrive as peerDependencies (the build workspace provides them); ` +
-          `register a sibling with pnpm neuralis:pkg add --path, or depend on it through a registry`,
+          `register a sibling with neuralis pkg add --path, or depend on it through a registry`,
       );
     }
   }
@@ -587,6 +596,19 @@ export function sha256Text(text) {
   return createHash('sha256').update(text).digest('hex');
 }
 
+/**
+ * One `"name": "spec"` line inserted at the top of a manifest's `dependencies`
+ * object, as TEXT: a parse → stringify round trip would reflow the whole file,
+ * and `pkg remove` restores the previous bytes by deleting exactly that line.
+ */
+export function insertDependencyLine(content, name, spec) {
+  const match = content.match(/^([ \t]*)"dependencies"\s*:\s*\{\s*\n([ \t]*)/m);
+  if (!match) throw new Error('Could not locate the "dependencies" object in package.json');
+  const indent = match[2];
+  const insertAt = match.index + match[0].length - indent.length;
+  return `${content.slice(0, insertAt)}${indent}${JSON.stringify(name)}: ${JSON.stringify(spec)},\n${content.slice(insertAt)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Builder subcommands
 // ---------------------------------------------------------------------------
@@ -664,7 +686,7 @@ function stage(wsDir, slotsDir, outDir) {
     const hasContext = existsSync(slotDir) && readdirSync(slotDir).length > 0;
     if (!hasContext) {
       problems.push(
-        `${source.name}: the build received no context for ${source.spec} — run pnpm neuralis:rebuild ` +
+        `${source.name}: the build received no context for ${source.spec} — run neuralis rebuild ` +
           '(it regenerates the compose build contexts before building)',
       );
       return;
@@ -946,7 +968,7 @@ function scopeRoutes(buildlockDir, trackedPath, wsRoot, npmrcPath) {
   if (unrouted.length === 0) return;
   console.error('[build-workspace] a private scope has no registry route — pnpm would ask the PUBLIC registry for it, so nothing is resolved:');
   for (const u of unrouted) console.error(`  - ${describeUnroutedScope(u)}`);
-  console.error('  Or remove the package that needs it: pnpm neuralis:pkg remove <name>');
+  console.error('  Or remove the package that needs it: neuralis pkg remove <name>');
   if (unrouted.some((u) => record.has(u.scope))) console.error(`  A recorded scope that is public now: delete its entry from <NEURALIS_HOME>/build/${PRIVATE_SCOPES_FILE} (the record never forgets one by itself).`);
   process.exit(1);
 }
@@ -957,27 +979,183 @@ function exportLock(lockPath, trackedPath, outDir) {
   writeFileSync(join(outDir, 'tracked-lock.sha256'), `${sha256Text(readFileSync(trackedPath, 'utf8'))}\n`);
 }
 
-function run(cmd, args) {
-  const res = spawnSync(cmd, args, { stdio: 'inherit' });
+function run(cmd, args, cwd = process.cwd()) {
+  const res = spawnSync(cmd, args, { stdio: 'inherit', cwd });
   if (res.status !== 0) process.exit(res.status ?? 1);
 }
 
 /**
- * Build the workspace member in cwd: its `build` script, then — when it declares
+ * Build the package in `cwd`: its `build` script, then — when it declares
  * `neuralis.app.module` — its UI module through the kernel CLI by NODE PATH. The
  * `neuralis-build` bin link is created at install time, before the kernel's
- * dist exists, so it is never there to call.
+ * dist exists, so it is never there to call. The script runs through the
+ * package manager that installed the folder: pnpm for a workspace member, npm
+ * for an operator folder — pnpm would re-resolve an npm-installed folder from
+ * the registry before running anything.
  */
-function buildPackage(kernelRoot) {
-  const manifest = readJson('package.json');
-  if (typeof manifest.scripts?.build === 'string') run('pnpm', ['run', 'build']);
+function buildPackage(kernelRoot, cwd = process.cwd(), runCommand = run, packageManager = 'pnpm') {
+  const manifest = readJson(join(cwd, 'package.json'));
+  if (typeof manifest.scripts?.build === 'string') runCommand(packageManager, ['run', 'build'], cwd);
   if (manifest.neuralis?.app?.module) {
     if (typeof manifest.scripts?.['build:ui'] !== 'string') {
       console.error(`[build-workspace] ${manifest.name} declares neuralis.app.module but no "build:ui" script`);
       process.exit(1);
     }
-    run('node', [join(kernelRoot, 'dist', 'src', 'cli', 'neuralis-build.js'), 'ui', '.']);
+    runCommand('node', [join(kernelRoot, 'dist', 'src', 'cli', 'neuralis-build.js'), 'ui', '.'], cwd);
   }
+}
+
+// ---------------------------------------------------------------------------
+// The operator image (the npm install folder's derived image)
+// ---------------------------------------------------------------------------
+
+/** Where the derived image installs the operator packages — a root of its own, never the image's. */
+export const OPERATOR_ROOT = '_operator';
+
+/**
+ * The one-day release-age floor of the tracked `pnpm-workspace.yaml`
+ * (`minimumReleaseAge: 1440` minutes), in npm's unit; a drift test holds the two equal.
+ */
+export const OPERATOR_RELEASE_AGE_DAYS = 1;
+
+/** sha256 of every `@neuralis/*` manifest under `<hostRoot>/node_modules` — the image's own packages. */
+export function neuralisManifestDigests(hostRoot) {
+  const scope = join(hostRoot, 'node_modules', '@neuralis');
+  const out = new Map();
+  if (!existsSync(scope)) return out;
+  for (const name of readdirSync(scope).sort()) {
+    const file = join(scope, name, 'package.json');
+    if (existsSync(file)) out.set(`@neuralis/${name}`, createHash('sha256').update(readFileSync(file)).digest('hex'));
+  }
+  return out;
+}
+
+/** The package names an `npm error path …/node_modules/<name>/…` log line names, de-duplicated. */
+export function failedInstallNames(log) {
+  const names = new Set();
+  for (const m of log.matchAll(/^npm error path \S*\/node_modules\/((?:@[^/\s]+\/)?[^/\s]+)/gm)) names.add(m[1]);
+  return [...names];
+}
+
+/**
+ * THE OPERATOR INSTALL — one layer of the derived image an npm install folder
+ * runs (`planOperatorImage`, scripts/setup/compose.mts, writes its Dockerfile
+ * and copies this file beside it). `<ctxDir>/operator.json` carries the folder's
+ * own dependency lines but `neuralis`, verbatim — the list `pkg add` validated —
+ * and `<ctxDir>/slots/<n>/` each local source (`listLocalSources` order, the same
+ * slots as the image build). They install into `<hostRoot>/_operator`, a root of
+ * their own: an npm install inside the image's root, which has no lockfile, would
+ * re-resolve the deployed tree. Each is then linked at `<hostRoot>/node_modules/<name>`
+ * (the `--pkg` bind target, `packageBindTarget`) and its line added to the host
+ * manifest discovery reads. Peers are never installed and a second copy of an
+ * image `@neuralis/*` package is refused, so the parent walk
+ * `_operator/node_modules` → `node_modules` reaches the image's ONE kernel. The
+ * proof the image itself is untouched: every `@neuralis/*` manifest byte-equal
+ * before and after. Floors, before npm touches a network: EVERY scope the
+ * private-scope record holds needs its `.npmrc` route (with no lock, the
+ * dependencies a registry package pulls in are unknown until npm asks a
+ * registry), and the release-age floor holds for every scope but the privately
+ * routed ones. Throws, naming every problem; the build fails with no half image.
+ *
+ * @param {string} ctxDir
+ * @param {string} hostRoot
+ * @param {string} npmrcPath
+ * @param {(cmd: string, args: string[], opts: { cwd: string; encoding: 'utf8' }) => { status: number | null; stdout?: string; stderr?: string }} [exec]
+ */
+export function operatorInstall(ctxDir, hostRoot, npmrcPath, exec = spawnSync) {
+  const deps = readJson(join(ctxDir, 'operator.json')).dependencies ?? {};
+  const names = Object.keys(deps).sort();
+  const npmrcText = npmrcPath && existsSync(npmrcPath) ? readFileSync(npmrcPath, 'utf8') : '';
+  const routed = privateScopes(npmrcText);
+  const record = readPrivateScopeRecord(join(ctxDir, 'buildlock'));
+  const problems = [];
+  for (const [scope, entry] of record) {
+    if (!routed.includes(scope)) {
+      problems.push(`${describeUnroutedScope({ scope, origins: entry.origins, packages: ['any of its packages'] })} — or, if ${scope} is public now, delete its entry from <NEURALIS_HOME>/build/${PRIVATE_SCOPES_FILE}`);
+    }
+  }
+  for (const name of names) {
+    if (existsSync(join(hostRoot, 'node_modules', name))) problems.push(`${name} is part of the release image — an operator package never replaces one (npx neuralis pkg remove ${name})`);
+  }
+  if (problems.length > 0) throw new Error(`the operator packages cannot be installed:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+
+  const npmFlags = ['--no-audit', '--no-fund', '--legacy-peer-deps', `--min-release-age=${OPERATOR_RELEASE_AGE_DAYS}`, ...routed.map((s) => `--min-release-age-exclude=${s}/*`)];
+  const npm = (args, cwd, what) => {
+    const res = exec('npm', [...args, ...npmFlags], { cwd, encoding: 'utf8' });
+    const log = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+    process.stdout.write(log);
+    if (res.status !== 0) {
+      const named = failedInstallNames(log);
+      throw new Error(`${what} failed (npm exit ${res.status})${named.length ? ` — in ${named.join(', ')}` : ''}; a native dependency needs python3, make and g++, which this layer provides`);
+    }
+    return res.stdout ?? '';
+  };
+
+  const before = neuralisManifestDigests(hostRoot);
+  const work = join(ctxDir, 'work');
+  const install = { ...deps };
+  const kernelRoot = join(hostRoot, 'node_modules', '@neuralis', 'package-system');
+  listLocalSources({ dependencies: deps }).forEach((source, slot) => {
+    const from = join(ctxDir, 'slots', String(slot));
+    const dirName = localSourceDirName(source.name);
+    if (source.kind === 'tgz') {
+      install[source.name] = `file:${join(from, basename(source.path))}`;
+      return;
+    }
+    // A folder builds as the image build builds one: its own install (peers
+    // left to the image), its `build` and UI module, then packed — the packed
+    // copy is what installs, so its `files` whitelist applies.
+    const dir = join(work, LOCAL_DIR, dirName);
+    cpSync(from, dir, { recursive: true, verbatimSymlinks: true, filter: (src) => src === from || !isDropped(basename(src)) });
+    console.log(`[operator-image] building ${source.name}`);
+    npm(['install'], dir, `${source.name}: npm install`);
+    const own = readJson(join(dir, 'package.json'));
+    for (const peer of Object.keys(own.peerDependencies ?? {})) {
+      const image = join(hostRoot, 'node_modules', peer);
+      const local = join(dir, 'node_modules', peer);
+      if (existsSync(image) && !existsSync(local)) {
+        mkdirSync(dirname(local), { recursive: true });
+        symlinkSync(image, local);
+      }
+    }
+    buildPackage(kernelRoot, dir, (cmd, args, cwd) => {
+      const res = exec(cmd, args, { cwd, encoding: 'utf8' });
+      process.stdout.write(`${res.stdout ?? ''}${res.stderr ?? ''}`);
+      if (res.status !== 0) throw new Error(`${source.name}: \`${cmd} ${args.join(' ')}\` failed (exit ${res.status})`);
+    }, 'npm');
+    mkdirSync(join(work, LOCAL_TGZ_DIR), { recursive: true });
+    const packed = npm(['pack', '--silent', '--pack-destination', join(work, LOCAL_TGZ_DIR)], dir, `${source.name}: npm pack`).trim().split('\n').pop();
+    install[source.name] = `file:${join(work, LOCAL_TGZ_DIR, packed)}`;
+  });
+
+  const root = join(hostRoot, OPERATOR_ROOT);
+  writeJson(join(root, 'package.json'), { name: 'neuralis-operator-packages', private: true, dependencies: install });
+  npm(['install', '--omit=dev'], root, `the operator packages (${names.join(', ')}): npm install`);
+
+  for (const name of before.keys()) {
+    if (existsSync(join(root, 'node_modules', name))) problems.push(`a second copy of ${name} under ${OPERATOR_ROOT}/node_modules — an operator package's dependency pulled it in; the image's copy must serve it (one module instance per package)`);
+  }
+  let manifest = readFileSync(join(hostRoot, 'package.json'), 'utf8');
+  for (const name of names) {
+    const installed = join(root, 'node_modules', name);
+    if (!existsSync(join(installed, 'package.json'))) {
+      problems.push(`${name} is not in ${OPERATOR_ROOT}/node_modules after the install`);
+      continue;
+    }
+    const target = join(hostRoot, 'node_modules', name);
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(relative(dirname(target), installed), target);
+    manifest = insertDependencyLine(manifest, name, readJson(join(installed, 'package.json')).version ?? deps[name]);
+  }
+  JSON.parse(manifest);
+  writeFileSync(join(hostRoot, 'package.json'), manifest);
+  const after = neuralisManifestDigests(hostRoot);
+  for (const [name, digest] of before) {
+    if (after.get(name) !== digest) problems.push(`${name}/package.json changed — the image's own packages must stay byte-equal`);
+  }
+  if (problems.length > 0) throw new Error(`the operator packages cannot be installed:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+  rmSync(work, { recursive: true, force: true });
+  console.log(`[operator-image] ${names.length} operator package(s) over the release image: ${names.join(', ')}`);
 }
 
 /**
@@ -1239,12 +1417,20 @@ if (isMain) {
     case 'build-package': buildPackage(args[0]); break;
     case 'ui-compat': await uiCompat(args[0], args[1], args[2]); break;
     case 'overrides': overrides(args[0], args[1]); break;
+    case 'operator-install':
+      try {
+        operatorInstall(args[0], args[1], args[2]);
+      } catch (err) {
+        console.error(`[operator-image] ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
     case 'validate': await validateInstalled(args[0], args[1], args[2], args[3], args[4]); break;
     case 'release-age-excludes':
       if (args[0] && existsSync(args[0])) process.stdout.write(releaseAgeExcludeFlags(privateScopes(readFileSync(args[0], 'utf8'))).join(' '));
       break;
     default:
-      console.error(`usage: build-workspace.mjs <stage|scope-routes|verify-lock|lock-base|export-lock|build-package|ui-compat|validate|overrides|release-age-excludes> …`);
+      console.error(`usage: build-workspace.mjs <stage|scope-routes|verify-lock|lock-base|export-lock|build-package|ui-compat|validate|overrides|release-age-excludes|operator-install> …`);
       process.exit(2);
   }
 }

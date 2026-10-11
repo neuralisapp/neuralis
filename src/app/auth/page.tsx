@@ -162,13 +162,8 @@ export default function AuthPage() {
 
             <div className="w-full space-y-2">
               <div className="rounded-md border border-white/20 bg-black/50 px-4 py-3">
-                <p className="text-xs font-medium text-white/50 mb-1">npm install</p>
+                <p className="text-xs font-medium text-white/50 mb-1">npm install folder or git clone</p>
                 <code className="text-sm font-mono text-emerald-300">npx neuralis setup</code>
-              </div>
-
-              <div className="rounded-md border border-white/20 bg-black/50 px-4 py-3">
-                <p className="text-xs font-medium text-white/50 mb-1">git clone</p>
-                <code className="text-sm font-mono text-emerald-300">pnpm neuralis:setup</code>
               </div>
             </div>
 

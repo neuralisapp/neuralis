@@ -2,11 +2,11 @@
 
 ## Mounting is not attaching
 
-`pnpm neuralis:mount add` writes **infrastructure**: a bind mount plus the environment
+`npx neuralis mount add` writes **infrastructure**: a bind mount plus the environment
 pair that lets the runtime describe it. It does not create a source, and agents cannot
 reach the folder yet. Three steps, in order:
 
-1. `pnpm neuralis:mount add <host-path> --slug <name>` — writes the bind and env pair.
+1. `npx neuralis mount add <host-path> --slug <name>` — writes the bind and env pair.
 2. Restart so compose applies it (`docker compose up -d`; `-V` is not needed unless the
    overlay itself was added or removed).
 3. Attach it as a filesystem source from the Files UI, choosing its scope.
@@ -27,7 +27,7 @@ override survives. That is the entire reason for the split.
 ## The `--neuralis` overlay
 
 ```bash
-pnpm neuralis:mount add <host-folder> --neuralis [--with-docker]
+npx neuralis mount add <host-folder> --neuralis [--with-docker]
 ```
 
 Binds the host's own Neuralis folder onto `/neuralis` inside the container. The
@@ -62,7 +62,7 @@ capability: anything that can reach the socket can control the daemon.
 ## Package folders
 
 ```bash
-pnpm neuralis:mount add <dir> --pkg <name>
+npx neuralis mount add <dir> --pkg <name>
 ```
 
 The live-edit lane for a package already registered and installed. The folder is BOUND
@@ -73,20 +73,20 @@ image deployed for the package, so it resolves the image's ONE kernel and ONE Re
 never a dev checkout's links. The tool pre-creates the mask's mountpoint as you, so Docker
 never creates it as root inside your folder. It also writes the `/mounts/<slug>` bind and
 its host pair, for a source rooted at the folder. A name that is not a host dependency is
-inert until `pnpm neuralis:pkg add` registers it (the tool says which case you are in) —
+inert until `npx neuralis pkg add` registers it (the tool says which case you are in) —
 see `own-packages.md`.
 
-An override written by an older host carried a `NEURALIS_PKG_LINKS` line and a
-`NODE_PATH` fallback; any `pnpm neuralis:mount` run, `list` included, rewrites it to binds
-and says so.
+An override written by an older host may still carry a `NEURALIS_PKG_LINKS` line and a
+`NODE_PATH` fallback. Nothing reads either; `mount add <dir> --pkg <name>` gives that folder
+its bind.
 
 ## Removing
 
 ```bash
-pnpm neuralis:mount list
-pnpm neuralis:mount remove <slug>
-pnpm neuralis:mount remove --neuralis
-pnpm neuralis:mount remove --pkg <name>
+npx neuralis mount list
+npx neuralis mount remove <slug>
+npx neuralis mount remove --neuralis
+npx neuralis mount remove --pkg <name>
 ```
 
 Removing the last machine-local mount deletes the override file entirely (the tool

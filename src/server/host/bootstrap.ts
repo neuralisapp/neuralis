@@ -12,7 +12,7 @@
  * runtime.
  */
 
-import { access, mkdir, readFile, rename } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadRuntimeProvider, resolveServiceProviders } from '@neuralis/package-system';
 import { collectDeclaredConfigSettings } from '@neuralis/package-system/access';
@@ -39,14 +39,12 @@ import { createSelfScopeCredentialWriter } from './selfScopeCredentialWriter';
 import { createMemberCredentialWriter } from './memberCredentialWriter';
 import { getUserById, hasAnyUsers } from '../store/UserStore';
 import { getProjectById, listAllProjects, listProjectsForUser, updateProject } from '../store/ProjectStore';
-import { getScopeMembershipPort } from './scopeMembership';
 import { isPrincipalActive, resolveMemberSession } from '../auth/memberSession';
 import { getEnv } from '../config/env';
 import { getLogger } from '../logging/setup';
-import { migrateLegacyPackages } from '../packages/migrateLegacyPackages';
 import { listAllActivatedPackages } from '../packages/projectPackages';
 import { getPackageRuntimeManager } from '../packages/PackageRuntimeManager';
-import { reconcileBuiltinGrantChanges } from '../packages/reconcileBuiltinGrantChanges';
+import { readBuiltinRemovalProof, reconcileBuiltinGrantChanges } from '../packages/reconcileBuiltinGrantChanges';
 import { peekUiModuleRefusals } from '../packages/packageUiModules';
 import { clearProjectPackageCaches, rescanProjectPackages } from '../packages/rescanProjectPackages';
 import { canAccessScope, hasFeature } from '@neuralis/package-system';
@@ -55,7 +53,7 @@ import { setKernelTunablesSource } from '@neuralis/package-system/contracts';
 import { BUILTIN_PACKAGE_IDS, HOST_ROOT, resolveBuiltinRoot, assignBuiltinTrust } from './builtinSlots';
 import { BUILD_VALIDATE_RECORD, admitBuiltins, readBuildRefusals } from './buildRefusals';
 import { initHostIdentity } from './HostIdentity';
-import { claimAllDeclaredDataFormats } from '../store/dataFormats';
+import { claimAllDeclaredDataFormats, dataFormatRefusalCode, type DataFormatRefusalCode } from '../store/dataFormats';
 import { startNotificationMaterializer } from '../notifications/materializer';
 
 // ---------------------------------------------------------------------------
@@ -63,8 +61,6 @@ import { startNotificationMaterializer } from '../notifications/materializer';
 // ---------------------------------------------------------------------------
 
 export { BUILTIN_PACKAGE_IDS };
-
-export const LEGACY_PROJECT_DIRS = ['agent-core', 'brain-core', 'terminal', '_installed'] as const; // 'terminal' stays: existing projects on disk may still carry the pre-H0 dir
 
 const builtinRoots = new Map([...BUILTIN_PACKAGE_IDS].map(id => [id, resolveBuiltinRoot(id)]));
 
@@ -139,10 +135,8 @@ export async function resolveScopeHiddenIds(
     for (const id of candidates) {
       if (hidden.has(id)) continue;
       const manifestFeature = defs.get(id)?.requires?.accessFeature;
-      // The admin override map (`ProjectRecord.packageAccessFeature`) is keyed by
-      // the RAW manifest id; the loaded id is scope-namespaced — translate.
-      const manifestId = mgr.getPackageManifestId(input.projectId, id) ?? id;
-      const overrideFeature = overrides[manifestId] ?? overrides[id];
+      // Mutable overrides belong to the exact host-stamped runtime instance.
+      const overrideFeature = overrides[id];
       for (const feature of [manifestFeature, overrideFeature]) {
         if (feature && !hasFeature({ grantedFeatures }, feature)) {
           hidden.add(id);
@@ -187,10 +181,14 @@ export async function resolveScopeHiddenIds(
  */
 export type BootstrapPhase = 'starting' | 'loading' | 'ready' | 'error';
 
+/** The FIXED, public-safe class of a failed bootstrap (`/api/health` may carry it; `error` it never may). */
+export type BootstrapFailureCode = DataFormatRefusalCode | 'bootstrap_failed';
+
 /** Public, read-only snapshot of the bootstrap lifecycle for health probes. */
 export type BootstrapStatus = {
   phase: BootstrapPhase;
   error: string | null;
+  errorCode: BootstrapFailureCode | null;
   startedAt: number;
   readyAt: number | null;
 };
@@ -200,6 +198,7 @@ type BootstrapState = {
   initializing: Promise<RuntimeInstance> | null;
   phase: BootstrapPhase;
   error: string | null;
+  errorCode: BootstrapFailureCode | null;
   startedAt: number;
   readyAt: number | null;
 };
@@ -214,6 +213,7 @@ function getState(): BootstrapState {
       initializing: null,
       phase: 'starting',
       error: null,
+      errorCode: null,
       startedAt: Date.now(),
       readyAt: null,
     } satisfies BootstrapState;
@@ -231,6 +231,7 @@ export function getBootstrapStatus(): BootstrapStatus {
   return {
     phase: s.phase,
     error: s.error,
+    errorCode: s.errorCode,
     startedAt: s.startedAt,
     readyAt: s.readyAt,
   };
@@ -281,18 +282,13 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     const env = getEnv();
     const logger = getLogger().child('runtime');
 
-    // The data-format claim precedes every store's first read (ProjectStore
-    // migrates on read): data a NEWER build wrote stops the boot here, naming
-    // the kind, both versions, the newest checkpoint and the restore command.
-    // It claims every kind declared so far — the host's own — even when a
-    // request already ran the host-only claim.
-    const earlyFormats = await claimAllDeclaredDataFormats();
-    if (earlyFormats.checkpoint) {
-      logger.info('Data formats raised — checkpoint taken first', {
-        checkpoint: earlyFormats.checkpoint,
-        raised: earlyFormats.raised,
-      });
-    }
+    // The data-format claim precedes every store's first read: data a NEWER
+    // build wrote stops the boot here, naming the kind, both versions, the
+    // newest checkpoint and the restore command; data an offline upgrade has
+    // not raised yet stops it naming `pnpm neuralis:upgrade`. It claims every
+    // kind declared so far — the host's own — even when a request already ran
+    // the host-only claim.
+    await claimAllDeclaredDataFormats();
 
     const usersExist = await hasAnyUsers();
 
@@ -302,9 +298,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     const bootstrapProjectId = await resolveBootstrapProjectId(usersExist);
     const projectRoot = resolveProjectRoot(env.projectsRoot, bootstrapProjectId);
 
-    if (usersExist) {
-      await repairLegacyProjectLayout(env.projectsRoot, projectRoot, logger);
-    } else {
+    if (!usersExist) {
       logger.info('Fresh install detected — bootstrap will not create project state before setup');
     }
 
@@ -737,24 +731,19 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       routeLogger: getRouteLogger(),
       routeSlowMsSource,
       installedPackagesProvider: listAllActivatedPackages,
+      removedBuiltinPackageIds: await readBuiltinRemovalProof(env.appRoot, BUILTIN_PACKAGE_IDS),
     });
     state.instance = instance;
-    // The provider answers before init/start; post-load format claims and
-    // credential-layout migration need its evaluated package definitions.
+    // The provider answers before init/start; the post-load format claims need
+    // its evaluated package definitions.
     await instance.whenReady();
 
     // Every package the loader evaluated has declared its record kinds: claim
-    // them all (checkpoint + raise, or stop on newer data) and fail the boot on
-    // a declared kind nobody claimed. The host names no package kind here. A
-    // package whose `init` reads a store before this line relies on its own
-    // per-store `claimDataFormat` (the kernel's second line).
-    const packageFormats = await claimAllDeclaredDataFormats();
-    if (packageFormats.checkpoint) {
-      logger.info('Data formats raised — checkpoint taken first', {
-        checkpoint: packageFormats.checkpoint,
-        raised: packageFormats.raised,
-      });
-    }
+    // them all (stop on newer data or on a pending offline upgrade) and fail
+    // the boot on a declared kind nobody claimed. The host names no package
+    // kind here. A package whose `init` reads a store before this line relies
+    // on its own per-store `claimDataFormat` (the kernel's second line).
+    await claimAllDeclaredDataFormats();
 
     // Record that the session-ticket verifier is online (the audit trace a
     // `skill.session_call` line is read against).
@@ -764,8 +753,6 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       target: instance.services.providerOf('session-ticket-verifier'),
       details: { mode: 'stream-scope-ticket' },
     });
-
-    await migrateLegacyPackages(projectRoot, join(env.appRoot, 'packages'), logger);
 
     // A builtin `pnpm neuralis:pkg add|remove` moved in or out of the deps
     // brings or takes its default role grants in every existing project (the
@@ -820,28 +807,12 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       }
     });
 
-    // Legacy bare-slug agent credentials → `agents/<projectId>/<agentId>`. Here,
-    // not at store init: which project holds an agent is the agent directory's
-    // answer. Until it runs a legacy directory simply does not resolve
-    // (fail-closed).
-    try {
-      const membership = getScopeMembershipPort();
-      const layout = await getCredStore().migrateAgentCredentialLayout({
-        listProjectIds: async () => (await listAllProjects({ includeArchived: true })).map((p) => p.id),
-        agentBelongsToProject: (projectId, agentId) => membership.agentBelongsToProject(projectId, agentId),
-      });
-      credentialCacheLogger.info('agent credential layout', layout);
-    } catch (err) {
-      credentialCacheLogger.warn('agent credential layout migration failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
     // Readiness succeeded and host wiring is complete. Package background
     // work keeps its own health and deprovision fences.
     state.phase = 'ready';
     state.readyAt = Date.now();
     state.error = null;
+    state.errorCode = null;
     // The notification service consumes the provider's published events from
     // here on — after readiness, so no event is judged against a half-loaded runtime.
     startNotificationMaterializer(instance);
@@ -854,6 +825,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
   } catch (err) {
     state.phase = 'error';
     state.error = err instanceof Error ? err.message : String(err);
+    state.errorCode = dataFormatRefusalCode(err) ?? 'bootstrap_failed';
     throw err;
   } finally {
     state.initializing = null;
@@ -882,25 +854,6 @@ export function getPackageDiagnosticsPort(): PackageDiagnosticsPort {
   };
 }
 
-async function repairLegacyProjectLayout(
-  projectsRoot: string,
-  projectRoot: string,
-  logger: ReturnType<typeof getLogger>,
-): Promise<void> {
-  await mkdir(projectRoot, { recursive: true });
-  for (const dirName of LEGACY_PROJECT_DIRS) {
-    const legacyPath = join(projectsRoot, dirName);
-    const projectPath = join(projectRoot, dirName);
-    if (!await pathExists(legacyPath)) continue;
-    if (await pathExists(projectPath)) {
-      logger.warn('Legacy project data directory left in projects root because target already exists', { legacyPath, projectPath });
-      continue;
-    }
-    await rename(legacyPath, projectPath);
-    logger.info('Moved legacy project data directory into project root', { from: legacyPath, to: projectPath });
-  }
-}
-
 /**
  * Resolve a projectRoot to feed into agent-core bootstrap.
  *
@@ -918,13 +871,3 @@ async function resolveBootstrapProjectId(usersExist: boolean): Promise<string> {
   } catch { /* ProjectStore not ready */ }
   return 'bootstrap';
 }
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-

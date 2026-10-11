@@ -4,13 +4,7 @@ import { ensureHostDataFormat, HOST_DATA_FORMATS } from './dataFormats';
 import { join } from 'path';
 import { isSafePathSegment } from '@neuralis/package-system/paths';
 import { generateId, nowISO } from '@/lib/utils';
-import {
-  decodeAppearanceUpload,
-  removeAllAppearanceImages,
-  writeAppearanceImage,
-  type StoredAppearance,
-  type StoredAppearanceImage,
-} from '../appearance/appearanceImageStore';
+import { removeAllAppearanceImages, type StoredAppearance } from '../appearance/appearanceImageStore';
 
 /**
  * Visual appearance customisation per user. Surfaced through `UserAvatar`
@@ -53,13 +47,6 @@ export type UserRecord = {
   createdAt: string;
   updatedAt: string;
 };
-
-/** Migrate legacy records that lack new fields. */
-function migrateUserRecord(raw: UserRecord): UserRecord {
-  if (!raw.status) raw.status = 'active';
-  if (raw.mustChangePassword === undefined) raw.mustChangePassword = false;
-  return raw;
-}
 
 /**
  * The record half of "may this principal hold a session": only `active`. Every
@@ -117,7 +104,7 @@ export function onUserChange(listener: UserChangeListener): () => void {
 
 function sessionStateOf(record: UserRecord | null): UserSessionState | null {
   if (!record) return null;
-  return { status: migrateUserRecord({ ...record }).status, sessionEpoch: sessionEpochOf(record) };
+  return { status: record.status, sessionEpoch: sessionEpochOf(record) };
 }
 
 /** Called AFTER the write resolved — never inside the store's per-path chain. */
@@ -196,59 +183,19 @@ export async function getUserById(id: string): Promise<UserRecord | null> {
   // never the store's path-guard throw (a 500 at every caller).
   if (!isSafePathSegment(id)) return null;
   const raw = await (await claimedStore()).get(id);
-  if (!raw) return null;
-  // A tombstone is never migrated: its picture directory was removed with the
-  // account, and a read must not write it back.
-  if (hasInlineImage(raw) && raw.status !== 'deleted') return migrateInlineImage(raw);
-  return migrateUserRecord(raw);
-}
-
-/**
- * A record written before pictures moved to files carries the picture INLINE
- * as `appearance.image.dataUrl` — parsed on every request that reads the user.
- */
-function hasInlineImage(record: UserRecord): boolean {
-  const image = record.appearance?.image as { dataUrl?: unknown } | undefined;
-  return typeof image?.dataUrl === 'string';
-}
-
-/**
- * The one-time move of an inline picture into the file store, on the first
- * read that meets it. The bytes pass the same floor as an upload; a picture
- * that fails it (not PNG/JPEG/WebP, over the ceiling) is dropped, never kept
- * inline. Idempotent under concurrent reads: the file is content-addressed and
- * the record write is a producer that writes nothing once the record is clean.
- */
-async function migrateInlineImage(raw: UserRecord): Promise<UserRecord> {
-  const dataUrl = (raw.appearance?.image as unknown as { dataUrl: string }).dataUrl;
-  let stored: StoredAppearanceImage | undefined;
-  try {
-    stored = await writeAppearanceImage('user', raw.id, decodeAppearanceUpload(dataUrl));
-  } catch (err) {
-    console.warn('[UserStore] inline profile picture dropped — it did not pass the picture floor', {
-      userId: raw.id,
-      reason: err instanceof Error ? err.name : 'unknown',
-    });
-  }
-  const migrated = await updateUser(raw.id, (current) => {
-    if (!hasInlineImage(current) || !current.appearance) return null;
-    const { image: _inline, ...rest } = current.appearance;
-    const appearance: UserAppearance = stored ? { ...rest, image: stored } : rest;
-    return { appearance: Object.keys(appearance).length > 0 ? appearance : undefined };
-  });
-  return migrated ?? migrateUserRecord(raw);
+  return raw ?? null;
 }
 
 export async function findUserByEmail(email: string): Promise<UserRecord | null> {
   const users = await (await claimedStore()).list(
     (u) => u.email === email.toLowerCase().trim(),
   );
-  return users[0] ? migrateUserRecord(users[0]) : null;
+  return users[0] ?? null;
 }
 
 export async function listUsers(): Promise<UserRecord[]> {
   const all = await (await claimedStore()).list();
-  return all.map(migrateUserRecord);
+  return all;
 }
 
 export async function hasAnyUsers(): Promise<boolean> {
@@ -284,7 +231,7 @@ export async function updateUser(
   const seen: { before: UserSessionState | null } = { before: null };
   const stored = await (await claimedStore()).update(id, (raw) => {
     if (!raw) return undefined;
-    const user = migrateUserRecord(raw);
+    const user = raw;
     seen.before = sessionStateOf(user);
     // A tombstone is terminal: no write revives it.
     if (user.status === 'deleted') return undefined;
@@ -293,7 +240,7 @@ export async function updateUser(
     return { ...user, ...produced, updatedAt: nowISO() };
   });
   emitIfTransition(id, seen.before, sessionStateOf(stored));
-  return stored ? migrateUserRecord(stored) : null;
+  return stored ?? null;
 }
 
 /**
@@ -306,7 +253,7 @@ export async function tombstoneUser(id: string, deletedBy: string): Promise<User
   const seen: { before: UserSessionState | null } = { before: null };
   const stored = await (await claimedStore()).update(id, (raw) => {
     if (!raw) return undefined;
-    const user = migrateUserRecord(raw);
+    const user = raw;
     seen.before = sessionStateOf(user);
     if (user.status === 'deleted') return undefined;
     const now = nowISO();
@@ -324,7 +271,7 @@ export async function tombstoneUser(id: string, deletedBy: string): Promise<User
   });
   emitIfTransition(id, seen.before, sessionStateOf(stored));
   if (stored?.status === 'deleted') await removeUserPictures(id);
-  return stored ? migrateUserRecord(stored) : null;
+  return stored ?? null;
 }
 
 /** A deleted user's pictures go with the account; a failure is logged, never thrown into the delete. */

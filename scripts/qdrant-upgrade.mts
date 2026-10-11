@@ -9,9 +9,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
+import type { CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import { detectIsClone, resolveConfigDir } from './setup/detect.mts';
 import { readEnvFile } from './setup/envFile.mts';
 import { askLine, promptOwnerCredentials, verifyOwnerCredentials } from './setup/ownerCheck.mts';
@@ -48,7 +49,7 @@ const ok = `${c.green}✓${c.reset}`;
 const fail = `${c.red}✗${c.reset}`;
 const dot = `${c.dim}·${c.reset}`;
 
-const HELP = `pnpm neuralis:qdrant-upgrade [options]
+const HELP = `${spell('qdrant-upgrade [options]')}
 
   --dry-run              the hop chain; changes nothing
   --rehearse <volume>    the whole chain on a CLONED Docker volume
@@ -60,9 +61,6 @@ Settle rule, on the source and after every hop: ready, optimizer_status ok, not 
 exact point count equal to the one recorded with the app stopped. Green is not required (a
 long optimization keeps a collection yellow); the status reached is recorded.
 Nothing else may rebuild or recreate the stack while this runs.`;
-
-/** neuralis/ — the compose cwd (never `-f`) and where setup lives. */
-const neuralisDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 type Args = { dryRun: boolean; rehearse: string | null; rollback: string | null; keepBackups: number; settleMinutes: number | null };
 
@@ -101,12 +99,14 @@ async function versionOnGet(url: string): Promise<string | null> {
   }
 }
 
-async function main(): Promise<void> {
-  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+async function upgradeQdrant(argv: string[], cliCtx: CliContext): Promise<number> {
+  if (argv.includes('--help') || argv.includes('-h')) {
     console.log(HELP);
-    return;
+    return 0;
   }
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(argv);
+  /** The install folder — the compose cwd (never `-f`). */
+  const neuralisDir = cliCtx.installDir;
   const neuralisHome = resolveNeuralisHome().home;
   const configDir = resolveConfigDir({ isClone: await detectIsClone(neuralisDir), projectRoot: neuralisDir, neuralisHome }, null);
   const env = await readEnvFile(configDir);
@@ -115,7 +115,7 @@ async function main(): Promise<void> {
     throw new Error(`QDRANT_MODE is "${mode ?? ''}" in ${join(configDir, '.env')}; this command manages only the docker and binary modes.`);
   }
   const apiKey = env.QDRANT_API_KEY?.trim();
-  if (!apiKey) throw new Error(`${join(configDir, '.env')} has no QDRANT_API_KEY; re-run \`pnpm neuralis:setup\` first.`);
+  if (!apiKey) throw new Error(`${join(configDir, '.env')} has no QDRANT_API_KEY; re-run \`${spell('setup')}\` first.`);
   const composeProject = env.NEURALIS_COMPOSE_PROJECT?.trim() || 'neuralis';
   const liveUrl = mode === 'docker' ? 'http://127.0.0.1:6333' : env.QDRANT_URL || 'http://localhost:6333';
   const binDir = join(neuralisHome, 'bin');
@@ -147,12 +147,12 @@ async function main(): Promise<void> {
     console.log(`  ${dot} chain     : ${c.bold}${[from, ...chain].join(' → ')}${c.reset}`);
     if (chain.length === 0) {
       console.log(`\n  ${ok} Already at ${target}. Nothing to do.\n`);
-      return;
+      return 0;
     }
   }
   if (args.dryRun) {
     console.log(`\n  ${dot} Dry run: nothing was changed.\n`);
-    return;
+    return 0;
   }
 
   console.log();
@@ -167,7 +167,7 @@ async function main(): Promise<void> {
   const answer = (await askLine(`Proceed to ${what}? [y/N]`)).toLowerCase();
   if (!answer.startsWith('y')) {
     console.log(`  ${dot} Aborted.`);
-    return;
+    return 0;
   }
 
   const base: BaseContext = {
@@ -201,6 +201,7 @@ async function main(): Promise<void> {
     const ctx = {
       ...base,
       neuralisDir,
+      packageDir: cliCtx.packageDir,
       composeProject,
       rehearseVolume: args.rehearse,
       containerQdrant: (name: string) => containerQdrantApi(exec, name),
@@ -267,21 +268,23 @@ async function main(): Promise<void> {
     for (const dir of pruned) console.log(`  ${dot} pruned old backup ${dir}`);
   }
   console.log(`\n  ${ok} ${outcome.result}. Record: ${join(outcome.backupDir, 'record.json')}\n`);
+  return 0;
 }
 
-// A signal skips every `finally`. First the run's record says `aborted` and one
-// line names the state and the command that continues from it (nothing is
-// restarted against a store that may be partly upgraded); then no key env-file
-// and no hop container still holding the storage survive the process.
-process.on('exit', () => {
-  const line = abortActiveRun();
-  if (line) console.error(`\n  ${fail} ${line}\n`);
-  cleanupOnExit((name) => { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 30_000 }); });
-});
-process.on('SIGINT', () => process.exit(130));
-process.on('SIGTERM', () => process.exit(143));
-
-main().catch((err) => {
-  console.error(`\n  ${fail} ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-});
+/**
+ * A signal skips every `finally`. First the run's record says `aborted` and one
+ * line names the state and the command that continues from it (nothing is
+ * restarted against a store that may be partly upgraded); then no key env-file
+ * and no hop container still holding the storage survive the process. The
+ * handlers are installed for THIS verb only, on dispatch — never at import.
+ */
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
+  process.on('exit', () => {
+    const line = abortActiveRun();
+    if (line) console.error(`\n  ${fail} ${line}\n`);
+    cleanupOnExit((name) => { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 30_000 }); });
+  });
+  process.on('SIGINT', () => process.exit(130));
+  process.on('SIGTERM', () => process.exit(143));
+  return upgradeQdrant(argv, ctx);
+}

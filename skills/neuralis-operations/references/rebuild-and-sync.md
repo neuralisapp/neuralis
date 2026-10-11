@@ -1,6 +1,6 @@
 # Rebuilding, syncing, and "I rebuilt and nothing changed"
 
-## Why `pnpm neuralis:rebuild` and not a raw compose command
+## Why `npx neuralis rebuild` and not a raw compose command
 
 The wrapper exists because three details of the correct invocation are impossible to
 remember and expensive to get wrong.
@@ -22,7 +22,7 @@ a no-op. The only fix is to run the rebuild the right way.
 Thirty-second diagnosis when a source "disappears":
 
 ```bash
-docker inspect neuralis-neuralis-1 --format '{{range .Mounts}}{{.Destination}}{{println}}{{end}}'
+docker inspect "$(docker compose ps -q neuralis)" --format '{{range .Mounts}}{{.Destination}}{{println}}{{end}}'
 ```
 
 If nothing under `/mounts` is listed, the override never merged.
@@ -51,7 +51,7 @@ its supposed ceiling. A failed build cleans nothing and exits with the build's o
 | `docker-compose.override.yml` (a mount) | `docker compose up -d` — recreate, no build |
 | `.env` | regenerate compose, then `up -d` |
 | `~/.neuralis` config or credentials | nothing — read live |
-| the host-access broker's confinement helper (every rebuild produces a fresh one in the image) | `pnpm neuralis:host-broker upgrade` — the host copy never follows a rebuild by itself; `status` and the end of `neuralis:rebuild` print the drift |
+| the host-access broker's confinement helper (every rebuild produces a fresh one in the image) | `npx neuralis host-broker upgrade` — the host copy never follows a rebuild by itself; `status` and the end of `neuralis:rebuild` print the drift |
 
 Three facts are **computed at image build and frozen**: the host's own generated CSS, the
 list of packages kept out of the server bundle, and every `NEXT_PUBLIC_*` value. No runtime
@@ -68,7 +68,7 @@ Escalate in order; never jump to the bottom.
 2. `docker compose up -d -V` (recreate, renew anonymous volumes)
 3. stop → `rm -f -v` **that one service** → `up -d` (drops only its anonymous volumes;
    the vector data lives on a different service and is untouched)
-4. `docker compose build --no-cache`
+4. `docker builder prune`, then `npx neuralis rebuild` — never a raw `docker compose build`, which skips the compose regeneration the wrapper does first
 5. stop and work out what is actually wrong
 
 `down -v` is not a step on this ladder. It destroys the vector store.
@@ -77,7 +77,7 @@ Then **prove** the rebuild landed. `docker compose ps` reporting `healthy` says 
 health endpoint answered, not that your change is in there. Check the artifact:
 
 ```bash
-docker exec neuralis-neuralis-1 grep -rl '<a string from your change>' \
+docker compose exec neuralis grep -rl '<a string from your change>' \
   /neuralis/node_modules/<name>/dist/
 ```
 
@@ -132,4 +132,4 @@ local folder builds in its own root, and a folder bound over its installed copy
 | a registered package is missing, the rest runs | the build or the start refused it — the rebuild printed `package refused`, Admin health `builtin-packages` names it, `/api/health` counts it (`refusedBuiltins`) |
 | the rebuild stops before Docker: `the build inputs are not usable` | a registered folder or tarball is gone (restore it, or `pkg remove` it), more than eight local packages, or `NEURALIS_BUILD_NPMRC` names a missing file / carries a default `registry=` line |
 | the build (or `pkg add`) stops naming a scope and `NEURALIS_BUILD_NPMRC` | a dependency is in a scope seen served privately (`<NEURALIS_HOME>/build/private-scopes.json`, a lock or a manifest) that the `.npmrc` does not route — add the scope line, or delete the scope's entry from that file if it is public now; nothing was asked of the public registry |
-| an MCP sidecar (shim/Dockerfile) change had no effect | `pnpm neuralis:rebuild` builds `neuralisapp/mcp-sidecar:dev` only when its `io.neuralis.sidecar.source-hash` label differs from the directory — check the rebuild's `sidecar image` line (`up to date` vs `building`), `--no-sidecar` was not passed, and that running sidecars are idle-reaped (they keep the OLD shim until re-ensured) |
+| an MCP sidecar (shim/Dockerfile) change had no effect | `npx neuralis rebuild` builds `neuralisapp/mcp-sidecar:<version>` (the host's own version) only when its `io.neuralis.sidecar.source-hash` label differs from the directory — check the rebuild's `sidecar image` line (`up to date` vs `building`), `--no-sidecar` was not passed, and that running sidecars are idle-reaped (they keep the OLD shim until re-ensured) |

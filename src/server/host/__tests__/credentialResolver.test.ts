@@ -41,16 +41,47 @@ describe('resolveCredential — most specific wins, and it never throws', () => 
     expect(await resolveCredential('cred-a', {})).toBe('global');
   });
 
+  it('scope.tiers is the ceiling: absent = the full cascade, [] = nothing, a list = only those tiers (global included)', async () => {
+    await store.writeGlobal('cred-a', 'global');
+    await store.writeUser('u1', 'cred-a', 'user');
+    await store.write('p1', 'cred-a', 'project');
+    await store.writeAgent('p1', 'coder', 'cred-a', 'agent');
+    await store.writeGlobal('only-global', 'g');
+    await store.write('p1', 'only-project', 'p');
+    const { resolveCredential } = buildCredentialResolver();
+    const scope = { userId: 'u1', projectId: 'p1', agentId: 'coder' };
+
+    expect(await resolveCredential('cred-a', scope)).toBe('agent');
+    expect(await resolveCredential('cred-a', { ...scope, tiers: [] })).toBeUndefined();
+    expect(await resolveCredential('cred-a', { ...scope, tiers: ['user'] })).toBe('user');
+    expect(await resolveCredential('cred-a', { ...scope, tiers: ['global', 'project'] })).toBe('project');
+    // A ceiling below global never falls through to it; one below project never reads it.
+    expect(await resolveCredential('only-global', { ...scope, tiers: ['agent', 'project', 'user'] })).toBeUndefined();
+    expect(await resolveCredential('only-global', { ...scope, tiers: ['user', 'global'] })).toBe('g');
+    expect(await resolveCredential('only-project', { ...scope, tiers: ['user'] })).toBeUndefined();
+  });
+
+  it('two tenants under the member ceiling: the one with its own key gets it, the other gets nothing — never the project value', async () => {
+    await store.write('p1', 'cred-a', 'project');
+    await store.writeUser('u-own', 'cred-a', 'own');
+    const { resolveCredential } = buildCredentialResolver();
+    const memberCeiling = { projectId: 'p1', agentId: 'coder', tiers: ['user'] as const };
+
+    expect(await resolveCredential('cred-a', { ...memberCeiling, userId: 'u-own' })).toBe('own');
+    expect(await resolveCredential('cred-a', { ...memberCeiling, userId: 'u-other' })).toBeUndefined();
+    // Control: without the ceiling the same lookup cascades to the project value.
+    expect(await resolveCredential('cred-a', { userId: 'u-other', projectId: 'p1', agentId: 'coder' })).toBe('project');
+  });
+
   it('an id that can name no store directory is a MISS at its tier, never a throw — the lookup falls through', async () => {
     await store.writeGlobal('cred-a', 'global');
     await store.writeUser('u1', 'cred-a', 'user');
     const { resolveCredential } = buildCredentialResolver();
 
-    for (const bad of ['../x', 'a/b', '..', '_unresolved']) {
+    for (const bad of ['../x', 'a/b', '..']) {
       await expect(resolveCredential('cred-a', { userId: 'u1', projectId: 'p1', agentId: bad })).resolves.toBe('user');
     }
     await expect(resolveCredential('cred-a', { userId: 'u1', projectId: '../x', agentId: 'coder' })).resolves.toBe('user');
-    await expect(resolveCredential('cred-a', { userId: 'u1', projectId: '_unresolved', agentId: 'coder' })).resolves.toBe('user');
     await expect(resolveCredential('cred-a', { userId: '../u', projectId: 'p1' })).resolves.toBe('global');
   });
 

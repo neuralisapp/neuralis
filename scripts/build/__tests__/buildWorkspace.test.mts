@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -355,7 +355,7 @@ describe('stage — what the Dockerfile runs over the named contexts', () => {
       const res = runStage(f);
       expect(res.status).toBe(1);
       expect(res.stderr).toContain('devDependencies["@neuralis/agent-core"] = "link:../Neuralis/packages/agent-core" points outside the package');
-      expect(res.stderr).toContain('@acme/missing: the build received no context for file:/home/op/missing — run pnpm neuralis:rebuild');
+      expect(res.stderr).toContain('@acme/missing: the build received no context for file:/home/op/missing — run neuralis rebuild');
       expect(res.stderr).toContain('@acme/symlinked: symlink(s) leave the package and would dangle in the build: outside');
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -931,5 +931,167 @@ describe('validate — the runtime provider\'s admission predicate after deploy'
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('operator-install — the npm install folder\'s derived image layer', () => {
+  type Call = { cmd: string; args: string[]; cwd: string };
+  const IMAGE_KERNEL = '{"name":"@neuralis/package-system","version":"0.2.0"}\n';
+  const HOST_MANIFEST = '{\n  "name": "neuralis",\n  "dependencies": {\n    "@neuralis/agent-core": "0.2.0"\n  }\n}\n';
+
+  function image(): { ctx: string; host: string } {
+    const root = sandbox();
+    const host = join(root, 'neuralis');
+    for (const [name, text] of [['package-system', IMAGE_KERNEL], ['agent-core', '{"name":"@neuralis/agent-core","version":"0.2.0","neuralis":{}}\n']]) {
+      mkdirSync(join(host, 'node_modules', '@neuralis', name), { recursive: true });
+      writeFileSync(join(host, 'node_modules', '@neuralis', name, 'package.json'), text);
+    }
+    writeFileSync(join(host, 'package.json'), HOST_MANIFEST);
+    const ctx = join(root, 'ctx');
+    mkdirSync(ctx);
+    return { ctx, host };
+  }
+
+  /** A fake npm: `install` in the operator root lays out what the manifest names (and whatever `extra` adds). */
+  function fakeNpm(calls: Call[], extra: (root: string) => void = () => {}, result = { status: 0, stdout: '', stderr: '' }) {
+    return (cmd: string, args: string[], opts: { cwd: string }) => {
+      calls.push({ cmd, args, cwd: opts.cwd });
+      if (result.status !== 0) return result;
+      if (args[0] === 'install' && opts.cwd.endsWith('_operator')) {
+        const deps = JSON.parse(readFileSync(join(opts.cwd, 'package.json'), 'utf8')).dependencies as Record<string, string>;
+        for (const name of Object.keys(deps)) {
+          mkdirSync(join(opts.cwd, 'node_modules', name), { recursive: true });
+          writeFileSync(join(opts.cwd, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', neuralis: {} }));
+        }
+        extra(opts.cwd);
+      }
+      return result;
+    };
+  }
+
+  const withOperators = (ctx: string, deps: Record<string, string>) => writeFileSync(join(ctx, 'operator.json'), JSON.stringify({ dependencies: deps }));
+
+  it('installs into its own root, links each package where discovery looks, adds its line, and leaves every @neuralis manifest byte-equal', async () => {
+    const { operatorInstall, neuralisManifestDigests } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/x': '1.0.0' });
+    const before = neuralisManifestDigests(host);
+    const calls: Call[] = [];
+    operatorInstall(ctx, host, '', fakeNpm(calls));
+    expect(calls.map((c) => c.cwd)).toEqual([join(host, '_operator')]);
+    expect(calls.every((c) => c.cwd !== host)).toBe(true);
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['install', '--omit=dev', '--legacy-peer-deps', '--min-release-age=1']));
+    expect(readdirSync(join(host, 'node_modules', '@acme'))).toEqual(['x']);
+    expect(readFileSync(join(host, 'node_modules', '@acme', 'x', 'package.json'), 'utf8')).toContain('"@acme/x"');
+    const manifest = readFileSync(join(host, 'package.json'), 'utf8');
+    expect(JSON.parse(manifest).dependencies).toEqual({ '@acme/x': '1.0.0', '@neuralis/agent-core': '0.2.0' });
+    expect(manifest).toBe(HOST_MANIFEST.replace('  "dependencies": {\n', '  "dependencies": {\n    "@acme/x": "1.0.0",\n'));
+    expect(neuralisManifestDigests(host)).toEqual(before);
+  });
+
+  it('control: an install that rewrites an image @neuralis manifest fails by name — no half image', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/x': '1.0.0' });
+    const tamper = () => writeFileSync(join(host, 'node_modules', '@neuralis', 'package-system', 'package.json'), IMAGE_KERNEL.replace('0.2.0', '0.2.1'));
+    expect(() => operatorInstall(ctx, host, '', fakeNpm([], tamper))).toThrow(/@neuralis\/package-system\/package\.json changed/);
+  });
+
+  it('a second copy of an image @neuralis package pulled into the operator root is refused', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/x': '1.0.0' });
+    const second = (root: string) => mkdirSync(join(root, 'node_modules', '@neuralis', 'package-system'), { recursive: true });
+    expect(() => operatorInstall(ctx, host, '', fakeNpm([], second))).toThrow(/a second copy of @neuralis\/package-system/);
+  });
+
+  it('a failed native build names the package npm was building', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/native': '1.0.0' });
+    const stderr = 'npm error code 1\nnpm error path /neuralis/_operator/node_modules/@acme/native\nnpm error command failed\n';
+    expect(() => operatorInstall(ctx, host, '', fakeNpm([], () => {}, { status: 1, stdout: '', stderr }))).toThrow(/npm install failed \(npm exit 1\) — in @acme\/native/);
+    expect(existsSync(join(host, 'node_modules', '@acme'))).toBe(false);
+  });
+
+  it('refuses before npm runs: a recorded private scope without a route, or a name the release image already carries', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/x': '1.0.0', '@neuralis/agent-core': '9.9.9' });
+    mkdirSync(join(ctx, 'buildlock'));
+    writeFileSync(join(ctx, 'buildlock', PRIVATE_SCOPES_FILE), JSON.stringify({ scopes: { '@corp': { origins: ['https://npm.corp.example'], firstSeen: '2026-10-01T00:00:00.000Z' } } }));
+    const calls: Call[] = [];
+    expect(() => operatorInstall(ctx, host, '', fakeNpm(calls))).toThrow(/@corp .*npm\.corp\.example[\s\S]*@neuralis\/agent-core is part of the release image/);
+    expect(calls).toEqual([]);
+    // The routed twin: the scope's route is in the secret, so it installs, with the release-age floor lifted for that scope only.
+    withOperators(ctx, { '@acme/x': '1.0.0' });
+    const npmrc = join(ctx, 'npmrc');
+    writeFileSync(npmrc, '@corp:registry=https://npm.corp.example/\n');
+    operatorInstall(ctx, host, npmrc, fakeNpm(calls));
+    expect(calls[0]!.args).toContain('--min-release-age-exclude=@corp/*');
+  });
+
+  it('a local tarball installs from its slot, by the listLocalSources order the compose contexts use', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/t': 'file:/home/op/packs/acme-t-1.0.0.tgz', '@acme/x': '1.0.0' });
+    mkdirSync(join(ctx, 'slots', '0'), { recursive: true });
+    writeFileSync(join(ctx, 'slots', '0', 'acme-t-1.0.0.tgz'), 'tgz');
+    let written: Record<string, string> = {};
+    operatorInstall(ctx, host, '', fakeNpm([], (root) => { written = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies; }));
+    expect(written).toEqual({ '@acme/t': `file:${join(ctx, 'slots', '0', 'acme-t-1.0.0.tgz')}`, '@acme/x': '1.0.0' });
+  });
+
+  it('a local folder is built in its own copy by npm — its host node_modules dropped, the image kernel as its peer — then packed and installed packed', async () => {
+    const { operatorInstall } = await import('../build-workspace.mjs');
+    const { ctx, host } = image();
+    withOperators(ctx, { '@acme/dev': 'file:/home/op/work/dev' });
+    const slot = join(ctx, 'slots', '0');
+    mkdirSync(join(slot, 'node_modules', 'glibc-only'), { recursive: true });
+    writeFileSync(join(slot, 'package.json'), JSON.stringify({
+      name: '@acme/dev', version: '1.0.0', peerDependencies: { '@neuralis/package-system': '*' },
+      scripts: { build: "node -e \"require('fs').writeFileSync('built.txt','ok')\"" },
+    }));
+    const calls: Call[] = [];
+    let written: Record<string, string> = {};
+    let atPack: { built: boolean; hostTree: boolean; peer: string } | null = null;
+    const npm = fakeNpm(calls, (root) => { written = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies; });
+    // No real package manager runs here: install, the build script and pack all go through the fake.
+    operatorInstall(ctx, host, '', (cmd: string, args: string[], opts: { cwd: string }) => {
+      if (args[0] === 'run') {
+        calls.push({ cmd, args, cwd: opts.cwd });
+        writeFileSync(join(opts.cwd, 'built.txt'), 'ok');
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'pack') {
+        calls.push({ cmd, args, cwd: opts.cwd });
+        atPack = {
+          built: existsSync(join(opts.cwd, 'built.txt')),
+          hostTree: existsSync(join(opts.cwd, 'node_modules', 'glibc-only')),
+          peer: realpathSync(join(opts.cwd, 'node_modules', '@neuralis', 'package-system')),
+        };
+        writeFileSync(join(args[args.indexOf('--pack-destination') + 1], 'acme-dev-1.0.0.tgz'), 'tgz');
+        return { status: 0, stdout: 'acme-dev-1.0.0.tgz\n', stderr: '' };
+      }
+      return npm(cmd, args, opts);
+    });
+    const built = join(ctx, 'work', 'local', 'acme__dev');
+    // The folder's scripts run through the package manager that installed it — npm, never pnpm.
+    expect(calls.map((c) => [c.cmd, ...c.args.slice(0, 2), c.cwd])).toEqual([
+      ['npm', 'install', expect.any(String), built],
+      ['npm', 'run', 'build', built],
+      ['npm', 'pack', '--silent', built],
+      ['npm', 'install', '--omit=dev', join(host, '_operator')],
+    ]);
+    expect(atPack).toEqual({ built: true, hostTree: false, peer: realpathSync(join(host, 'node_modules', '@neuralis', 'package-system')) });
+    expect(written['@acme/dev']).toBe(`file:${join(ctx, 'work', 'local-tgz', 'acme-dev-1.0.0.tgz')}`);
+    // The work folder is gone once the layer is done; what was built there stayed out of the image root.
+    expect(existsSync(join(ctx, 'work'))).toBe(false);
+  });
+
+  it('the release-age floor is the tracked pnpm-workspace.yaml one, in npm\'s unit', async () => {
+    const { OPERATOR_RELEASE_AGE_DAYS } = await import('../build-workspace.mjs');
+    const yaml = readFileSync(join(dirname(SCRIPT), '..', '..', '..', 'pnpm-workspace.yaml'), 'utf8');
+    expect(Number(yaml.match(/^minimumReleaseAge: (\d+)$/m)?.[1]) / 1440).toBe(OPERATOR_RELEASE_AGE_DAYS);
   });
 });

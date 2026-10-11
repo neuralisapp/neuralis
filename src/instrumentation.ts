@@ -25,7 +25,8 @@
  * 3. Starts the host process monitor (CPU + event-loop lag → `perf.slow` in
  *    `docker logs`; `server/logging/processMonitor.ts`) and registers its stop
  *    as a shutdown step. Before the MCP branch, so it runs in every deployment.
- * 4. Starts the community MCP HTTP server on a separate port (default 3101).
+ * 4. Starts the community MCP HTTP server on a separate port (default 3101);
+ *    its rejection is logged, never re-thrown (see the step).
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
@@ -105,6 +106,14 @@ export async function register(): Promise<void> {
   const port = process.env.MCP_HTTP_PORT;
   if (port === '0' || port === 'false') return;
 
+  // A rejection here must not escape `register()`: Next would answer every
+  // request — `/api/health` included — with its instrumentation-hook 500. A
+  // failed bootstrap is already logged in full by the pre-warm above and held
+  // as `phase='error'`; the companion port simply stays closed.
   const { startMcpServer } = await import('./server/mcp/startMcpServer');
-  await startMcpServer();
+  await startMcpServer().catch((err: unknown) => {
+    getLogger().child('mcp-server').error(
+      `MCP server not started: ${err instanceof Error ? err.name : 'unknown error'} (a bootstrap failure is logged by bootstrap-prewarm)`,
+    );
+  });
 }

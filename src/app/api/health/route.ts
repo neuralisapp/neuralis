@@ -7,7 +7,9 @@ export const dynamic = 'force-dynamic';
 export async function GET(): Promise<NextResponse> {
   const state = getBootstrapStatus();
   if (state.phase === 'error') {
-    return NextResponse.json({ status: 'error', error: 'bootstrap_failed' }, { status: 503 });
+    // `code` is a closed-set class (a data-format refusal reason, else `bootstrap_failed`);
+    // the message — kind, versions, checkpoint, restore command — is the server log's alone.
+    return NextResponse.json({ status: 'error', error: 'bootstrap_failed', code: state.errorCode ?? 'bootstrap_failed' }, { status: 503 });
   }
   const runtime = peekRuntime();
   if (state.phase !== 'ready' || !runtime) {

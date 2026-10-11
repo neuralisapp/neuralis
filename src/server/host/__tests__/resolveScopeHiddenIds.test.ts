@@ -109,18 +109,23 @@ describe('resolveScopeHiddenIds — Axis 2 base-access feature', () => {
     expect(hidden.has(BUILTIN_ID)).toBe(true); // base-access override applies to builtins
   });
 
-  it('translates a namespaced project-package id to its MANIFEST id for the override lookup', async () => {
-    const NS_ID = 'p.proj-a.project.securepkg';
+  it('uses the exact instance override without inheriting the same authored name', async () => {
+    const NS_ID = 'packages://one?project=proj-a&scope=project';
+    const sibling = 'other://two?project=proj-a&scope=project';
     const mgr = makeManager({
-      projectPkgIds: { 'proj-a': [NS_ID] },   // loaded under the scope-namespaced id
+      projectPkgIds: { 'proj-a': [NS_ID, sibling] },   // loaded under the scope-namespaced id
       manifestIds: { [NS_ID]: 'securepkg' },  // namespaced → manifest
-      registry: [{ id: NS_ID }],              // no manifest accessFeature; override only
+      registry: [{ id: NS_ID }, { id: sibling }],              // no manifest accessFeature; override only
     });
-    // Admin override keyed by the MANIFEST id (what the Packages tab writes).
+    // An unmigrated authored-name override must not leak across instances.
     const { deps } = makeDeps(mgr, { securepkg: 'secure.access' });
 
     const hidden = await resolveScopeHiddenIds(deps, memberCaller('proj-a'));
-    expect(hidden.has(NS_ID)).toBe(true); // manifest-keyed override still hides the namespaced id
+    expect(hidden.has(NS_ID)).toBe(false);
+    const exact = makeDeps(mgr, { [NS_ID]: 'secure.access' });
+    const restricted = await resolveScopeHiddenIds(exact.deps, memberCaller('proj-a'));
+    expect(restricted.has(NS_ID)).toBe(true);
+    expect(restricted.has(sibling)).toBe(false);
   });
 });
 

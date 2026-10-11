@@ -272,6 +272,13 @@ describe('the popover', () => {
     expect(seen).not.toContain('×1');
   });
 
+  it('a row that opens something ends in a chevron; one without a nav does not', () => {
+    const opens = renderToStaticMarkup(createElement(NotificationRowButton, { row: row('1', { nav: { widgetType: 'calendar' } }), faded: false, onOpen: () => undefined }));
+    expect(opens).toContain('data-notification-opens');
+    const plain = renderToStaticMarkup(createElement(NotificationRowButton, { row: row('1', { nav: undefined }), faded: false, onOpen: () => undefined }));
+    expect(plain).not.toContain('data-notification-opens');
+  });
+
   it('relative time', () => {
     const now = Date.parse('2026-10-02T12:00:00.000Z');
     expect(relativeTime('2026-10-02T11:59:50.000Z', now)).toBe('now');

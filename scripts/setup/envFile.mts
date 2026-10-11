@@ -21,6 +21,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { spell } from '../cli/spelling.mts';
 
 /**
  * Parse `KEY=value` lines, stripping surrounding quotes.
@@ -207,7 +208,7 @@ export function resolveImageTag(envVars: Record<string, string>, monorepo: boole
   if (!tag) {
     throw new Error(
       '.env has no NEURALIS_IMAGE_TAG, and this install runs the published image at an exact tag.\n' +
-      '  Fix: re-run the full `pnpm neuralis:setup` (it records the version this install ships),\n' +
+      `  Fix: re-run the full \`${spell('setup')}\` (it records the version this install ships),\n` +
       '  or add a NEURALIS_IMAGE_TAG=<version> line to .env yourself — the release you run —\n' +
       '  then re-run --compose-only. Nothing was written.',
     );
@@ -233,12 +234,17 @@ export type ImageTagMove = { move: true; tag: string } | { move: false; reason: 
 
 /**
  * Whether an applied `neuralis:update` moves `NEURALIS_IMAGE_TAG`: only a run that
- * put EVERY registry package on one explicit `--version` — that version is a
- * release, and the image of that release is what the container must run.
+ * put EVERY registry package on one release — a release manifest's
+ * `neuralisapp/neuralis` image, or one explicit `--version` — because the image
+ * of that release is what the container must run. `manifest` is null for a
+ * `--version` run.
  */
-export function imageTagAfterUpdate(input: { targetVersion: string | null; onePackage: boolean; manifest: boolean }): ImageTagMove {
-  if (input.manifest) return { move: false, reason: 'a release manifest names package versions, not an image tag — set NEURALIS_IMAGE_TAG in .env yourself' };
+export function imageTagAfterUpdate(input: { targetVersion: string | null; onePackage: boolean; manifest: { image: string | null } | null }): ImageTagMove {
   if (input.onePackage) return { move: false, reason: 'a single-package update is not a release — the container keeps its image' };
+  if (input.manifest) {
+    if (!input.manifest.image) return { move: false, reason: 'the release manifest names no neuralisapp/neuralis image — the container keeps its image' };
+    return { move: true, tag: checkedImageTag(input.manifest.image, 'the release manifest') };
+  }
   if (!input.targetVersion) return { move: false, reason: 'no --version was given' };
   return { move: true, tag: checkedImageTag(input.targetVersion, '--version') };
 }
@@ -248,9 +254,9 @@ export function imageTagLines(tag: string | null): string[] {
   if (!tag) return [];
   return [
     '# The neuralisapp/neuralis release this install runs. The compose file pins',
-    '# exactly this tag; `pnpm neuralis:update --version <x> --apply` moves it.',
+    '# exactly this tag; `neuralis update --version <x> --apply` moves it.',
     '# To roll back: write the previous tag here, then',
-    '# `pnpm neuralis:setup --compose-only && docker compose up -d -V`.',
+    '# `neuralis setup --compose-only && docker compose up -d -V`.',
     `NEURALIS_IMAGE_TAG=${tag}`,
   ];
 }

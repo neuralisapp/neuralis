@@ -14,14 +14,14 @@ secret file, an allowlist, and a compose bind. None of those can be created from
 the platform, whatever permissions a caller holds.
 
 ```bash
-pnpm neuralis:host-broker init      # secret + scratch + a DENY-ALL ceiling; prints the unit
-pnpm neuralis:host-broker install   # the confinement helper, copied from the built image and proved
-pnpm neuralis:host-broker upgrade   # install + unit refresh + broker restart (after every rebuild)
-pnpm neuralis:host-broker run       # run it in the foreground (or install the unit)
-pnpm neuralis:host-broker status    # readiness: secret, ceiling, helper + drift, transport, confinement mode, detached runs, pending requests
-pnpm neuralis:host-broker grant --exec|--read|--write <dir>   # answer a recorded request: atomic ceiling write + reload
-pnpm neuralis:host-broker attach    # write a host-plane source config for a project
-pnpm neuralis:setup --compose-only  # regenerate compose with the broker binds
+npx neuralis host-broker init      # secret + scratch + a DENY-ALL ceiling; prints the unit
+npx neuralis host-broker install   # the confinement helper, copied from the built image and proved
+npx neuralis host-broker upgrade   # install + unit refresh + broker restart (after every rebuild)
+npx neuralis host-broker run       # run it in the foreground (or install the unit)
+npx neuralis host-broker status    # readiness: secret, ceiling, helper + drift, transport, confinement mode, detached runs, pending requests
+npx neuralis host-broker grant --exec|--read|--write <dir>   # answer a recorded request: atomic ceiling write + reload
+npx neuralis host-broker attach    # write a host-plane source config for a project
+npx neuralis setup --compose-only  # regenerate compose with the broker binds
 ```
 
 The confinement helper is the sixth artifact. `install` does not compile anything by
@@ -92,7 +92,7 @@ macOS it is unavailable and therefore denied.
 - The broker refuses to bind a non-loopback address. That is a hard startup error, not a
   configuration option.
 
-`pnpm neuralis:host-broker status` answers all of the above authenticated, which is why
+`npx neuralis host-broker status` answers all of the above authenticated, which is why
 it is the first thing to run when a host command reports the plane unreachable. A
 structured denial names which requirement failed — read it rather than retrying, and
 never quietly fall back to running the command in the container instead. `/neuralis`
@@ -108,7 +108,7 @@ broker records the request — the paths, the working directory,
 which list would need widening, and the `reason` the agent gave the command — in a
 file beside the broker's directory (outside what the container can read). `status`
 lists the pending requests; the operator answers with
-`pnpm neuralis:host-broker grant --exec|--read|--write <dir>`, which appends to the
+`npx neuralis host-broker grant --exec|--read|--write <dir>`, which appends to the
 named list atomically, reloads the broker without a restart, and clears the requests it
 satisfied. `exec` is for toolchain roots (a host `node`, `pnpm`, `cargo`, a CLI's
 launcher — `init` and `status` suggest the ones detected on the host under

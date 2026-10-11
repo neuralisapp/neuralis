@@ -9,16 +9,13 @@
  * `requires.accessFeature`); it never grants access, so it can never weaken a
  * floor or create a trust tier.
  *
- * The `:slug` param is the package id the Packages tab sends — in the current UI
- * that is the **scope-namespaced snapshot id** (`pkg.id`, e.g.
- * `p.main.project.word-count`); a manifest-id caller is also supported. The override
- * is STORED keyed by whatever id was sent. The readers (bootstrap Axis-2
- * `resolveScopeHiddenIds` for the stream, `snapshot.ts` base-access gate for the
- * client snapshot) match with a DUAL-KEY lookup `overrides[manifestId] ??
- * overrides[id]` (`getPackageManifestId(projectId, id) ?? id`), so BOTH a
- * namespaced write (the real UI) AND a manifest-id write resolve — no reload
- * needed. **Do NOT simplify the reader to manifest-only: it would silently break
- * the namespaced key the workspace Packages panel actually writes.**
+ * The `:slug` param is the package id the Packages tab sends — the exact runtime
+ * id from the snapshot (`pkg.id`): the host-stamped instance URI
+ * `packages://<slug>?project=…&scope=…` for a project package, `@neuralis/*` for
+ * a builtin. The override is STORED keyed by that id, and both readers (bootstrap
+ * Axis-2 `resolveScopeHiddenIds` for the stream, `resolveOverrideFeature` for the
+ * client snapshot) read ONLY that exact key — never the authored manifest id,
+ * which two installations can share — so it applies with no reload.
  *
  * Body: { featureId: string | null }
  *   - non-empty string — attach the required feature

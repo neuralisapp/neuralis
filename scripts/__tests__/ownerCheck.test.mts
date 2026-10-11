@@ -7,7 +7,7 @@
 
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { promptOwnerCredentials, type PromptIo } from '../setup/ownerCheck.mts';
+import { askHidden, askLine, promptOwnerCredentials, type PromptIo } from '../setup/ownerCheck.mts';
 
 /** A fake TTY: raw mode is a no-op switch, the output is captured. */
 function fakeTerminal(): { io: PromptIo; typed: (text: string) => void; screen: () => string } {
@@ -45,5 +45,35 @@ describe('the owner credential prompt', () => {
     const afterPrompt = term.screen().slice(term.screen().indexOf('Owner password'));
     for (const ch of password) expect(afterPrompt, `echoed ${ch}`).not.toContain(ch);
     expect(afterPrompt).toContain('*'.repeat(password.length));
+  });
+});
+
+describe('askLine (every typed-again consent gate)', () => {
+  it('an input that ends with no answer answers empty — a refusal — instead of never settling', async () => {
+    const input = new PassThrough();
+    input.end();
+    const answer = await Promise.race([askLine('Type x again', { input, output: new PassThrough(), terminal: false }), new Promise<string>((r) => setTimeout(() => r('HUNG'), 2_000))]);
+    expect(answer).toBe('');
+  });
+
+  it('PAIRED CONTROL — an answered line still comes back, trimmed', async () => {
+    const input = new PassThrough();
+    input.end('  cp-1 \n');
+    expect(await askLine('Type x again', { input, output: new PassThrough(), terminal: false })).toBe('cp-1');
+  });
+});
+
+describe('askHidden (the owner-password prompt of the destructive commands)', () => {
+  it('an input that ends before Enter answers empty — a refusal — instead of never settling', async () => {
+    const input = new PassThrough();
+    input.end('par');
+    const answer = await Promise.race([askHidden('Owner password', { input, output: new PassThrough(), terminal: false }), new Promise<string>((r) => setTimeout(() => r('HUNG'), 2_000))]);
+    expect(answer).toBe('');
+  });
+
+  it('a pasted chunk that carries its Enter answers at once with the value before it', async () => {
+    const input = new PassThrough();
+    input.write('s3cret\nrest');
+    expect(await askHidden('API key', { input, output: new PassThrough(), terminal: false })).toBe('s3cret');
   });
 });

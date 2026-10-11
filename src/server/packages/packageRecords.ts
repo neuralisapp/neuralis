@@ -1,5 +1,8 @@
+import { relative, sep } from 'node:path';
+import { validateManifest } from '@neuralis/package-system';
 import type { PackageDefinition, SourceScope } from '@neuralis/package-system/contracts';
-import { namespaceProjectPackageId } from '@neuralis/package-system/contracts';
+import { packageInstanceId } from '@neuralis/package-system/contracts';
+import { sanitizePackageId } from '@neuralis/package-system/paths';
 import { BUILTIN_PACKAGE_IDS } from '../host/builtinSlots';
 
 export type PackageScope = 'builtin' | 'installed' | 'authored' | 'project';
@@ -56,6 +59,7 @@ export function sanitizeProjectPackageDefinition(
   trust: 'trusted' | 'untrusted' = 'untrusted',
 ): PackageDefinition {
   assertProjectPackageIdAllowed(definition.id);
+  if (!validateManifest(definition).valid) throw new Error(`Invalid authored package manifest: ${definition.id}`);
   return {
     ...definition,
     access: {
@@ -69,20 +73,23 @@ export function toResolvedRecord(
   r: ProjectPackageRecord,
   projectId: string,
   scope: SourceScope,
+  origin?: { directory: string; uriRoot: string },
 ): ResolvedPackageRecord {
-  // The reserved-id + charset guard runs on the RAW manifest id FIRST (inside
-  // `sanitizeProjectPackageDefinition`); THEN the loader/registry id is
-  // scope-namespaced so two owning scopes' same-manifest-id packages occupy
-  // DISTINCT loader slots (no cross-tenant/cross-scope code substitution). The
-  // manifest id is preserved on `manifestId` for the admin trust/access-feature
-  // keys + display. Builtins are never namespaced (identity → unchanged).
   const sanitized = sanitizeProjectPackageDefinition(r.definition, r.trust);
-  const runtimeId = BUILTIN_PACKAGE_IDS.has(r.packageId)
-    ? r.packageId
-    : namespaceProjectPackageId(projectId, scope, r.packageId);
+  const validation = validateManifest(sanitized);
+  if (!validation.valid) throw new Error(`Invalid authored package manifest: ${r.packageId}`);
+  const rel = origin ? relative(origin.directory, r.packageRoot).split(sep).join('/') : r.slug;
+  if (rel === '..' || rel.startsWith('../')) throw new Error('Package root escapes its source');
+  const originUri = origin ? `${origin.uriRoot}${origin.uriRoot.endsWith('://') || origin.uriRoot.endsWith('/') || !rel ? '' : '/'}${rel}` : `packages://${rel}`;
+  const runtimeId = packageInstanceId({ originUri, projectId, scope });
+  // The instance's data zone must be representable (a leaf over NAME_MAX
+  // throws) — refused HERE, where the scanner skips and names the record,
+  // never later inside provisioning where it would fail the project's load.
+  sanitizePackageId(runtimeId);
   return {
     packageId: runtimeId,
     manifestId: r.packageId,
+    originUri,
     scope: 'project',
     ownerScope: scope,
     ownerProjectId: projectId,
@@ -97,15 +104,12 @@ export function toResolvedRecord(
 }
 
 export type ResolvedPackageRecord = {
-  /** The loader/registry id — scope-NAMESPACED for project packages (equals
-   *  `manifestId` for builtins). Every loader/registry/snapshot/dispatch surface
-   *  keys on this. */
+  /** Canonical host-derived instance URI; platform packages retain their authored npm id. */
   packageId: string;
-  /** The RAW manifest id (pre-namespace) — the STABLE admin/display key. Admin
-   *  `packageTrust`/`packageAccessFeature` overrides are keyed by this, so every
-   *  namespaced→manifest read (bootstrap Axis-2, snapshot base-access) translates
-   *  via it. Equals `packageId` for builtins. */
+  /** Authored npm name used for display and manifest validation, never mutable trust authority. */
   manifestId: string;
+  /** Host-derived source URI, independent of the authored npm name. */
+  originUri?: string;
   /** Discovery CLASS (builtin/installed/authored/project) — NOT the owning scope. */
   scope: PackageScope;
   /**
@@ -117,9 +121,8 @@ export type ResolvedPackageRecord = {
   /**
    * Owning PROJECT id, carried explicitly.
    *
-   * It is also a component of the namespaced `packageId`, but that id must
-   * NEVER be parsed back (sourceScope doctrine) — the value travels on the
-   * record instead. The loader needs it because a package's declared
+   * It is also the `project` of the instance `packageId`; the value travels on
+   * the record and the loader requires the two to agree. The loader needs it because a package's declared
    * `connectors[]` must register into ITS project's partition; without it the
    * loader hardcoded `''`, which is the platform lane, i.e. visible in every
    * project. Absent ⇒ host-assigned builtin (the platform lane is correct).

@@ -11,8 +11,15 @@
 import type { EmbeddingEndpointEntry } from '@neuralis/package-system/contracts';
 
 export type VectorChoice = {
-  modelId: string;
-  dimension: number;
+  /**
+   * `false` = no embedding: no provider is ever called, indexing and text/field
+   * search work, and the first boot writes a metadata-only lock. Seeds
+   * `embeddingEnabled=false`; `true` seeds nothing (the declared default).
+   */
+  enabled: boolean;
+  /** The TARGET model a later activation embeds with — absent when none was chosen. */
+  modelId?: string;
+  dimension?: number;
   /** Only when model uses the Ollama protocol. */
   ollamaUrl?: string;
   /** The model's own embedding credential (`embedding.<provider>` / `embedding.endpoint.<id>`). */

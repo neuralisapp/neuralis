@@ -100,7 +100,7 @@ function seedRecord(id: string, over: Partial<ProjectRecord> = {}): ProjectRecor
     },
     agentOwnership: {},
     limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} } },
-    roleGrantVersion: 18,
+    roleGrantVersion: 19,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...over,

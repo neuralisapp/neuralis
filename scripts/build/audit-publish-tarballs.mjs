@@ -36,6 +36,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -102,7 +103,7 @@ export function forbiddenPathReason(file) {
  * paths, the private commerce package's content, and absolute paths from the
  * build machine. Run with `--strict` to see the current codename inventory.
  */
-const CODENAMES = [
+export const CODENAMES = [
   'wave1-closeout',
   'periodic-pelican',
   'tunable-tanager',
@@ -171,14 +172,36 @@ function escapeRegExp(text) {
 }
 
 /**
- * Content markers no published file may carry: each machine root (as a path
- * prefix) and each private text (case-insensitive — the private repository's
- * `owner/name`, for instance).
+ * Private first-party package names every public write refuses whatever the
+ * caller passes: a package that lives in its own private repository and is
+ * never published. A runner cannot learn one from its environment the way it
+ * learns the private repository's name, and spelling it here would publish it
+ * in this very file — so each is held as the SHA-256 of its lowercase
+ * `@neuralis/<name>` and every `@neuralis/<name>` token in a file is hashed.
  */
-export function privateMarkers({ roots, texts = [] }) {
+export const PRIVATE_PACKAGE_NAME_SHA256 = ['9a76ff8beba664b8533a5400db03cf4a09a7a6c1c70284730f8de11d6eaf3345'];
+
+const SCOPED_NAME = /@neuralis\/[a-z0-9._-]+/gi;
+
+function sha256(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Content markers no published file may carry: each machine root (as a path
+ * prefix), each private text (case-insensitive — the private repository's
+ * `owner/name`, for instance) and, always, the private package names by hash.
+ */
+export function privateMarkers({ roots, texts = [], nameHashes = PRIVATE_PACKAGE_NAME_SHA256 }) {
+  const privateTexts = [...new Set(texts.filter(Boolean))];
+  const hashes = new Set(nameHashes);
   return [
     ...roots.map((root) => ({ what: `the machine-absolute path ${root}`, pattern: new RegExp(`${escapeRegExp(root)}(?![\\w.-])`) })),
-    ...texts.filter(Boolean).map((text) => ({ what: `the private identifier "${text}"`, pattern: new RegExp(escapeRegExp(text), 'i') })),
+    ...privateTexts.map((text) => ({ what: `the private identifier "${text}"`, pattern: new RegExp(escapeRegExp(text), 'i') })),
+    {
+      what: 'a private first-party package name',
+      pattern: { test: (content) => [...String(content).matchAll(SCOPED_NAME)].some((m) => hashes.has(sha256(m[0].toLowerCase()))) },
+    },
   ];
 }
 

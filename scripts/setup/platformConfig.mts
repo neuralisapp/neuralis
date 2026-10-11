@@ -6,7 +6,10 @@
  * (measured on a real install: 23 keys on disk, 9 in the seed — 14 lost,
  * including the host-execution-plane switch) and downgraded three more to the
  * wizard's literals. A setup re-run is a MAINTENANCE action; an existing value
- * is the operator's decision and is never overwritten here.
+ * is the operator's decision and is never overwritten by the seed. The one
+ * writer that raises an existing value is `pnpm neuralis:update` applying a
+ * release line (`replaceExisting`): a companion image the install pins to the
+ * release default moves with the release, a custom image never does.
  *
  * The seed is also deliberately SMALL. Tunables that packages declare
  * (`maxAgentSteps`, `defaultTemperature`, `maxProjects`) are NOT seeded: the
@@ -31,17 +34,31 @@ export type PlatformConfigMerge = {
   kept: string[];
   /** Keys the seed contributed because the file did not have them. */
   added: string[];
+  /** Existing keys an update raised to a release's value (`replaceExisting`). */
+  replaced: string[];
 };
 
-/** Merge a seed into existing config: existing values win, always. */
+/**
+ * Merge a seed into existing config: existing values win, always. The ONE
+ * exception is `replaceExisting` — an update raising a value the operator's
+ * install already pins to a release default (the caller decided it is one);
+ * a key the file does not carry is never added that way.
+ */
 export function mergePlatformConfig(
   existing: Record<string, unknown>,
   seed: Record<string, unknown>,
+  replaceExisting: Record<string, unknown> = {},
 ): PlatformConfigMerge {
   const merged: Record<string, unknown> = { ...existing };
   const kept: string[] = [];
   const added: string[] = [];
+  const replaced: string[] = [];
 
+  for (const [key, value] of Object.entries(replaceExisting)) {
+    if (!Object.prototype.hasOwnProperty.call(existing, key) || existing[key] === value) continue;
+    merged[key] = value;
+    replaced.push(key);
+  }
   for (const [key, value] of Object.entries(seed)) {
     if (Object.prototype.hasOwnProperty.call(existing, key)) {
       kept.push(key);
@@ -51,7 +68,7 @@ export function mergePlatformConfig(
     added.push(key);
   }
 
-  return { merged, kept: kept.sort(), added: added.sort() };
+  return { merged, kept: kept.sort(), added: added.sort(), replaced: replaced.sort() };
 }
 
 /**
@@ -99,12 +116,13 @@ export function platformConfigPath(neuralisHome: string): string {
 export async function writeMergedPlatformConfig(
   neuralisHome: string,
   seed: Record<string, unknown>,
+  replaceExisting: Record<string, unknown> = {},
 ): Promise<PlatformConfigMerge & { filePath: string }> {
   const configDir = join(neuralisHome, 'app', 'config');
   await mkdir(configDir, { recursive: true, mode: 0o700 });
 
   const existing = await readPlatformConfig(neuralisHome);
-  const result = mergePlatformConfig(existing, seed);
+  const result = mergePlatformConfig(existing, seed, replaceExisting);
   const filePath = platformConfigPath(neuralisHome);
   await writeFile(filePath, JSON.stringify(result.merged, null, 2), { encoding: 'utf-8', mode: 0o600 });
   return { ...result, filePath };

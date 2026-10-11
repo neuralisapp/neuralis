@@ -52,7 +52,7 @@ export type PackageVisibilityScope = {
   agentId?: string;
   role?: string;
   grantedFeatures?: string[];
-  /** R2b — owner/admin base-access feature OVERRIDE map (manifest id → feature id). */
+  /** R2b — owner/admin base-access feature OVERRIDE map (runtime instance id → feature id). */
   packageAccessFeature?: Record<string, string>;
 };
 
@@ -92,21 +92,14 @@ export function passesBaseAccessFeature(
   return true;
 }
 
-/**
- * R2b — resolve the project override feature for a (possibly scope-namespaced)
- * registry package id. The admin override map is keyed by the RAW manifest id,
- * so translate namespaced→manifest before matching.
- */
+/** Mutable overrides belong to the exact runtime instance; authored feature gates stay separate. */
 export function resolveOverrideFeature(
   scope: Pick<PackageVisibilityScope, 'projectId' | 'packageAccessFeature'>,
   definitionId: string,
 ): string | undefined {
   const overrides = scope.packageAccessFeature;
   if (!overrides) return undefined;
-  const manifestId = scope.projectId
-    ? (getPackageRuntimeManager().getPackageManifestId(scope.projectId, definitionId) ?? definitionId)
-    : definitionId;
-  return overrides[manifestId] ?? overrides[definitionId];
+  return overrides[definitionId];
 }
 
 /** Step 1 of the ladder — `meta.hosts` targeting. */
@@ -174,11 +167,9 @@ export function isPackageDefinitionVisible(
 export type VisiblePackageSurface = {
   packageId: string;
   /**
-   * RAW manifest id (namespaced→manifest translated via the ONE
-   * `getPackageManifestId` map; falls back to `packageId` for builtins).
-   * The `ProjectPackageScanner` records key on this — NEVER pass the
-   * namespaced `packageId` to a scanner lookup (BUG-A: both lookups miss and
-   * every project-package mint answers 404).
+   * Authored manifest id from `getPackageManifestId` (packageId for builtins).
+   * Descriptive metadata only: asset roots resolve by the exact packageId,
+   * because distinct installations can share an authored name.
    */
   manifestId: string;
   surfaceKind: SurfaceAssetKind;

@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { spell } from '../cli/spelling.mts';
 
 /** The version this release of the host is built and tested against. */
 export const QDRANT_TARGET_VERSION = '1.19.1';
@@ -103,7 +104,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
 ];
 
 /** The upgrade command, named in every refusal. */
-export const QDRANT_UPGRADE_COMMAND = 'pnpm neuralis:qdrant-upgrade';
+export const QDRANT_UPGRADE_COMMAND = spell('qdrant-upgrade');
 
 type ParsedVersion = { major: number; minor: number; patch: number };
 

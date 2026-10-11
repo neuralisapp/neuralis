@@ -23,12 +23,20 @@ import {
 describe('the install target follows the UNIT, never the first existing path', () => {
   const unit = buildUnitText({
     execPath: '/usr/bin/node',
-    entry: '/opt/n/server.mjs',
+    bin: '/opt/install/node_modules/neuralis/bin/neuralis.mjs',
+    home: '/h/.neuralis',
     socket: '/h/.neuralis/host-broker/host-broker.sock',
     secret: '/h/.neuralis/host-broker/secret',
     ceiling: '/h/.neuralis/host-broker/ceiling.json',
     scratch: '/h/.neuralis/host-broker/terminal-scratch',
     sandboxer: '/h/.local/bin/nrs-sandboxer',
+  });
+
+  it('runs the broker through the one CLI, at the bin of the host package it was written from', () => {
+    // A converted install folder moves the bin from `<dir>/scripts` into
+    // `node_modules/neuralis`, so `host-broker upgrade` re-renders exactly this line.
+    expect(unit).toContain('ExecStart=/usr/bin/node /opt/install/node_modules/neuralis/bin/neuralis.mjs host-broker run\n');
+    expect(unit).toContain('Environment=NEURALIS_HOME=/h/.neuralis\n');
   });
 
   it('round-trips the sandboxer line through the ONE unit builder', () => {

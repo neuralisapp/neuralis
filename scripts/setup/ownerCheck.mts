@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { stdin, stdout } from 'node:process';
 import { createInterface } from 'node:readline/promises';
 import bcrypt from 'bcryptjs';
+import { CliExit } from '../cli/registry.mts';
+import { spell } from '../cli/spelling.mts';
 
 export type OwnerRecord = {
   id: string;
@@ -29,7 +31,7 @@ export type OwnerRecord = {
 export async function verifyOwnerCredentials(neuralisHome: string, email: string, password: string): Promise<OwnerRecord> {
   const dir = join(neuralisHome, 'app', 'users');
   if (!existsSync(dir)) {
-    throw new Error(`No users directory at ${dir}. Run \`pnpm neuralis:setup\` first.`);
+    throw new Error(`No users directory at ${dir}. Run \`${spell('setup')}\` first.`);
   }
   const wanted = email.trim().toLowerCase();
   const files = (await readdir(dir)).filter((f) => f.endsWith('.json'));
@@ -57,41 +59,60 @@ function defaultIo(): PromptIo {
 /**
  * One visible answer. The readline interface lives only for this question:
  * an interface left open on stdin keeps echoing every keystroke — including
- * the next, HIDDEN, answer — whatever `pause()` says.
+ * the next, HIDDEN, answer — whatever `pause()` says. An input that ENDS with
+ * no answer (a closed stdin, a pipe) answers `''`, so every consent gate built
+ * on this refuses by default — `rl.question` alone never settles then.
  */
 export async function askLine(prompt: string, io: PromptIo = defaultIo()): Promise<string> {
   const rl = createInterface({ input: io.input, output: io.output, terminal: io.terminal });
+  const ended = new Promise<string>((resolve) => rl.once('close', () => resolve('')));
   try {
-    return (await rl.question(`  ${prompt}: `)).trim();
+    return (await Promise.race([rl.question(`  ${prompt}: `), ended])).trim();
   } finally {
     rl.close();
   }
 }
 
 /**
- * Hidden terminal input: raw mode, one `*` per keystroke, Ctrl-C exits. It
- * owns the input while it reads; no readline interface may be open on it.
+ * Hidden terminal input: raw mode, one `*` per keystroke, Ctrl-C aborts the command. It
+ * owns the input while it reads; no readline interface may be open on it. An input that
+ * ENDS before Enter answers `''`, like `askLine`, so the gate refuses instead of hanging.
  */
 export async function askHidden(prompt: string, io: PromptIo = defaultIo()): Promise<string> {
-  io.output.write(`  ${prompt}: `);
-  return await new Promise<string>((resolve) => {
+  return await new Promise<string>((resolve, reject) => {
     const input = io.input;
     let value = '';
     const wasRaw = input.isRaw ?? false;
+    // Raw mode BEFORE the prompt: a byte typed the moment the prompt appears must
+    // never meet the terminal's cooked-mode echo.
     if (typeof input.setRawMode === 'function') input.setRawMode(true);
     input.resume();
     input.setEncoding('utf8');
-    const onData = (chunk: string) => {
+    io.output.write(`  ${prompt}: `);
+    const release = (): void => {
+      if (typeof input.setRawMode === 'function') input.setRawMode(wasRaw);
+      input.pause();
+      input.removeListener('data', onData);
+      input.removeListener('end', onEnd);
+    };
+    const onEnd = (): void => {
+      release();
+      io.output.write('\n');
+      resolve('');
+    };
+    const onData = (chunk: string): void => {
       for (const ch of chunk) {
         if (ch === '\n' || ch === '\r' || ch === '\u0004') {
-          if (typeof input.setRawMode === 'function') input.setRawMode(wasRaw);
-          input.pause();
-          input.removeListener('data', onData);
+          release();
           io.output.write('\n');
           resolve(value);
           return;
         }
-        if (ch === '\u0003') process.exit(1);
+        if (ch === '\u0003') {
+          release();
+          reject(new CliExit(130, 'Interrupted.'));
+          return;
+        }
         if (ch === '\u007f' || ch === '\b') {
           if (value.length > 0) { value = value.slice(0, -1); io.output.write('\b \b'); }
         } else {
@@ -101,6 +122,7 @@ export async function askHidden(prompt: string, io: PromptIo = defaultIo()): Pro
       }
     };
     input.on('data', onData);
+    input.once('end', onEnd);
   });
 }
 

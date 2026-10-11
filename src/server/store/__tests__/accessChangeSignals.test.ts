@@ -55,7 +55,7 @@ function member(userId: string, role: string) {
   return { userId, name: userId, email: `${userId}@x.co`, role, position: role, tier: role === 'owner' ? 1 : 20, addedAt: '2026-01-01T00:00:00.000Z' };
 }
 
-async function seedProject(id: string): Promise<void> {
+async function seedProject(id: string, over: Record<string, unknown> = {}): Promise<void> {
   const record = {
     id,
     name: id,
@@ -68,9 +68,10 @@ async function seedProject(id: string): Promise<void> {
     },
     agentOwnership: {},
     limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} } },
-    roleGrantVersion: 18,
+    roleGrantVersion: 19,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
+    ...over,
   } as unknown as ProjectRecord;
   await writeFile(join(appRoot, 'projects', `${id}.json`), JSON.stringify(record), 'utf-8');
 }
@@ -196,13 +197,13 @@ describe('ProjectStore — onMembershipChange', () => {
     ]);
   });
 
-  it('the migrate-on-read persist emits nothing — a boot migration must not storm every hub', async () => {
-    await seedProject('p-migrate'); // stored at an older role-grant version
+  it('the seed-on-read persist emits nothing — a first read must not storm every hub', async () => {
+    await seedProject('p-migrate', { roles: {}, roleGrantVersion: undefined }); // the record setup writes: unseeded
     await projects.getProjectById('p-migrate');
     const onDisk = JSON.parse(await readFile(join(appRoot, 'projects', 'p-migrate.json'), 'utf-8')) as {
       roleGrantVersion: number;
     };
-    expect(onDisk.roleGrantVersion).toBeGreaterThan(18); // the read DID write
+    expect(onDisk.roleGrantVersion).toBe(19); // the read DID write
     expect(seen).toEqual([]);
   });
 

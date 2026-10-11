@@ -41,6 +41,7 @@ function fixture(): ProjectRecord {
     packageTrust: { 'my-pkg': 'trusted' },
     packageAccessFeature: { 'my-pkg': 'core.agents' },
     appliedPackageGrants: { 'my-pkg': '1.0.0' },
+    packageGrantFeatures: { 'my-pkg': { member: ['core.agents'] } },
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   };
@@ -79,6 +80,7 @@ describe('toProjectView (D2 feature-keyed projection)', () => {
     expect(view.packageTrust).toBeUndefined();
     expect(view.packageAccessFeature).toBeUndefined();
     expect(view.appliedPackageGrants).toBeUndefined();
+    expect(view.packageGrantFeatures).toBeUndefined();
   });
 
   it('project.members reveals other emails but not grants or byUser rows', () => {
@@ -92,6 +94,7 @@ describe('toProjectView (D2 feature-keyed projection)', () => {
     const view = toProjectView(fixture(), { userId: 'viewer-user', grantedFeatures: ['project.roles'] });
     expect(view.roles.owner.grantedFeatures).toEqual(['*']);
     expect(view.packageTrust).toEqual({ 'my-pkg': 'trusted' });
+    expect(view.packageGrantFeatures).toEqual({ 'my-pkg': { member: ['core.agents'] } });
     expect(view.members['owner-user'].email).toBeUndefined();
     expect(view.limits.spend.byUser).toEqual({ 'viewer-user': { amountUsd: 1, period: 'week' } });
   });

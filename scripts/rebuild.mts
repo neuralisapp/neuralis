@@ -18,8 +18,10 @@
  *      no `-f` is the only invocation that auto-merges the override. `-V`
  *      (--renew-anon-volumes) is mandatory while the --neuralis overlay declares
  *      anon volumes, else the fresh image is masked by stale _runtime/node_modules.
- *   1b. The managed MCP sidecar image (`neuralisapp/mcp-sidecar:dev`, agent-core
- *      `docker/mcp-sidecar/`) — built ONLY when there is a reason: the image is
+ *   1b. The managed MCP sidecar image (`neuralisapp/mcp-sidecar`, agent-core
+ *      `docker/mcp-sidecar/`), tagged with the HOST package.json version — the
+ *      tag agent-core's `mcpSidecarImage` default resolves, so a local build is
+ *      the image the host spawns. Built ONLY when there is a reason: the image is
  *      missing, or its `io.neuralis.sidecar.source-hash` label differs from the
  *      sha256 of that directory today. A matching label costs one line and no
  *      build. The context is the MONOREPO path (the agent-core tarball ships no
@@ -54,10 +56,14 @@
  *          incident. A normal cleanup run exits 0 only after a final measurement
  *          proves Build Cache is at or below 40 GB.
  *
- * This is a DEV convenience for the source/monorepo channel (it runs `--build`,
- * which only that channel ever does — an image-pull deploy never builds). The
- * durable prod cap is the daemon-level `builder.gc` config (B1) + the future
- * label-scoped watchdog (B6); this wrapper is the interim per-rebuild reclaim.
+ * What `--build` builds is what the regenerated compose says: on the
+ * development checkout the whole image; on an npm install folder its derived
+ * image — the release image plus the operator packages its package.json
+ * registers (setup/compose.mts `planOperatorImage`), rebuilt only when that set,
+ * a `file:` source or the release tag changes — or, with no operator package,
+ * nothing: the stack is recreated on the release image. The durable prod cap is
+ * the daemon-level `builder.gc` config (B1) + the future label-scoped watchdog
+ * (B6); this wrapper is the interim per-rebuild reclaim.
  *
  * Flags: `--no-prune` skips step 2; `--no-sidecar` skips step 1b; any other args are
  * forwarded to `up`.
@@ -65,20 +71,22 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sha256Dir } from './build/treeDigest.mjs';
 import { homedir } from 'node:os';
 import {
-  composeProjectFromEnv,
+  dockerExec,
   parseSha256sum,
+  readComposeStack,
   resolveInstalledSandboxer,
   sha256File,
   SANDBOXER_CONTAINER_PATH,
   SANDBOXER_SYSTEM_PATH,
-  UNIT_NAME,
+  unitFilePath,
 } from './host-broker/helper.mts';
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 
 // ── ANSI (house style) ────────────────────────────────────────────
 const c = {
@@ -104,11 +112,17 @@ const BUILDER_WARM_TARGET = '35GB';
 const BUILDER_HARD_LIMIT_DISPLAY = '40GB';
 const BUILDER_HARD_LIMIT_BYTES = 40 * 1_000_000_000;
 
-/** neuralis/ dir = parent of scripts/ — the ONE correct compose cwd. */
-const neuralisDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+/**
+ * The two folders a rebuild reads — the same `neuralis/` on the development
+ * checkout, the folder and its `node_modules/neuralis` on an npm install
+ * folder: `installDir` is the ONE correct compose cwd (and its `.env`),
+ * `packageDir` the code — its version, the checkout's git revision, the tracked
+ * lock and the sidecar sources beside it (none of the three on an install folder).
+ */
+type Dirs = { packageDir: string; installDir: string };
 
 /** Run a command, inheriting stdio (streams the build log live). */
-function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<number> {
+function spawnInherit(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, stdio: 'inherit' });
     child.on('error', (err) => {
@@ -247,25 +261,18 @@ async function enforceBuilderCacheGuard(
  * probe for two weeks on the owner's box (2026-09-02) — and name the verb.
  * Only when a host plane is provisioned (secret file present); never fatal.
  */
-async function reportHostHelperDrift(): Promise<void> {
+async function reportHostHelperDrift(installDir: string): Promise<void> {
   const home = process.env.NEURALIS_HOME?.trim() || join(homedir(), '.neuralis');
   if (!existsSync(join(home, 'host-broker', 'secret'))) return;
-  const unitPath = join(
-    process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'),
-    'systemd', 'user', `${UNIT_NAME}.service`,
-  );
   let unitText: string | null = null;
-  try { unitText = readFileSync(unitPath, 'utf-8'); } catch { /* no unit */ }
+  try { unitText = readFileSync(unitFilePath(), 'utf-8'); } catch { /* no unit */ }
   const helper = resolveInstalledSandboxer({
     unitText,
     envSandboxer: process.env.NEURALIS_HOST_BROKER_SANDBOXER,
     systemExists: existsSync(SANDBOXER_SYSTEM_PATH),
     homeDir: homedir(),
   });
-  let envText: string | null = null;
-  try { envText = readFileSync(join(neuralisDir, '.env'), 'utf-8'); } catch { /* fresh tree */ }
-  const ps = await capture('docker', ['compose', '-p', composeProjectFromEnv(envText), 'ps', '-q', 'neuralis'], { cwd: neuralisDir });
-  const id = ps.code === 0 ? ps.out.trim().split('\n')[0]?.trim() : '';
+  const id = await appContainerId(installDir);
   if (!id) return;
   const sum = await capture('docker', ['exec', id, 'sha256sum', SANDBOXER_CONTAINER_PATH]);
   const imageSha = sum.code === 0 ? parseSha256sum(sum.out) : null;
@@ -277,8 +284,16 @@ async function reportHostHelperDrift(): Promise<void> {
   }
   console.log(
     `  ${warn} host helper      : ${c.yellow}${installedSha ? 'differs from' : 'missing —'} the new image's nrs-sandboxer` +
-      ` — run ${c.bold}pnpm neuralis:host-broker upgrade${c.reset}${c.yellow} (the host broker never reloads on a rebuild)${c.reset}`,
+      ` — run ${c.bold}${spell('host-broker upgrade')}${c.reset}${c.yellow} (the host broker never reloads on a rebuild)${c.reset}`,
   );
+}
+
+/** The running app container of this install: the service labelled `neuralis.kind: app` (`readComposeStack`, the one reader). */
+async function appContainerId(installDir: string): Promise<string> {
+  const stack = await readComposeStack(installDir, dockerExec, { withRunning: false, composeFileRan: true });
+  if (stack.kind !== 'services') return '';
+  const ps = await capture('docker', ['compose', '-p', stack.project, 'ps', '-q', stack.app], { cwd: installDir });
+  return ps.code === 0 ? ps.out.trim().split('\n')[0]?.trim() ?? '' : '';
 }
 
 /** Where the image carries the build report (`neuralis/Dockerfile` step 4b). */
@@ -289,11 +304,8 @@ const BUILD_REPORT_CONTAINER_DIR = '/neuralis/_runtime/build';
  * build refused for this host, and keep the local packages' build lock for the
  * next build. Never fatal — the app is up either way.
  */
-async function collectBuildReport(): Promise<void> {
-  let envText: string | null = null;
-  try { envText = readFileSync(join(neuralisDir, '.env'), 'utf-8'); } catch { /* fresh tree */ }
-  const ps = await capture('docker', ['compose', '-p', composeProjectFromEnv(envText), 'ps', '-q', 'neuralis'], { cwd: neuralisDir });
-  const id = ps.code === 0 ? ps.out.trim().split('\n')[0]?.trim() : '';
+async function collectBuildReport(installDir: string): Promise<void> {
+  const id = await appContainerId(installDir);
   if (!id) return;
   const scratch = mkdtempSync(join(tmpdir(), 'neuralis-build-report-'));
   try {
@@ -353,37 +365,55 @@ async function collectBuildReport(): Promise<void> {
   }
 }
 
-/** The managed MCP sidecar image the host manager resolves (agent-core `lifecycle.ts`). */
-const SIDECAR_IMAGE = 'neuralisapp/mcp-sidecar:dev';
+/** The managed MCP sidecar image the host manager resolves (agent-core `mcpSidecarImage`), at the host's own version. */
+const SIDECAR_REPOSITORY = 'neuralisapp/mcp-sidecar';
 const SIDECAR_SOURCE_HASH_LABEL = 'io.neuralis.sidecar.source-hash';
 /** Monorepo path — the agent-core tarball `files` whitelist ships no `docker/`, so an installed tree has none. */
-const sidecarContextDir = join(neuralisDir, '..', 'packages', 'agent-core', 'docker', 'mcp-sidecar');
+function sidecarContextDir(packageDir: string): string {
+  return join(packageDir, '..', 'packages', 'agent-core', 'docker', 'mcp-sidecar');
+}
 
 /**
  * 1b. The sidecar image, only when there is a reason: missing, or its
  * source-hash label differs from the tree. Never fatal — the app runs without
  * it (a managed-sidecar spawn answers SIDECAR_IMAGE_MISSING, as before).
  */
-async function ensureSidecarImage(): Promise<void> {
-  if (!existsSync(join(sidecarContextDir, 'Dockerfile'))) {
-    console.log(`  ${dot} sidecar image  : ${c.dim}skipped — no ${sidecarContextDir} (installed tree; the sidecar image is not distributed there yet)${c.reset}`);
+async function ensureSidecarImage(packageDir: string, hostVersion: string | null): Promise<void> {
+  const contextDir = sidecarContextDir(packageDir);
+  if (!existsSync(join(contextDir, 'Dockerfile'))) {
+    console.log(`  ${dot} sidecar image  : ${c.dim}skipped — no ${contextDir} (installed tree; the sidecar image is not distributed there yet)${c.reset}`);
     return;
   }
-  const sourceHash = sha256Dir(sidecarContextDir);
-  const inspect = await capture('docker', ['image', 'inspect', '--format', `{{ index .Config.Labels "${SIDECAR_SOURCE_HASH_LABEL}" }}`, SIDECAR_IMAGE]);
+  if (hostVersion === null) {
+    console.log(`  ${warn} sidecar image  : skipped — ${join(packageDir, 'package.json')} names no version to tag it with`);
+    return;
+  }
+  const sidecarImage = `${SIDECAR_REPOSITORY}:${hostVersion}`;
+  const sourceHash = sha256Dir(contextDir);
+  const inspect = await capture('docker', ['image', 'inspect', '--format', `{{ index .Config.Labels "${SIDECAR_SOURCE_HASH_LABEL}" }}`, sidecarImage]);
   const builtHash = inspect.code === 0 ? inspect.out.trim() : null;
   if (builtHash === sourceHash) {
-    console.log(`  ${ok} sidecar image  : ${c.dim}${SIDECAR_IMAGE} up to date (source ${sourceHash.slice(0, 12)}) — not rebuilt${c.reset}`);
+    console.log(`  ${ok} sidecar image  : ${c.dim}${sidecarImage} up to date (source ${sourceHash.slice(0, 12)}) — not rebuilt${c.reset}`);
     return;
   }
   const reason = builtHash === null ? 'missing' : `source changed (${builtHash.slice(0, 12) || 'unlabelled'} → ${sourceHash.slice(0, 12)})`;
-  console.log(`  ${dot} sidecar image  : ${c.bold}${SIDECAR_IMAGE}${c.reset} ${c.dim}${reason} — building${c.reset}`);
-  const code = await run('docker', ['build', '-f', join(sidecarContextDir, 'Dockerfile'), '-t', SIDECAR_IMAGE, '--label', `${SIDECAR_SOURCE_HASH_LABEL}=${sourceHash}`, sidecarContextDir]);
+  console.log(`  ${dot} sidecar image  : ${c.bold}${sidecarImage}${c.reset} ${c.dim}${reason} — building${c.reset}`);
+  const code = await spawnInherit('docker', ['build', '-f', join(contextDir, 'Dockerfile'), '-t', sidecarImage, '--label', `${SIDECAR_SOURCE_HASH_LABEL}=${sourceHash}`, contextDir]);
   if (code !== 0) {
-    console.log(`  ${warn} sidecar image build failed (exit ${code}) — the app is up; managed MCP sidecars stay unavailable until the build in ${sidecarContextDir}/Dockerfile succeeds.`);
+    console.log(`  ${warn} sidecar image build failed (exit ${code}) — the app is up; managed MCP sidecars stay unavailable until the build in ${contextDir}/Dockerfile succeeds.`);
     return;
   }
-  console.log(`  ${ok} sidecar image  : ${SIDECAR_IMAGE} built (source ${sourceHash.slice(0, 12)})`);
+  console.log(`  ${ok} sidecar image  : ${sidecarImage} built (source ${sourceHash.slice(0, 12)})`);
+}
+
+/** The host package.json version, or null when it cannot be read (an unreadable manifest fails the build itself). */
+function readHostVersion(packageDir: string): string | null {
+  try {
+    const version = (JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf-8')) as { version?: unknown }).version;
+    return typeof version === 'string' && version ? version : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -392,48 +422,68 @@ async function ensureSidecarImage(): Promise<void> {
  * checkout. Cosmetic — they label the image and the admin environment table —
  * so a value that cannot be read is left to the compose default, never fatal.
  */
-async function buildIdentityEnv(): Promise<NodeJS.ProcessEnv> {
+async function buildIdentityEnv(packageDir: string, hostVersion: string | null): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  try {
-    const version = (JSON.parse(readFileSync(join(neuralisDir, 'package.json'), 'utf-8')) as { version?: unknown }).version;
-    if (typeof version === 'string' && version) env.NEURALIS_VERSION = version;
-  } catch {
-    // An unreadable package.json fails the build itself a moment later.
-  }
-  const rev = await capture('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: neuralisDir });
+  if (hostVersion !== null) env.NEURALIS_VERSION = hostVersion;
+  const rev = await capture('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: packageDir });
   if (rev.code === 0 && rev.out.trim()) env.NEURALIS_REVISION = rev.out.trim();
   return env;
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+/**
+ * The app service's image line and whether it builds, read off the generated
+ * compose — the app is its first service and every service key sits at two
+ * spaces. `null` text (no compose file) names nothing.
+ */
+export function composeAppImage(composeText: string | null): { image: string | null; builds: boolean } {
+  const block = composeText?.match(/^ {2}neuralis:\n((?:(?: {4}.*)?\n)*)/m)?.[1] ?? '';
+  return { image: block.match(/^ {4}image: (\S+)$/m)?.[1] ?? null, builds: /^ {4}build:$/m.test(block) };
+}
+
+/** Regenerate the compose file in-process through the one `setup` verb; returns its exit code. */
+export type RegenerateCompose = (ctx: CliContext) => Promise<number>;
+
+const regenerateWithSetup: RegenerateCompose = async (ctx) => {
+  const { run: setup } = await import('./setup.mts');
+  return setup(['--compose-only'], ctx);
+};
+
+/**
+ * `regenerate` is the compose step's seam: the registry passes none (the real
+ * setup runs in-process); the suite passes a recorder, so a test never reads
+ * the live .env nor rewrites the live docker-compose.yml.
+ */
+export async function run(args: string[], ctx: CliContext, regenerate: RegenerateCompose = regenerateWithSetup): Promise<number> {
+  const dirs: Dirs = { packageDir: ctx.packageDir, installDir: ctx.installDir };
   const noPrune = args.includes('--no-prune');
   const noSidecar = args.includes('--no-sidecar');
   const passThrough = args.filter((a) => a !== '--no-prune' && a !== '--no-sidecar');
+  const hostVersion = readHostVersion(dirs.packageDir);
 
   // Preflight: a machine-absolute file: specifier in the TRACKED lockfile means
   // a plain `pnpm install` ran while a local package's dep line existed — a
   // machine path in a tracked file, which the build's lock check would then
   // treat as the authority. Fail fast with the name and the fix.
+  let lockfile: string | null = null;
   try {
-    const lockfile = readFileSync(join(neuralisDir, '..', 'pnpm-lock.yaml'), 'utf-8');
-    const contaminated = [...lockfile.matchAll(/specifier: (file:\/[^\n]*)/g)].map((m) => m[1]);
-    if (contaminated.length > 0) {
-      console.error(`  ${fail} pnpm-lock.yaml carries machine-absolute specifier(s):`);
-      for (const spec of contaminated) console.error(`      ${spec}`);
-      console.error(`      A plain \`pnpm install\` ran while a local package's dep line existed.`);
-      console.error(`      Fix: ${c.bold}git checkout -- pnpm-lock.yaml${c.reset} (then use \`pnpm install --lockfile=false\` for dev deps).`);
-      process.exit(1);
-    }
+    lockfile = readFileSync(join(dirs.packageDir, '..', 'pnpm-lock.yaml'), 'utf-8');
   } catch {
     // No lockfile (installed tree) — nothing to preflight.
+  }
+  const contaminated = lockfile === null ? [] : [...lockfile.matchAll(/specifier: (file:\/[^\n]*)/g)].map((m) => m[1]!);
+  if (contaminated.length > 0) {
+    throw new CliExit(1, 'pnpm-lock.yaml carries machine-absolute specifier(s):', [
+      ...contaminated,
+      'A plain `pnpm install` ran while a local package\'s dep line existed.',
+      'Fix: git checkout -- pnpm-lock.yaml (then use `pnpm install --lockfile=false` for dev deps).',
+    ]);
   }
 
   console.log();
   console.log(`  ${c.cyan}${c.bold}── neuralis:rebuild ${'─'.repeat(34)}${c.reset}`);
-  console.log(`  ${dot} cwd            : ${c.bold}${neuralisDir}${c.reset} ${c.dim}(no -f → override auto-merges)${c.reset}`);
+  console.log(`  ${dot} cwd            : ${c.bold}${dirs.installDir}${c.reset} ${c.dim}(no -f → override auto-merges)${c.reset}`);
   console.log(`  ${dot} command        : ${c.bold}docker compose up -d --build -V${passThrough.length ? ' ' + passThrough.join(' ') : ''}${c.reset}`);
-  console.log(`  ${dot} sidecar image  : ${noSidecar ? `${c.dim}skipped (--no-sidecar)${c.reset}` : `${c.bold}${SIDECAR_IMAGE}${c.reset} ${c.dim}only when missing or its source changed${c.reset}`}`);
+  console.log(`  ${dot} sidecar image  : ${noSidecar ? `${c.dim}skipped (--no-sidecar)${c.reset}` : `${c.bold}${SIDECAR_REPOSITORY}:${hostVersion ?? '(no host version)'}${c.reset} ${c.dim}only when missing or its source changed${c.reset}`}`);
   console.log(`  ${dot} compose        : ${c.bold}regenerated first${c.reset} ${c.dim}(build contexts + secret derived from package.json and .env)${c.reset}`);
   console.log(`  ${dot} post-cleanup   : ${noPrune ? `${c.dim}skipped (--no-prune)${c.reset}` : `${c.bold}anonymous-volume prune + measured builder guard (target ${BUILDER_WARM_TARGET}, hard ${BUILDER_HARD_LIMIT_DISPLAY})${c.reset}`}`);
   console.log();
@@ -441,35 +491,52 @@ async function main(): Promise<void> {
   // 0. Re-derive the build inputs into the compose file (named contexts for the
   // local packages, the exported build lock, the `.npmrc` secret). A problem it
   // names — a vanished folder, a bad `.npmrc` — stops here, before Docker.
-  const composeCode = await run('pnpm', ['run', '--silent', 'neuralis:setup', '--compose-only'], { cwd: neuralisDir });
+  const composeCode = await regenerate(ctx).catch((err: unknown) => {
+    console.log(`  ${fail} ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  });
   if (composeCode !== 0) {
     console.log();
     console.log(`  ${fail} compose regeneration failed (exit ${composeCode}) — nothing was built.`);
-    process.exit(composeCode);
+    return composeCode;
+  }
+
+  // The installed arm: say what this build produces before Docker starts.
+  let composeText: string | null = null;
+  try { composeText = readFileSync(join(dirs.installDir, 'docker-compose.yml'), 'utf-8'); } catch { /* the regeneration names its own failure */ }
+  const app = composeAppImage(composeText);
+  if (app.image) {
+    console.log(
+      `  ${dot} app image      : ${c.bold}${app.image}${c.reset} ${c.dim}${
+        app.builds
+          ? "— this install's derived image: the operator packages of package.json over the release image (an unchanged set builds from cache)"
+          : '— no operator package: nothing to build, the stack is recreated on the release image'
+      }${c.reset}`,
+    );
   }
 
   // 1. The ONE-RULE rebuild.
-  const buildCode = await run('docker', ['compose', 'up', '-d', '--build', '-V', ...passThrough], {
-    cwd: neuralisDir,
-    env: await buildIdentityEnv(),
+  const buildCode = await spawnInherit('docker', ['compose', 'up', '-d', '--build', '-V', ...passThrough], {
+    cwd: dirs.installDir,
+    env: await buildIdentityEnv(dirs.packageDir, hostVersion),
   });
   if (buildCode !== 0) {
     console.log();
     console.log(`  ${fail} rebuild failed (exit ${buildCode}) — skipping cleanup so nothing is reclaimed under a broken build.`);
-    process.exit(buildCode);
+    return buildCode;
   }
   console.log();
   console.log(`  ${ok} rebuild complete (exit 0).`);
 
   // 1b. The sidecar image, only when there is a reason.
-  if (!noSidecar) await ensureSidecarImage();
-  await collectBuildReport();
-  await reportHostHelperDrift();
+  if (!noSidecar) await ensureSidecarImage(dirs.packageDir, hostVersion);
+  await collectBuildReport(dirs.installDir);
+  await reportHostHelperDrift(dirs.installDir);
 
   if (noPrune) {
     console.log(`  ${dot} cleanup skipped.`);
     console.log();
-    return;
+    return 0;
   }
 
   // 2a. Orphaned ANONYMOUS volumes only (default prune, no `--all`): removes the
@@ -491,16 +558,11 @@ async function main(): Promise<void> {
       `  ${fail} rebuild succeeded, but cleanup could not prove Build Cache is at/below ${BUILDER_HARD_LIMIT_DISPLAY}.`,
     );
     console.log();
-    process.exitCode = 1;
-    return;
+    return 1;
   }
 
   console.log();
   console.log(`  ${ok} done.`);
   console.log();
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`\n  ${fail} ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-});

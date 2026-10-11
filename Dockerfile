@@ -459,6 +459,18 @@ COPY --from=app-builder /src/neuralis/.next/standalone/node_modules ./node_modul
 #     the live copy, and without the overlay this one still resolves.
 COPY neuralis/skills ./skills
 
+# 1c. The offline upgrade command, its modules and the offline-probe closure it
+#     imports, entered through the one CLI (`node bin/neuralis.mjs upgrade
+#     --apply` in a one-off container). Nothing the app runs imports them, so the
+#     tracer is no guarantee they arrive. The package algorithms behind the
+#     modules ship in `node_modules/@neuralis/*/dist` (their `./upgrade`
+#     subpaths, step 3).
+COPY neuralis/bin ./bin
+COPY neuralis/scripts/cli ./scripts/cli
+COPY neuralis/scripts/upgrade.mts neuralis/scripts/checkpoint.mts ./scripts/
+COPY neuralis/scripts/setup/detect.mts neuralis/scripts/setup/envFile.mts neuralis/scripts/setup/ownerCheck.mts ./scripts/setup/
+COPY neuralis/scripts/upgrades ./scripts/upgrades
+
 # 2. Move runtime-protected artefacts into _runtime/:
 #    - server.js  → /neuralis/_runtime/server.js
 #    - .next/     → /neuralis/_runtime/.next/

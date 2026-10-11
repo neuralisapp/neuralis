@@ -75,7 +75,7 @@ async function seedProject(id: string, over: Record<string, unknown> = {}): Prom
       },
       agentOwnership: {},
       limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} }, rateLimitRpm: 30 },
-      roleGrantVersion: 18,
+      roleGrantVersion: 19,
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
       ...over,

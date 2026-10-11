@@ -13,12 +13,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { NO_BUILD_INPUTS, buildComposeContent, resolveBuildInputs, type ComposeEmitInput } from '../setup/compose.mts';
+import { NO_BUILD_INPUTS, buildComposeContent, operatorDependencies, planOperatorImage, resolveBuildInputs, type ComposeEmitInput } from '../setup/compose.mts';
+import { packageBindTarget } from '../mount/packageBind.mts';
 import { qdrantImageRef } from '../setup/qdrantVersion.mts';
 
 const STAMP = { date: '2026-08-23', version: '0.1.0' };
@@ -56,6 +58,7 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
     imageTag: null,
     hostBroker: { enabled: false, socketPath: '/x/host-broker.sock', secretFile: '/x/secret' },
     build: NO_BUILD_INPUTS,
+    operatorImage: null,
     ...overrides,
   };
 }
@@ -265,13 +268,95 @@ describe('the monorepo build inputs — named contexts and the .npmrc secret', (
     expect(content).not.toMatch(/_authToken/);
   });
 
-  it('the image channel never builds: no build block, so no contexts and no secret even when inputs exist', () => {
+  it('an image channel with no derived image never builds: no build block, so no contexts and no secret even when inputs exist', () => {
     const content = buildComposeContent(
       baseInput({ monorepo: false, imageTag: '0.1.0', build: { localSources: sources, buildLockDir: '/x', npmrcFile: '/y' } }),
       STAMP,
     );
     expect(content).not.toContain('additional_contexts:');
     expect(content).not.toMatch(/^secrets:/m);
+  });
+});
+
+describe('the generated compose carries no plan names (it is shipped, operator-read text)', () => {
+  it('the host-plane comment says what the bind is, never a round codename', () => {
+    const content = buildComposeContent(baseInput({ hostBroker: { enabled: true, socketPath: '/x/host-broker.sock', secretFile: '/x/secret' } }), STAMP);
+    expect(content).toContain('# The host-access plane — mount the broker runtime DIRECTORY');
+    expect(content).not.toMatch(/nightjar/);
+  });
+});
+
+describe('the npm install folder runs ONE derived image when it registers operator packages', () => {
+  const folder = (deps: Record<string, string>) => ({ private: true, dependencies: { neuralis: '0.2.0', ...deps } });
+  const plan = (manifest: unknown, over: Partial<Parameters<typeof planOperatorImage>[0]> = {}) =>
+    planOperatorImage({
+      installManifest: manifest,
+      contextDir: '/home/op/install/operator-image',
+      composeProject: 'neuralis',
+      imageTag: '0.2.0',
+      build: NO_BUILD_INPUTS,
+      readBuildHelper: () => '// the build helper\n',
+      ...over,
+    });
+
+  it('the operator packages are every line of the folder manifest but `neuralis`; the host package itself has none', () => {
+    expect(operatorDependencies(folder({ '@acme/x': '1.0.0', b: 'file:/w/b' }))).toEqual({ '@acme/x': '1.0.0', b: 'file:/w/b' });
+    expect(operatorDependencies(folder({}))).toEqual({});
+    expect(operatorDependencies({ name: 'neuralis', dependencies: { neuralis: '0.2.0', '@acme/x': '1.0.0' } })).toBeNull();
+    expect(operatorDependencies({ name: 'neuralis', dependencies: { '@neuralis/agent-core': '0.2.0' } })).toBeNull();
+  });
+
+  it('no operator package ⇒ no derived image, the helper is never read, and compose keeps the release image line', () => {
+    let read = 0;
+    expect(plan(folder({}), { readBuildHelper: () => { read += 1; return ''; } })).toBeNull();
+    expect(read).toBe(0);
+    const block = serviceBlock(buildComposeContent(baseInput({ monorepo: false, imageTag: '0.2.0', operatorImage: null }), STAMP), 'neuralis');
+    expect(block).toContain('    image: neuralisapp/neuralis:0.2.0\n');
+    expect(block).not.toContain('    build:\n');
+  });
+
+  it('the Dockerfile is the release image plus one operator-install layer: build tools for native deps, the .npmrc a secret', () => {
+    const image = plan(folder({ '@acme/x': '1.0.0' }), {
+      build: { localSources: [{ slot: 0, name: '@acme/y', contextDir: '/w/y' }], buildLockDir: '/home/op/.neuralis/build', npmrcFile: '/home/op/.npmrc' },
+    })!;
+    const dockerfile = image.files.Dockerfile!;
+    expect(dockerfile).toMatch(/^# syntax=docker\/dockerfile:1\n/);
+    expect(dockerfile).toContain('FROM neuralisapp/neuralis:0.2.0 AS release\n');
+    expect(dockerfile).toContain('FROM scratch AS localpkg0\nFROM scratch AS buildlock\nFROM release\nUSER root\n');
+    expect(dockerfile).toContain('COPY --from=localpkg0 / /tmp/operator/slots/0/\n');
+    expect(dockerfile).toContain('RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \\\n');
+    expect(dockerfile).toContain('apk add --no-cache --virtual .operator-build python3 make g++ && \\\n');
+    expect(dockerfile).toContain('node /tmp/operator/build-workspace.mjs operator-install /tmp/operator /neuralis /root/.npmrc && \\\n');
+    expect(dockerfile).toContain('apk del .operator-build');
+    expect(dockerfile.trimEnd().endsWith('USER nextjs')).toBe(true);
+    // The operator lines verbatim — the list `pkg add` validated — and nothing from the environment.
+    expect(JSON.parse(image.files['operator.json']!)).toEqual({ dependencies: { '@acme/x': '1.0.0' } });
+    expect(image.files['build-workspace.mjs']).toBe('// the build helper\n');
+  });
+
+  it('the image name carries the release tag and a hash of the context: stable for one set, new for a new set or release', () => {
+    const a = plan(folder({ '@acme/x': '1.0.0' }))!;
+    expect(a.name).toMatch(/^neuralis-neuralis:0\.2\.0-[0-9a-f]{12}$/);
+    expect(plan(folder({ '@acme/x': '1.0.0' }))!.name).toBe(a.name);
+    expect(plan(folder({ '@acme/x': '1.0.1' }))!.name).not.toBe(a.name);
+    expect(plan(folder({ '@acme/x': '1.0.0' }), { imageTag: '0.2.1' })!.name).toMatch(/^neuralis-neuralis:0\.2\.1-/);
+  });
+
+  it('compose builds it from the generated context with the same named contexts and secret, and runs it by that name', () => {
+    const build = { localSources: [{ slot: 0, name: '@acme/y', contextDir: '/w/y' }], buildLockDir: null, npmrcFile: '/home/op/.npmrc' };
+    const operatorImage = plan(folder({ '@acme/y': 'file:/w/y' }), { build })!;
+    const content = buildComposeContent(baseInput({ monorepo: false, imageTag: '0.2.0', build, operatorImage }), STAMP);
+    const block = serviceBlock(content, 'neuralis');
+    expect(block).toContain('    build:\n      context: "/home/op/install/operator-image"\n');
+    expect(block).toContain('        localpkg0: "/w/y" # @acme/y\n');
+    expect(block).toContain('      secrets:\n        - npmrc\n');
+    expect(block).toContain(`    image: ${operatorImage.name}\n`);
+    expect(block).not.toContain('neuralisapp/neuralis:0.2.0');
+    expect(content).toContain('\nsecrets:\n  npmrc:\n    file: "/home/op/.npmrc"\n');
+  });
+
+  it('the link the operator install writes is the --pkg bind target (one path formula)', () => {
+    for (const name of ['@acme/x', 'plain']) expect(join('/neuralis', 'node_modules', name)).toBe(packageBindTarget(name));
   });
 });
 
@@ -365,5 +450,58 @@ describe('resolveBuildInputs — derived from the host manifest, checked before 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('setup --compose-only in an npm install folder writes the derived image and its context (the wiring)', () => {
+  const realHost = join(dirname(new URL(import.meta.url).pathname), '..', '..');
+
+  function installFolder(deps: Record<string, string>): { folder: string; home: string; bin: string } {
+    const root = mkdtempSync(join(tmpdir(), 'neuralis-derived-'));
+    const host = join(root, 'host');
+    mkdirSync(host, { recursive: true });
+    cpSync(join(realHost, 'scripts'), join(host, 'scripts'), { recursive: true });
+    symlinkSync(join(realHost, 'node_modules'), join(host, 'node_modules'), 'dir');
+    symlinkSync(join(realHost, 'src'), join(host, 'src'), 'dir');
+    writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', version: '0.2.0', bin: { neuralis: 'bin/neuralis.mjs' } }));
+    // Inside the host copy only so `--import tsx` resolves; the walk-up stops at the folder's own manifest.
+    const folder = join(host, 'install');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'package.json'), JSON.stringify({ private: true, dependencies: { neuralis: '0.2.0', ...deps } }, null, 2));
+    writeFileSync(join(folder, '.env'), 'NEURALIS_IMAGE_TAG=0.2.0\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n');
+    // A docker that is never there: the environment probe must not reach this machine's daemon.
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    return { folder, home: join(root, 'home'), bin };
+  }
+
+  function composeOnly(dirs: { folder: string; home: string; bin: string }) {
+    return spawnSync(process.execPath, ['--import', 'tsx', join(dirs.folder, '..', 'scripts', 'cli', 'registry.mts'), 'setup', '--compose-only'], {
+      cwd: dirs.folder,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dirs.bin}:${process.env.PATH ?? ''}`, NEURALIS_HOME: dirs.home, QDRANT_URL: 'http://127.0.0.1:9', OLLAMA_URL: 'http://127.0.0.1:9' },
+    });
+  }
+
+  it('operator packages ⇒ a build block over the generated context, the derived name, and the three context files', () => {
+    const dirs = installFolder({ '@acme/x': '1.0.0' });
+    const res = composeOnly(dirs);
+    expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
+    const block = serviceBlock(readFileSync(join(dirs.folder, 'docker-compose.yml'), 'utf8'), 'neuralis');
+    expect(block).toContain(`    build:\n      context: ${JSON.stringify(join(dirs.folder, 'operator-image'))}\n`);
+    expect(block).toMatch(/^ {4}image: neuralis-neuralis:0\.2\.0-[0-9a-f]{12}$/m);
+    expect(readdirSync(join(dirs.folder, 'operator-image')).sort()).toEqual(['Dockerfile', 'build-workspace.mjs', 'operator.json']);
+    expect(readFileSync(join(dirs.folder, 'operator-image', 'build-workspace.mjs'), 'utf8')).toBe(readFileSync(join(realHost, 'scripts', 'build', 'build-workspace.mjs'), 'utf8'));
+  });
+
+  it('control: no operator package ⇒ no context folder and the release image line, unchanged', () => {
+    const dirs = installFolder({});
+    const res = composeOnly(dirs);
+    expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
+    const block = serviceBlock(readFileSync(join(dirs.folder, 'docker-compose.yml'), 'utf8'), 'neuralis');
+    expect(block).toContain('    image: neuralisapp/neuralis:0.2.0\n');
+    expect(block).not.toContain('    build:\n');
+    expect(existsSync(join(dirs.folder, 'operator-image'))).toBe(false);
   });
 });

@@ -29,14 +29,16 @@ import { randomBytes, randomUUID, createCipheriv, createHash, hkdf } from 'node:
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 // The app's own slug + project-id derivation (`src/lib/utils.ts`, dependency-free).
 import { slugify } from '../src/lib/utils';
 // Source config seeding is a drift-tested port of the canonical builder in
 // `./setup/records.mts`.
 
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import { detectEnvironment, resolveConfigDir, type DetectedEnv } from './setup/detect.mts';
+import { askHidden } from './setup/ownerCheck.mts';
 import { writeMergedPlatformConfig } from './setup/platformConfig.mts';
 import {
   createDirectorySkeleton,
@@ -77,11 +79,15 @@ import {
 } from './setup/services.mts';
 import {
   NO_BUILD_INPUTS,
+  OPERATOR_IMAGE_DIR,
   buildComposeContent,
   hostReachableUrl,
+  operatorDependencies,
+  planOperatorImage,
   resolveBuildInputs,
   type BuildInputs,
   type ComposeEmitInput,
+  type OperatorImage,
 } from './setup/compose.mts';
 import { listLocalSources } from './build/build-workspace.mjs';
 import {
@@ -159,45 +165,18 @@ async function ask(prompt: string, defaultVal?: string): Promise<string> {
   return answer.trim() || defaultVal || '';
 }
 
+/**
+ * Hidden input through the ONE hidden prompt (`askHidden`). The wizard's readline
+ * interface is closed while it reads — an interface left open on stdin echoes every
+ * keystroke into the terminal stream — and reopened for the next visible question.
+ */
 async function askSensitive(prompt: string): Promise<string> {
-  const label = `  ${c.white}${prompt}: ${c.reset}`;
-  process.stdout.write(label);
-
-  return new Promise((resolve) => {
-    const chars: string[] = [];
-    const wasRaw = stdin.isRaw;
-    if (stdin.setRawMode) stdin.setRawMode(true);
-    stdin.resume();
-
-    const redraw = () => {
-      // Clear line and redraw with masked value
-      stdout.write(`\r\x1b[2K${label}${'*'.repeat(chars.length)}`);
-    };
-
-    const onData = (key: Buffer) => {
-      const ch = key.toString();
-      if (ch === '\r' || ch === '\n') {
-        if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
-        stdin.removeListener('data', onData);
-        // Show (hidden) instead of the masked value
-        stdout.write(`\r\x1b[2K${label}${c.dim}(hidden)${c.reset}\n`);
-        resolve(chars.join(''));
-      } else if (ch === '\x7f' || ch === '\b') {
-        if (chars.length > 0) {
-          chars.pop();
-          redraw();
-        }
-      } else if (ch === '\x03') {
-        // Ctrl+C
-        process.exit(1);
-      } else if (ch.charCodeAt(0) >= 32) {
-        chars.push(ch);
-        redraw();
-      }
-    };
-
-    stdin.on('data', onData);
-  });
+  rl.close();
+  try {
+    return await askHidden(`${c.white}${prompt}${c.reset}`);
+  } finally {
+    initReadline();
+  }
 }
 
 async function askPassword(prompt: string): Promise<string> {
@@ -217,7 +196,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:dev',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.2.0',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -447,10 +426,7 @@ async function askOwner(): Promise<{ email: string; name: string; passwordHash: 
   blank();
 
   const email = await ask('Email');
-  if (!email || !email.includes('@')) {
-    fail('A valid email is required.');
-    process.exit(1);
-  }
+  if (!email || !email.includes('@')) throw new CliExit(1, 'A valid email is required.');
 
   let password = '';
   while (password.length < 8) {
@@ -1090,6 +1066,8 @@ type MenuEntry = {
   models: EmbeddingModelInfo[];
   /** The custom-endpoint row: no catalog models, the operator describes one. */
   custom?: true;
+  /** The no-embedding row: nothing is embedded, the data index and text search work. */
+  none?: true;
 };
 
 /** The recommendation for a NEW install: Gemini Embedding 2 at its full 3072 dimensions. */
@@ -1119,6 +1097,7 @@ function buildMenu(env: DetectedEnv): MenuEntry[] {
     { label: 'Qwen — flagship', models: byProvider('qwen') },
     { label: 'Voyage — Anthropic partner', models: byProvider('voyage') },
     { label: 'Custom endpoint — any OpenAI-compatible /v1/embeddings server', models: [], custom: true },
+    { label: 'No embedding model — text and field search only (add one later in Admin → Vector)', models: [], none: true },
     {
       label: 'Deterministic — dev/test only (zero semantic quality)',
       models: byProvider('deterministic'),
@@ -1130,14 +1109,16 @@ function buildMenu(env: DetectedEnv): MenuEntry[] {
  * Ask for the model's own embedding credential. `EMBEDDING_<PROVIDER>_API_KEY`
  * in the shell and the chat key entered above are offered as the Enter-default
  * — a prompt convenience, never a runtime fallback: the value is stored under
- * the embedding id, metered and capped apart from chat. Empty = skipped, and
- * embedding stays off until the key is set.
+ * the embedding id, metered and capped apart from chat. Empty with no key
+ * already stored = no embedding (`embeddingEnabled=false`, the model stays the
+ * target); empty with a stored key keeps that key.
  */
 async function askEmbeddingCredential(
   model: EmbeddingModelInfo,
   credentialId: string,
   llmKeys: Record<string, string>,
-): Promise<{ id: string; value: string } | undefined> {
+  hasStoredKey: boolean,
+): Promise<{ id: string; value: string } | 'stored' | undefined> {
   blank();
   console.log(`  ${c.dim}Embedding uses its own key (${credentialId}) — counted and capped apart from chat.${c.reset}`);
   const envName = `EMBEDDING_${model.provider.toUpperCase()}_API_KEY`;
@@ -1156,7 +1137,11 @@ async function askEmbeddingCredential(
     value = (await askSensitive(`${model.provider} embedding API key`)).trim();
   }
   if (!value) {
-    warn(`No key entered — embedding stays off until ${c.bold}${credentialId}${c.reset} is set in Admin → Credentials.`);
+    if (hasStoredKey) {
+      info(`No key entered — keeping the stored ${c.bold}${credentialId}${c.reset}.`);
+      return 'stored';
+    }
+    warn(`No key entered — embedding is OFF (text and field search only). Set ${c.bold}${credentialId}${c.reset} in Admin → Credentials and turn embedding on to activate ${model.id}.`);
     return undefined;
   }
   info(`${credentialId} captured ${c.dim}(written to the credential store)${c.reset}`);
@@ -1231,9 +1216,8 @@ async function chooseVectorConfig(
   heading('Vector (embeddings)');
 
   if (qdrantMode === 'skip') {
-    info(`Qdrant skipped — using deterministic (no real embeddings)`);
-    const det = findEmbeddingModel('deterministic:sha256-384')!;
-    return { modelId: det.id, dimension: det.defaultDimension };
+    info(`Qdrant skipped — no embedding (text and field search only)`);
+    return { enabled: false };
   }
 
   const menu = buildMenu(env);
@@ -1246,7 +1230,11 @@ async function chooseVectorConfig(
   const chosen = await askChoice('Which provider?', menu.map((m) => m.label), defaultProvider);
 
   if (menu[chosen].custom) {
-    return askEmbeddingEndpoint(deploymentMode);
+    return { enabled: true, ...await askEmbeddingEndpoint(deploymentMode) };
+  }
+  if (menu[chosen].none) {
+    info(`No embedding — indexing, text and field search work; no provider is called.`);
+    return { enabled: false };
   }
 
   const providerModels = menu[chosen].models;
@@ -1305,12 +1293,15 @@ async function chooseVectorConfig(
     }
   }
 
-  const credential = model.credentialId ? await askEmbeddingCredential(model, model.credentialId, llmKeys) : undefined;
+  const storedKey = model.credentialId !== undefined
+    && existsSync(join(credentialDir(env.neuralisHome, { kind: 'global' }), `${model.credentialId}.enc.json`));
+  const credential = model.credentialId ? await askEmbeddingCredential(model, model.credentialId, llmKeys, storedKey) : undefined;
 
   blank();
   const dimension = await pickDimension(model);
 
-  const choice: VectorChoice = { modelId: model.id, dimension };
+  // A model that needs a key and got none embeds nothing: say so in the config.
+  const choice: VectorChoice = { enabled: !model.credentialId || credential !== undefined, modelId: model.id, dimension };
   if (model.provider === 'ollama') {
     // Schema split (already in PlatformConfigStore): chat models live in
     // `localLLMs[]`, embeddings live in `ollamaUrl`. We let the user reuse
@@ -1353,7 +1344,7 @@ async function chooseVectorConfig(
       choice.ollamaUrl = hostReachableUrl(env.ollama.url, deploymentMode);
     }
   }
-  if (credential) choice.credential = credential;
+  if (credential && credential !== 'stored') choice.credential = credential;
   return choice;
 }
 
@@ -1783,7 +1774,7 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
   }
   lines.push(
     '# How Qdrant is provisioned (docker | binary | external | skip). Read back',
-    '# by `pnpm neuralis:setup --compose-only` so the compose regen emits the',
+    '# by `neuralis setup --compose-only` so the compose regen emits the',
     '# right qdrant service / QDRANT_URL shape without re-asking.',
     `QDRANT_MODE=${config.qdrant.mode}`,
   );
@@ -1800,7 +1791,7 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
   } else if (config.qdrant.mode === 'external') {
     lines.push(
       '# External Qdrant with no API key configured. If the server enforces one,',
-      '# add: QDRANT_API_KEY=<key>  (then `pnpm neuralis:setup --compose-only`',
+      '# add: QDRANT_API_KEY=<key>  (then `neuralis setup --compose-only`',
       '# and `docker compose up -d`).',
       '# QDRANT_API_KEY=',
     );
@@ -1809,7 +1800,7 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
     lines.push(
       '# Qdrant web dashboard (static SPA at 127.0.0.1:6333/dashboard). Set to',
       "# 'off' to disable the static UI entirely, then regenerate + recreate:",
-      '# `pnpm neuralis:setup --compose-only && docker compose up -d`.',
+      '# `neuralis setup --compose-only && docker compose up -d`.',
       'QDRANT_DASHBOARD=on',
     );
   }
@@ -1820,7 +1811,7 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
     '# (a native `codex login` here cannot use it, and the stack will not start',
     '# if something else holds it). `off`: paste the final URL into the',
     '# "Finish callback URL" field instead. Change it, then',
-    '# `pnpm neuralis:setup --compose-only && docker compose up -d`.',
+    '# `neuralis setup --compose-only && docker compose up -d`.',
     `NEURALIS_CODEX_LOOPBACK=${config.codexLoopback ? 'on' : 'off'}`,
     ...trustedProxiesLines(config.trustedProxies),
     ...buildNpmrcLines(config.buildNpmrc),
@@ -1900,23 +1891,24 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
 
 // ── docker-compose.yml generation moved to setup/compose.mts (S3) ──
 
-/** The version this host folder ships — the compose stamp and a fresh install's image tag; never defaulted. */
-async function readNeuralisVersion(): Promise<string> {
-  const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+/** The version this host package ships — the compose stamp and a fresh install's image tag; never defaulted. */
+async function readNeuralisVersion(packageDir: string): Promise<string> {
+  const pkgPath = join(packageDir, 'package.json');
   const pkg = JSON.parse(await readFile(pkgPath, 'utf-8')) as { version?: unknown };
   if (typeof pkg.version !== 'string' || !pkg.version.trim()) throw new Error(`${pkgPath} names no version.`);
   return pkg.version.trim();
 }
 
 async function generateComposeFile(
-  input: ComposeEmitInput,
+  base: ComposeEmitInput,
   configDir: string,
-  opts: { askOverwrite: boolean },
+  opts: { askOverwrite: boolean; version: string; installDir: string; packageDir: string },
 ): Promise<void> {
+  const input: ComposeEmitInput = { ...base, operatorImage: operatorImageFor(base, configDir, opts) };
   const composePath = join(configDir, 'docker-compose.yml');
   const content = buildComposeContent(input, {
     date: new Date().toISOString().split('T')[0],
-    version: await readNeuralisVersion(),
+    version: opts.version,
   });
 
   let shouldWrite = true;
@@ -1933,11 +1925,38 @@ async function generateComposeFile(
   }
 
   if (shouldWrite) {
+    // The compose file binds `<home>/checkpoints`; created here, by the setup
+    // user, so Docker never creates the bind source root-owned.
+    await mkdir(join(input.neuralisHome, 'checkpoints'), { recursive: true, mode: 0o700 });
     await writeFile(composePath, content, 'utf-8');
     info(`docker-compose.yml written to ${c.bold}${composePath}${c.reset}`);
+    if (input.operatorImage) {
+      await mkdir(input.operatorImage.contextDir, { recursive: true });
+      for (const [name, text] of Object.entries(input.operatorImage.files)) {
+        await writeFile(join(input.operatorImage.contextDir, name), text, 'utf-8');
+      }
+      info(`derived image ${c.bold}${input.operatorImage.name}${c.reset} — its build context in ${c.dim}${input.operatorImage.contextDir}${c.reset}`);
+    }
   } else {
     step('docker-compose.yml kept unchanged');
   }
+}
+
+/**
+ * An npm install folder's derived image: its operator packages over the release
+ * image (`planOperatorImage`). The monorepo builds the whole image, and an
+ * install with no operator package runs the release image as is.
+ */
+function operatorImageFor(input: ComposeEmitInput, configDir: string, dirs: { installDir: string; packageDir: string }): OperatorImage | null {
+  if (input.monorepo || !input.imageTag) return null;
+  return planOperatorImage({
+    installManifest: JSON.parse(readFileSync(join(dirs.installDir, 'package.json'), 'utf-8')) as unknown,
+    contextDir: join(configDir, OPERATOR_IMAGE_DIR),
+    composeProject: input.composeProject,
+    imageTag: input.imageTag,
+    build: input.build,
+    readBuildHelper: () => readFileSync(join(dirs.packageDir, 'scripts', 'build', 'build-workspace.mjs'), 'utf-8'),
+  });
 }
 
 function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImage: string | null): ComposeEmitInput {
@@ -1976,6 +1995,8 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     monorepo: env.isClone,
     imageTag: config.imageTag,
     build: buildInputsFor(env, config.buildNpmrc ?? undefined),
+    // Decided at generation, from the install folder's package.json (`operatorImageFor`).
+    operatorImage: null,
     // Emitted only when the operator has actually provisioned the broker —
     // `pnpm neuralis:host-broker init` writes the secret + ceiling and prints
     // the unit. Setup never turns the host plane on by itself.
@@ -1983,25 +2004,28 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
   };
 }
 
-/** The host folder this script belongs to — its package.json is the dependency set the build installs. */
-const scriptHostDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-
 /**
- * The monorepo build's inputs (local package contexts, the exported build lock,
- * the `.npmrc` secret). The image channels never build, so a local package
- * registered there is named rather than silently left out of a pulled image.
+ * The build's inputs (local package contexts, the build-state folder, the
+ * `.npmrc` secret), read from the install folder's package.json — the
+ * dependency set the build installs: the monorepo's whole image, or an npm
+ * install folder's derived image. Any other image channel never builds, so a
+ * local package registered there is named rather than silently left out of a
+ * pulled image.
  */
 function buildInputsFor(env: DetectedEnv, npmrcPath: string | undefined): BuildInputs {
+  const manifest = JSON.parse(readFileSync(join(env.projectRoot, 'package.json'), 'utf-8')) as unknown;
+  if (!env.isClone && operatorDependencies(manifest) !== null) {
+    return resolveBuildInputs({ hostDir: env.projectRoot, repoRoot: env.projectRoot, neuralisHome: env.neuralisHome, npmrcPath });
+  }
   if (!env.isClone) {
-    const manifest = JSON.parse(readFileSync(join(scriptHostDir, 'package.json'), 'utf-8')) as unknown;
     for (const source of listLocalSources(manifest)) {
       warn(`${source.name} (${source.spec}) is a local package, and this channel pulls a prebuilt image — it is not in it.`);
     }
     return NO_BUILD_INPUTS;
   }
   return resolveBuildInputs({
-    hostDir: scriptHostDir,
-    repoRoot: join(scriptHostDir, '..'),
+    hostDir: env.projectRoot,
+    repoRoot: join(env.projectRoot, '..'),
     neuralisHome: env.neuralisHome,
     npmrcPath,
   });
@@ -2082,7 +2106,7 @@ function composeInputFromExisting(
     neuralisHome: env.neuralisHome,
     machine: {
       desktopVariant: machineEnv('NEURALIS_MACHINE_DESKTOP_VARIANT', 'ubuntu-xfce'),
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:dev'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.2.0'),
       containerScope: machineEnv('NEURALIS_MACHINE_CONTAINER_SCOPE', 'user'),
       idleMinutes: Number(envVars.NEURALIS_MACHINE_IDLE_MINUTES) || 30,
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
@@ -2095,6 +2119,7 @@ function composeInputFromExisting(
     // Resolved by the caller from the .env read-back (image channels only).
     imageTag: null,
     build: buildInputsFor(env, envVars.NEURALIS_BUILD_NPMRC),
+    operatorImage: null,
     // Re-detected on every regeneration, so `--compose-only` picks up a broker
     // provisioned (or removed) since the last run.
     hostBroker: hostBrokerEmitInput(env.neuralisHome),
@@ -2123,10 +2148,11 @@ function parseEnvContent(content: string): Record<string, string> {
 type HostIdentityOverrides = { uid: number | null; gid: number | null; dockerGid: number | null };
 
 async function runComposeOnly(
+  ctx: CliContext,
   outputOverride: string | null,
   hostIdentity: HostIdentityOverrides = { uid: null, gid: null, dockerGid: null },
 ): Promise<void> {
-  const env = await detectEnvironment();
+  const env = await detectEnvironment(ctx.installDir);
   const configDir = resolveConfigDir(env, outputOverride);
   const envPath = join(configDir, '.env');
 
@@ -2156,7 +2182,7 @@ async function runComposeOnly(
   if (input.qdrantMode === 'docker' && !envVars.QDRANT_API_KEY?.trim()) {
     throw new Error(
       '.env has no QDRANT_API_KEY, but qdrant runs in docker mode and the compose file requires it.\n' +
-      '  Fix: re-run the full `pnpm neuralis:setup` (it mints and preserves the key),\n' +
+      `  Fix: re-run the full \`${spell('setup')}\` (it mints and preserves the key),\n` +
       '  or add a QDRANT_API_KEY=<random> line to .env yourself, then re-run --compose-only.\n' +
       '  Nothing was written.',
     );
@@ -2176,7 +2202,7 @@ async function runComposeOnly(
     ));
   }
 
-  await generateComposeFile(input, configDir, { askOverwrite: false });
+  await generateComposeFile(input, configDir, { askOverwrite: false, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir });
 }
 
 // ── Existing Setup Check ───────────────────────────────────────
@@ -2230,8 +2256,10 @@ function printSummary(config: SetupConfig, env: DetectedEnv) {
     warn(`Qdrant: skipped (in-memory mode)`);
   }
 
-  const vectorModel = findEmbeddingModel(config.vector.modelId);
-  if (config.vector.endpoint) {
+  const vectorModel = config.vector.modelId ? findEmbeddingModel(config.vector.modelId) : undefined;
+  if (!config.vector.enabled) {
+    info(`Vector: ${c.bold}no embedding${c.reset} ${c.dim}(text and field search only${config.vector.modelId ? `; target ${config.vector.modelId} kept for a later activation` : ''})${c.reset}`);
+  } else if (config.vector.endpoint) {
     info(`Vector: ${c.bold}${config.vector.modelId}${c.reset} ${c.dim}(${config.vector.dimension}d · custom endpoint)${c.reset}`);
   } else if (vectorModel && vectorModel.provider !== 'deterministic') {
     info(
@@ -2271,8 +2299,7 @@ function printSummary(config: SetupConfig, env: DetectedEnv) {
 
 // ── Main ───────────────────────────────────────────────────────
 
-async function main() {
-  const cliArgs = process.argv.slice(2);
+export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
   const flagValue = (flag: string): string | null => {
     const idx = cliArgs.indexOf(flag);
     return idx >= 0 ? (cliArgs[idx + 1] ?? null) : null;
@@ -2290,10 +2317,7 @@ async function main() {
     const raw = flagValue(flag);
     if (raw === null) return null;
     const parsed = Number(raw);
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      console.error(`\n  ✗ ${flag} expects a non-negative integer, got "${raw}"`);
-      process.exit(1);
-    }
+    if (!Number.isInteger(parsed) || parsed < 0) throw new CliExit(1, `${flag} expects a non-negative integer, got "${raw}"`);
     return parsed;
   };
   const uidOverride = numericFlag('--uid');
@@ -2302,8 +2326,8 @@ async function main() {
 
   // Fast path: regenerate docker-compose.yml from existing config, no wizard.
   if (cliArgs.includes('--compose-only')) {
-    await runComposeOnly(outputOverride, { uid: uidOverride, gid: gidOverride, dockerGid: dockerGidOverride });
-    return;
+    await runComposeOnly(ctx, outputOverride, { uid: uidOverride, gid: gidOverride, dockerGid: dockerGidOverride });
+    return 0;
   }
 
   printBanner();
@@ -2311,13 +2335,13 @@ async function main() {
 
   try {
     // 1. Auto-detect
-    const env = await detectEnvironment();
+    const env = await detectEnvironment(ctx.installDir);
     printDetection(env);
     await preflightDataRoot(env);
 
     // 2. Check existing setup
     const proceed = await handleExistingSetup(env);
-    if (!proceed) { rl.close(); return; }
+    if (!proceed) { rl.close(); return 0; }
 
     // 2b. Read back what a previous run recorded. Everything below defaults to
     // the existing value: a maintenance re-run must not silently re-decide the
@@ -2347,7 +2371,7 @@ async function main() {
         step('Setup maintains an existing project; it cannot create a second one.');
         step('Create additional projects from the app, or point NEURALIS_HOME at a fresh directory.');
         rl.close();
-        return;
+        return 1;
       }
     }
 
@@ -2508,7 +2532,7 @@ async function main() {
       buildNpmrc: carried.buildNpmrc,
       // Carried, never re-derived: an update moves the tag and never the
       // scaffold's host version, so re-deriving would step the install back.
-      imageTag: initialImageTag(carried.imageTag, await readNeuralisVersion(), env.isClone),
+      imageTag: initialImageTag(carried.imageTag, await readNeuralisVersion(ctx.packageDir), env.isClone),
       codexBlob: openaiAuth.codexBlob,
       uid: uidOverride ?? env.uid,
       gid: gidOverride ?? env.gid,
@@ -2575,8 +2599,10 @@ async function main() {
     // 12. Merge platform.json (runtime config) — existing keys are the
     // operator's decisions and are never overwritten by a re-run.
     const platformSeed: Record<string, unknown> = {
-      embeddingModelId: config.vector.modelId,
-      embeddingDimension: config.vector.dimension,
+      ...(config.vector.modelId ? { embeddingModelId: config.vector.modelId } : {}),
+      ...(config.vector.dimension !== undefined ? { embeddingDimension: config.vector.dimension } : {}),
+      // Only ever `false`: the declared default is on, and a merged re-run keeps an existing value.
+      ...(config.vector.enabled ? {} : { embeddingEnabled: false }),
       machineDesktopVariant: config.machine.variant.key,
       machineImage: config.machine.variant.derivativeImage,
     };
@@ -2602,7 +2628,9 @@ async function main() {
 
     // 13b. Generate docker-compose.yml (machine-specific topology — same
     // artifact family as .env; see docs/architect/setup-and-update.md).
-    await generateComposeFile(composeInputFromSetup(config, env, qdrantImage), configDir, { askOverwrite: true });
+    await generateComposeFile(composeInputFromSetup(config, env, qdrantImage), configDir, {
+      askOverwrite: true, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir,
+    });
 
     // 14. Summary
     printSummary(config, env);
@@ -2610,9 +2638,5 @@ async function main() {
   } finally {
     rl.close();
   }
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`\n  ${c.red}${c.bold}Setup failed:${c.reset} ${err.message ?? err}`);
-  process.exit(1);
-});

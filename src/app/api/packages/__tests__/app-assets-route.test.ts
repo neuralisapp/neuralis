@@ -22,9 +22,9 @@ const mocks = vi.hoisted(() => ({
   resolveVerifiedAgentScope: vi.fn<() => Promise<string | undefined>>(async () => undefined),
   resolveVisiblePackageSurface: vi.fn<() => Promise<unknown>>(),
   ensureProjectPackagesLoaded: vi.fn(async () => undefined),
-  getProjectPackageScanner: vi.fn<() => unknown>(),
-  scannerGetPackageById: vi.fn<(id: string) => unknown>(),
-  scannerGetPackage: vi.fn<(slug: string) => unknown>(),
+  /** Runtime instance ids each project loaded, and each instance's loaded root. */
+  projectPackageIds: new Map<string, Set<string>>(),
+  loadedRoots: new Map<string, string | undefined>(),
 }));
 
 vi.mock('@/server/auth/resolveSessionContext', async (importOriginal) => ({
@@ -48,17 +48,19 @@ vi.mock('@/server/packages/projectPackages', () => ({
   ensureProjectPackagesLoaded: mocks.ensureProjectPackagesLoaded,
 }));
 
-vi.mock('@/server/packages/ProjectPackageScanner', () => ({
-  getProjectPackageScanner: mocks.getProjectPackageScanner,
-}));
-
-vi.mock('@/server/config/env', () => ({
-  getEnv: () => ({ projectsRoot: '/tmp/nrs-test-projects' }),
-}));
-
-vi.mock('@/server/logging/setup', () => ({
-  getLogger: () => ({
-    child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+vi.mock('@/server/packages/PackageRuntimeManager', () => ({
+  getPackageRuntimeManager: () => ({
+    // What the real manager tracks per sync: the project's instance ids, and the
+    // root each one was loaded from (read back through `getLoader().getStatus`).
+    syncProjectPackagesToRuntime: async (projectId: string, records: Array<{ packageId: string; packageRoot?: string }>) => {
+      mocks.projectPackageIds.set(projectId, new Set(records.map((record) => record.packageId)));
+      for (const record of records) mocks.loadedRoots.set(record.packageId, record.packageRoot);
+      return { errors: [] };
+    },
+    getProjectPackageIds: (projectId: string) => mocks.projectPackageIds.get(projectId) ?? new Set(),
+    getLoader: () => ({
+      getStatus: (id: string) => (mocks.loadedRoots.has(id) ? { packageId: id, packageRoot: mocks.loadedRoots.get(id) } : undefined),
+    }),
   }),
 }));
 
@@ -79,14 +81,9 @@ const SESSION = {
   grantedFeatures: ['core.chat'],
 };
 
-// REAL id semantics (BUG-A lesson): the registry (and thus `surface.packageId`
-// + the client-sent URL slug) carries the scope-NAMESPACED id, while the
-// project scanner records carry the RAW manifest id and cache on the dir slug.
-// The stubs below answer ONLY for their own id form — an "any id matches" stub
-// masked the mint-404 bug behind 19 green tests.
-const NAMESPACED_ID = 'p.proj-1.project.example-package';
+// Exact instance identity stays distinct from the shared authored manifest name.
+const INSTANCE_ID = 'packages://example-package?project=proj-1&scope=project';
 const MANIFEST_ID = 'example-package';
-const DIR_SLUG = 'example-package';
 
 let packageRoot = '';
 let outsideDir = '';
@@ -96,7 +93,7 @@ const OUTSIDE_SENTINEL = '{"marker":"SCOPE-LANE-OUTSIDE-SENTINEL"}';
 
 function makeSurface(overrides: Record<string, unknown> = {}) {
   return {
-    packageId: NAMESPACED_ID,
+    packageId: INSTANCE_ID,
     manifestId: MANIFEST_ID,
     surfaceKind: 'widget',
     surfaceId: 'example_workspace',
@@ -105,13 +102,13 @@ function makeSurface(overrides: Record<string, unknown> = {}) {
     trust: 'untrusted',
     fingerprint: 'fp-1',
     generation: 'gen-1',
-    definition: { id: NAMESPACED_ID },
+    definition: { id: INSTANCE_ID },
     ...overrides,
   };
 }
 
 function mintReq(body: Record<string, unknown>) {
-  return new NextRequest(`http://localhost:3100/api/packages/${NAMESPACED_ID}/app-scope`, {
+  return new NextRequest(`http://localhost:3100/api/packages/${encodeURIComponent(INSTANCE_ID)}/app-scope`, {
     method: 'POST',
     headers: { 'x-project-id': 'proj-1', 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -134,7 +131,7 @@ function getReq() {
 async function mintHandle(): Promise<{ handle: string; url: string }> {
   const res = await mintPost(
     mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }),
-    { params: Promise.resolve({ slug: NAMESPACED_ID }) },
+    { params: Promise.resolve({ slug: INSTANCE_ID }) },
   );
   expect(res.status).toBe(200);
   return (await res.json()) as { handle: string; url: string };
@@ -143,7 +140,7 @@ async function mintHandle(): Promise<{ handle: string; url: string }> {
 /** No error surface may reflect the runtime package id or a filesystem path. */
 async function expectNonLeaking(res: Response): Promise<void> {
   const text = JSON.stringify([...res.headers.entries()]) + (await res.clone().text());
-  expect(text).not.toContain(MANIFEST_ID); // also a substring of NAMESPACED_ID
+  expect(text).not.toContain(MANIFEST_ID); // also a substring of INSTANCE_ID
   expect(text).not.toContain(packageRoot);
   expect(text).not.toContain('/app/surfaces');
 }
@@ -187,32 +184,46 @@ beforeEach(() => {
   mocks.getSessionUser.mockResolvedValue({ id: 'user-1' });
   mocks.resolveVerifiedAgentScope.mockResolvedValue(undefined);
   mocks.resolveVisiblePackageSurface.mockResolvedValue(makeSurface());
-  // Strict id semantics: a record is found ONLY via its RAW manifest id
-  // (getPackageById) or its dir slug (getPackage) — never via the namespaced
-  // registry id. Without the route's namespaced→manifest translation every
-  // lookup here returns null and the mint 404s (the live BUG-A).
-  mocks.scannerGetPackageById.mockImplementation((id: string) =>
-    id === MANIFEST_ID ? { slug: DIR_SLUG, packageId: MANIFEST_ID, packageRoot, definition: { id: MANIFEST_ID } } : null,
-  );
-  mocks.scannerGetPackage.mockImplementation((slug: string) =>
-    slug === DIR_SLUG ? { slug: DIR_SLUG, packageId: MANIFEST_ID, packageRoot, definition: { id: MANIFEST_ID } } : null,
-  );
-  mocks.getProjectPackageScanner.mockReturnValue({
-    getPackageById: mocks.scannerGetPackageById,
-    getPackage: mocks.scannerGetPackage,
-  });
+  mocks.projectPackageIds = new Map([[SESSION.projectId, new Set([INSTANCE_ID])]]);
+  mocks.loadedRoots = new Map([[INSTANCE_ID, packageRoot]]);
 });
 
 describe('POST /api/packages/:slug/app-scope (mint)', () => {
-  it('BUG-A: resolves the scanner record via the RAW manifest id, never the namespaced registry id', async () => {
-    // The default stubs are strict (the namespaced id matches NOTHING in the
-    // scanner), so this mint succeeds ONLY through the surface.manifestId
-    // translation — reverting the route to `getPackageById(surface.packageId)
-    // ?? getPackage(slug)` turns this 200 into the live 404.
+  it('resolves the visible instance in its project, never its authored name', async () => {
+    // A same-name sibling is loaded too; only the exact instance's root may bind.
+    mocks.loadedRoots.set(MANIFEST_ID, outsideDir);
     const { handle } = await mintHandle();
-    expect(handle).toBeTruthy();
-    expect(mocks.scannerGetPackageById).toHaveBeenCalledWith(MANIFEST_ID);
-    expect(mocks.scannerGetPackageById).not.toHaveBeenCalledWith(NAMESPACED_ID);
+    expect(getPackageAssetScopeAuthority().get(handle)?.surfaceRoot).toBe(
+      join(packageRoot, 'app', 'surfaces', 'widget', 'example_workspace'),
+    );
+  });
+
+  it('refuses an instance this project did not load, even when the loader holds it', async () => {
+    mocks.projectPackageIds = new Map([['proj-2', new Set([INSTANCE_ID])]]);
+    const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
+      params: Promise.resolve({ slug: INSTANCE_ID }),
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it('does not borrow roots from a same-name instance when the exact instance is absent', async () => {
+    mocks.resolveVisiblePackageSurface.mockResolvedValue(makeSurface({
+      packageId: 'other-source://example-package?project=proj-1&scope=project',
+    }));
+    const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
+      params: Promise.resolve({ slug: INSTANCE_ID }),
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Surface not available' });
+  });
+
+  it('refuses a loaded instance without a filesystem root', async () => {
+    mocks.loadedRoots.set(INSTANCE_ID, undefined);
+    const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
+      params: Promise.resolve({ slug: INSTANCE_ID }),
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Surface not available' });
   });
 
   it('mints an opaque handle and a package-ID-free navigable URL', async () => {
@@ -231,7 +242,7 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
     // (a) surface not visible
     mocks.resolveVisiblePackageSurface.mockResolvedValue(null);
     let res = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(404);
     await expectNonLeaking(res);
@@ -240,14 +251,14 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
     // (b) bad surface kind
     mocks.resolveVisiblePackageSurface.mockResolvedValue(makeSurface());
     res = await mintPost(mintReq({ surfaceKind: 'dock', surfaceId: 'example_workspace' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(404);
     bodies.push(await res.text());
 
     // (c) traversal-capable surface id
     res = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: '..' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(404);
     bodies.push(await res.text());
@@ -257,7 +268,7 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
       makeSurface({ entryUrl: 'https://example.com/x.html', trust: 'trusted' }),
     );
     res = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(404);
     bodies.push(await res.text());
@@ -265,7 +276,7 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
     // (e) non-canonical (legacy flat) entry url
     mocks.resolveVisiblePackageSurface.mockResolvedValue(makeSurface({ entryUrl: 'widget.html' }));
     res = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(404);
     bodies.push(await res.text());
@@ -298,7 +309,7 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
     >('@/server/auth/resolveSessionContext');
     mocks.resolveSessionContext.mockRejectedValue(new SessionResolutionError(403, 'Forbidden: no access to project'));
     const res = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
-      params: Promise.resolve({ slug: NAMESPACED_ID }),
+      params: Promise.resolve({ slug: INSTANCE_ID }),
     });
     expect(res.status).toBe(403);
   });
@@ -692,7 +703,7 @@ describe('GET /api/package-app/_scope/:handle — bundle-mode base injection', (
     const { handle, record } = await mintWithMode('bundle');
     const res = await handlePackageAppAssetGet(getReq(), handle, ['surface', 'index.html']);
     const body = await res.text();
-    for (const needle of [MANIFEST_ID, NAMESPACED_ID, 'user-1', 'proj-1', packageRoot]) {
+    for (const needle of [MANIFEST_ID, INSTANCE_ID, 'user-1', 'proj-1', packageRoot]) {
       expect(body).not.toContain(needle);
     }
     // The pub token is the ONLY secret in it, and it is NOT the entry handle.
@@ -746,5 +757,65 @@ describe('PATCH / DELETE /api/packages/:slug/app-scope (heartbeat / close)', () 
     mocks.getSessionUser.mockResolvedValue(null);
     const res = await closeDelete(bodyReq('DELETE', { handle: 'x' }));
     expect(res.status).toBe(401);
+  });
+});
+
+describe('mint cost — the loaded instance, never a rescan of every scanner', () => {
+  // The REAL activation over a tmp project: the default `_packages/` scanner
+  // scans once to load the project, and every later mint must read the loaded
+  // root instead of re-walking each scanner (one directory read + manifest
+  // resolve per package, per widget open).
+  const ACTIVATION_KEY = '__neuralis_project_package_activation__';
+  const SCANNERS_KEY = '__neuralis_project_package_scanners__';
+  let projectsRoot = '';
+  let realMint: typeof mintPost;
+  let Scanner: typeof import('@/server/packages/ProjectPackageScanner').ProjectPackageScanner;
+  let scanLog: string[];
+
+  beforeAll(async () => {
+    projectsRoot = await mkdtemp(join(tmpdir(), 'nrs-mint-scan-'));
+    const root = join(projectsRoot, 'proj-1', '_packages', 'example-package');
+    await mkdir(join(root, 'app', 'surfaces', 'widget', 'example_workspace'), { recursive: true });
+    await writeFile(join(root, 'package.json'), JSON.stringify({
+      name: 'example-package', version: '1.0.0', neuralis: { id: 'example-package', name: 'Example' },
+    }));
+    scanLog = [];
+    const logger = {
+      debug: (message: string) => { scanLog.push(message); },
+      info: () => undefined, warn: () => undefined, error: () => undefined,
+    };
+    vi.resetModules();
+    vi.doUnmock('@/server/packages/projectPackages');
+    vi.doMock('@/server/config/env', () => ({ getEnv: () => ({ projectsRoot }) }));
+    vi.doMock('@/server/logging/setup', () => ({ getLogger: () => ({ child: () => logger }) }));
+    vi.doMock('@/server/host/bootstrap', () => ({ getRuntime: async () => { throw new Error('no runtime in a unit test'); } }));
+    vi.doMock('@/server/store/ProjectStore', () => ({ getProjectById: async () => ({ id: 'proj-1' }) }));
+    Scanner = (await import('@/server/packages/ProjectPackageScanner')).ProjectPackageScanner;
+    realMint = (await import('../[slug]/app-scope/route')).POST;
+  }, 60_000);
+
+  afterAll(async () => {
+    const g = globalThis as Record<string, unknown>;
+    delete g[ACTIVATION_KEY];
+    delete g[SCANNERS_KEY];
+    await rm(projectsRoot, { recursive: true, force: true });
+  });
+
+  it('scans once to activate, then 0 scans and 0 scan log lines per widget open', async () => {
+    // Spies live in the test: the suite config restores every mock before each one.
+    vi.spyOn(Scanner.prototype, 'startWatching').mockImplementation(() => undefined);
+    const scan = vi.spyOn(Scanner.prototype, 'scan');
+    // Nothing is loaded until the real activation runs.
+    mocks.projectPackageIds = new Map();
+    mocks.loadedRoots = new Map();
+    const open = () => realMint(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
+      params: Promise.resolve({ slug: INSTANCE_ID }),
+    });
+    expect((await open()).status).toBe(200); // warm-up: the project activates here
+    const warm = { scans: scan.mock.calls.length, logs: scanLog.filter((m) => m === 'Project package scan complete').length };
+    expect(warm.scans).toBe(1);
+    for (let i = 0; i < 3; i++) expect((await open()).status).toBe(200);
+    expect(scan.mock.calls.length - warm.scans).toBe(0);
+    expect(scanLog.filter((m) => m === 'Project package scan complete').length - warm.logs).toBe(0);
   });
 });

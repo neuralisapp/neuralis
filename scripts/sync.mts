@@ -37,8 +37,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { treeDigest } from './build/treeDigest.mjs';
 // ONE derivation, two consumers: sync takes the `syncable` half, update the
 // `registryOnly` half. See scripts/setup/discoverPackages.mts.
@@ -48,12 +47,19 @@ import {
   type SyncablePackage,
 } from './setup/discoverPackages.mts';
 import { packageBindHostPath } from './mount/packageBind.mts';
+import { CliExit, type CliContext } from './cli/registry.mts';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const neuralisDir = join(here, '..');
-const repoRoot = join(neuralisDir, '..');
+/**
+ * One run's facts, resolved once in `run`: the development checkout (sync is a
+ * monorepo tool — its package and install folder are the same `neuralis/`),
+ * the workspace root the package builds run in, and the app container.
+ */
+type SyncSession = { neuralisDir: string; repoRoot: string; container: string };
+
 /** The ONE digest implementation — imported here, copied into the container. */
-const DIGEST_MODULE = join(here, 'build', 'treeDigest.mjs');
+function digestModule(s: SyncSession): string {
+  return join(s.neuralisDir, 'scripts', 'build', 'treeDigest.mjs');
+}
 
 /**
  * The app container name.
@@ -65,7 +71,7 @@ const DIGEST_MODULE = join(here, 'build', 'treeDigest.mjs');
  * working where Compose cannot answer, and `NEURALIS_CONTAINER` still overriding
  * everything.
  */
-function resolveContainerName(): string {
+function resolveContainerName(neuralisDir: string): string {
   const override = process.env.NEURALIS_CONTAINER?.trim();
   if (override) return override;
   const probe = spawnSync('docker', ['compose', 'ps', '-q', 'neuralis'], {
@@ -83,7 +89,6 @@ function resolveContainerName(): string {
   return 'neuralis-neuralis-1';
 }
 
-const CONTAINER = resolveContainerName();
 const CONTAINER_NM = '/neuralis/node_modules';
 const MARKER = '/neuralis/_runtime/.sync-divergence.json';
 
@@ -97,9 +102,9 @@ const c = {
 
 type Json = Record<string, unknown>;
 
-function run(cmd: string, args: string[], opts: { cwd?: string; quiet?: boolean } = {}) {
+function runSync(cmd: string, args: string[], opts: { cwd?: string; quiet?: boolean } = {}) {
   const res = spawnSync(cmd, args, {
-    cwd: opts.cwd ?? repoRoot,
+    cwd: opts.cwd,
     encoding: 'utf-8',
     stdio: opts.quiet ? 'pipe' : ['ignore', 'pipe', 'pipe'],
   });
@@ -107,7 +112,7 @@ function run(cmd: string, args: string[], opts: { cwd?: string; quiet?: boolean 
 }
 
 function docker(args: string[]) {
-  return run('docker', args, { quiet: true });
+  return runSync('docker', args, { quiet: true });
 }
 
 class SyncRefusal extends Error {
@@ -120,15 +125,13 @@ class SyncRefusal extends Error {
 // Preflight
 // ---------------------------------------------------------------------------
 
-function assertContainerUp(): void {
-  const { code, out } = docker(['inspect', '-f', '{{.State.Running}}', CONTAINER]);
+function assertContainerUp(s: SyncSession): void {
+  const { code, out } = docker(['inspect', '-f', '{{.State.Running}}', s.container]);
   if (code !== 0 || out.trim() !== 'true') {
-    console.error(
-      c.red(`Container "${CONTAINER}" is not running.\n`) +
-        '  Start the stack first (`cd neuralis && docker compose up -d`), or set\n' +
-        '  NEURALIS_CONTAINER if yours is named differently.',
-    );
-    process.exit(2);
+    throw new CliExit(2, `Container "${s.container}" is not running.`, [
+      'Start the stack first (`cd neuralis && docker compose up -d`), or set',
+      'NEURALIS_CONTAINER if yours is named differently.',
+    ]);
   }
 }
 
@@ -150,11 +153,11 @@ type InstalledDigests = Record<string, { version: string | null; treeDigest: str
  * diverged. Copying the one module in and executing it there costs a few hundred
  * milliseconds and cannot go stale.
  */
-function containerDigests(): InstalledDigests | null {
+function containerDigests(s: SyncSession): InstalledDigests | null {
   const remote = '/tmp/nrs-tree-digest.mjs';
-  if (docker(['cp', DIGEST_MODULE, `${CONTAINER}:${remote}`]).code !== 0) return null;
-  const { code, out } = docker(['exec', CONTAINER, 'node', remote, CONTAINER_NM]);
-  docker(['exec', CONTAINER, 'rm', '-f', remote]);
+  if (docker(['cp', digestModule(s), `${s.container}:${remote}`]).code !== 0) return null;
+  const { code, out } = docker(['exec', s.container, 'node', remote, CONTAINER_NM]);
+  docker(['exec', s.container, 'rm', '-f', remote]);
   if (code !== 0) return null;
   try {
     return JSON.parse(out) as InstalledDigests;
@@ -164,8 +167,8 @@ function containerDigests(): InstalledDigests | null {
 }
 
 /** When the running image was built — Docker already knows; nothing to stamp. */
-function imageBuiltAt(): string | null {
-  const image = docker(['inspect', '-f', '{{.Image}}', CONTAINER]);
+function imageBuiltAt(s: SyncSession): string | null {
+  const image = docker(['inspect', '-f', '{{.Image}}', s.container]);
   if (image.code !== 0) return null;
   const created = docker(['inspect', '-f', '{{.Created}}', image.out.trim()]);
   return created.code === 0 ? created.out.trim() : null;
@@ -249,11 +252,11 @@ function assertSyncable(pkg: SyncablePackage): void {
  * only half the process — the outcome this tool exists to avoid, and the one
  * failure mode that leaves no trace.
  */
-function assertNotBundled(pkg: SyncablePackage): void {
+function assertNotBundled(s: SyncSession, pkg: SyncablePackage): void {
   const sentinel = SENTINELS[pkg.name];
   if (!sentinel) return;
   const { out } = docker([
-    'exec', CONTAINER, 'sh', '-c',
+    'exec', s.container, 'sh', '-c',
     `grep -rl '${sentinel}' /neuralis/_runtime/.next/server/ 2>/dev/null | wc -l`,
   ]);
   const hits = Number.parseInt(out.trim(), 10);
@@ -289,12 +292,14 @@ function readJson(path: string): Json | null {
 }
 
 /** The kernel's UI builder, by node path from the host's own install. */
-const KERNEL_CLI = join(neuralisDir, 'node_modules', '@neuralis', 'package-system', 'dist', 'src', 'cli', 'neuralis-build.js');
+function kernelCli(s: SyncSession): string {
+  return join(s.neuralisDir, 'node_modules', '@neuralis', 'package-system', 'dist', 'src', 'cli', 'neuralis-build.js');
+}
 
 /** The machine-local compose override (empty when there is none). */
-function readOverride(): string {
+function readOverride(s: SyncSession): string {
   try {
-    return readFileSync(join(neuralisDir, 'docker-compose.override.yml'), 'utf-8');
+    return readFileSync(join(s.neuralisDir, 'docker-compose.override.yml'), 'utf-8');
   } catch {
     return '';
   }
@@ -339,7 +344,7 @@ function buildPlan(packages: SyncablePackage[], installed: InstalledDigests): Pl
   });
 }
 
-function printStatus(plans: Plan[], registryOnly: RegistryOnlyPackage[]): void {
+function printStatus(s: SyncSession, plans: Plan[], registryOnly: RegistryOnlyPackage[]): void {
   const width = Math.max(18, ...plans.map((p) => p.pkg.name.length));
   console.log(c.bold(`\n  ${'package'.padEnd(width)}  host dist        container dist   state`));
   console.log(c.dim('  ' + '─'.repeat(width + 48)));
@@ -356,7 +361,7 @@ function printStatus(plans: Plan[], registryOnly: RegistryOnlyPackage[]): void {
   for (const r of registryOnly) {
     console.log(`  ${c.dim(r.name.padEnd(width))}  ${c.dim('—'.padEnd(16))} ${c.dim('—'.padEnd(16))} ${c.dim(`from registry (${r.spec}) — no source here`)}`);
   }
-  const builtAt = imageBuiltAt();
+  const builtAt = imageBuiltAt(s);
   if (builtAt) console.log(c.dim(`\n  image built ${builtAt}`));
 }
 
@@ -368,17 +373,17 @@ function printStatus(plans: Plan[], registryOnly: RegistryOnlyPackage[]): void {
  * Atomic by construction: the live tree is never partially written. A failed
  * extraction leaves the old tree in place and nothing to clean up but a temp dir.
  */
-function swapPackage(pkg: SyncablePackage, dryRun: boolean): { ok: boolean; detail: string } {
+function swapPackage(s: SyncSession, pkg: SyncablePackage, dryRun: boolean): { ok: boolean; detail: string } {
   if (dryRun) return { ok: true, detail: 'would pack, swap and verify' };
 
-  const packed = run('pnpm', ['pack', '--pack-destination', '/tmp'], { cwd: pkg.dir, quiet: true });
+  const packed = runSync('pnpm', ['pack', '--pack-destination', '/tmp'], { cwd: pkg.dir, quiet: true });
   if (packed.code !== 0) return { ok: false, detail: `pnpm pack failed: ${packed.err.trim().split('\n').pop()}` };
   const tgz = packed.out.trim().split('\n').pop()!;
   if (!existsSync(tgz)) return { ok: false, detail: `pack produced no tarball (${tgz})` };
 
   try {
     const stage = `/tmp/nrs-sync-${pkg.slug}-${Date.now()}`;
-    const copy = docker(['cp', tgz, `${CONTAINER}:${stage}.tgz`]);
+    const copy = docker(['cp', tgz, `${s.container}:${stage}.tgz`]);
     if (copy.code !== 0) return { ok: false, detail: `docker cp failed: ${copy.err.trim()}` };
 
     // The container path follows the registry NAME, scope included — a
@@ -396,7 +401,7 @@ function swapPackage(pkg: SyncablePackage, dryRun: boolean): { ok: boolean; deta
       `mv ${stage} ${target}`,
       `rm -rf ${target}.old ${stage}.tgz`,
     ].join(' && ');
-    const swap = docker(['exec', '-u', 'root', CONTAINER, 'sh', '-c', script]);
+    const swap = docker(['exec', '-u', 'root', s.container, 'sh', '-c', script]);
     if (swap.code !== 0) return { ok: false, detail: `swap failed: ${swap.err.trim()}` };
     return { ok: true, detail: 'swapped' };
   } finally {
@@ -408,16 +413,16 @@ function swapPackage(pkg: SyncablePackage, dryRun: boolean): { ok: boolean; deta
  * Prove the swapped code is what the container now HAS — the swap command's
  * exit code says the files moved, not that the right files moved.
  */
-function verifySwap(pkg: SyncablePackage, expected: string | null): boolean {
+function verifySwap(s: SyncSession, pkg: SyncablePackage, expected: string | null): boolean {
   if (!expected) return true;
   const { code, out } = docker([
-    'exec', CONTAINER, 'sh', '-c',
+    'exec', s.container, 'sh', '-c',
     `cd ${CONTAINER_NM}/${pkg.name} && find dist -type f | sort | wc -l`,
   ]);
   return code === 0 && Number.parseInt(out.trim(), 10) > 0;
 }
 
-function writeMarker(slugs: string[]): void {
+function writeMarker(s: SyncSession, slugs: string[]): void {
   const payload = JSON.stringify({
     divergedAt: new Date().toISOString(),
     packages: slugs,
@@ -426,14 +431,14 @@ function writeMarker(slugs: string[]): void {
   // Lives on the `_runtime` anonymous volume, so `neuralis:rebuild`'s mandatory
   // `-V` removes it BY CONSTRUCTION — the marker cannot outlive the divergence
   // it records.
-  docker(['exec', '-u', 'root', CONTAINER, 'sh', '-c',
+  docker(['exec', '-u', 'root', s.container, 'sh', '-c',
     `cat > ${MARKER} <<'NRSEOF'\n${payload}\nNRSEOF`]);
 }
 
-function waitHealthy(timeoutMs = 120_000): boolean {
+function waitHealthy(s: SyncSession, timeoutMs = 120_000): boolean {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const { out } = docker(['inspect', '-f', '{{.State.Health.Status}}', CONTAINER]);
+    const { out } = docker(['inspect', '-f', '{{.State.Health.Status}}', s.container]);
     if (out.trim() === 'healthy') return true;
     spawnSync('sleep', ['3']);
   }
@@ -444,15 +449,16 @@ function waitHealthy(timeoutMs = 120_000): boolean {
 // Main
 // ---------------------------------------------------------------------------
 
-function main(): void {
-  const argv = process.argv.slice(2);
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
+  const neuralisDir = ctx.installDir;
+  const s: SyncSession = { neuralisDir, repoRoot: join(neuralisDir, '..'), container: resolveContainerName(neuralisDir) };
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const positional = argv.filter((a) => !a.startsWith('--'));
   const asJson = flags.has('--json');
   const dryRun = flags.has('--dry-run');
   const statusOnly = positional[0] === 'status';
 
-  assertContainerUp();
+  assertContainerUp(s);
 
   const { syncable, registryOnly } = discoverBuiltinDeps(neuralisDir);
   if (syncable.length === 0) {
@@ -462,17 +468,15 @@ function main(): void {
         '  no source to rebuild from. Point one at a folder you are editing with\n' +
         `  \`pnpm neuralis:pkg add <name> --path <dir>\`${registryOnly.length ? `, or rebuild the image.\n  From the registry: ${registryOnly.map((r) => r.name).join(', ')}` : '.'}`,
     );
-    process.exit(2);
+    return 2;
   }
 
-  const installed = containerDigests();
+  const installed = containerDigests(s);
   if (!installed) {
-    console.error(
-      c.red('Could not read what the container has installed.\n') +
-        '  The digest probe failed — check that the container runs node and that\n' +
-        '  /neuralis/node_modules exists inside it.',
-    );
-    process.exit(2);
+    throw new CliExit(2, 'Could not read what the container has installed.', [
+      'The digest probe failed — check that the container runs node and that',
+      '/neuralis/node_modules exists inside it.',
+    ]);
   }
 
   let requested: SyncablePackage[];
@@ -482,23 +486,21 @@ function main(): void {
       : positional.map((token) => resolveRequested(token, syncable));
   } catch (err) {
     const refusal = err as SyncRefusal;
-    console.error(c.red(`${refusal.slug}: ${refusal.reason}`));
-    console.error(c.dim(`  ${refusal.detail}`));
-    process.exit(2);
+    throw new CliExit(2, `${refusal.slug}: ${refusal.reason}`, [refusal.detail]);
   }
 
   if (statusOnly) {
     const plans = buildPlan(requested, installed);
     if (asJson) {
       console.log(JSON.stringify({
-        builtAt: imageBuiltAt(),
+        builtAt: imageBuiltAt(s),
         packages: plans.map((p) => ({ name: p.pkg.name, slug: p.pkg.slug, dir: p.pkg.dir, hostDigest: p.hostDigest, containerDigest: p.imageDigest, diverged: p.diverged })),
         registryOnly,
       }, null, 2));
     } else {
-      printStatus(plans, registryOnly);
+      printStatus(s, plans, registryOnly);
     }
-    return;
+    return 0;
   }
 
   // BUILD BEFORE COMPARING. The divergence check reads the host's `dist/`, and a
@@ -517,7 +519,7 @@ function main(): void {
     const workspace = requested.filter((p) => !p.local);
     const filters = workspace.flatMap((p) => ['--filter', `${p.name}...`]);
     const steps: Array<{ args: string[]; cwd?: string; cmd?: string }> =
-      workspace.length > 0 ? [{ args: [...filters, 'build'] }, { args: [...filters, 'run', '--if-present', 'build:ui'] }] : [];
+      workspace.length > 0 ? [{ args: [...filters, 'build'], cwd: s.repoRoot }, { args: [...filters, 'run', '--if-present', 'build:ui'], cwd: s.repoRoot }] : [];
     // A local folder is no workspace member here: it builds in its OWN root —
     // its `build`, then its UI module through the kernel CLI by node path (the
     // folder's own `.bin` need not carry `neuralis-build`). It must build on
@@ -525,14 +527,14 @@ function main(): void {
     for (const p of requested.filter((r) => r.local)) {
       steps.push({ args: ['run', 'build'], cwd: p.dir });
       const manifest = readJson(join(p.dir, 'package.json')) as { neuralis?: { app?: { module?: unknown } } } | null;
-      if (manifest?.neuralis?.app?.module) steps.push({ cmd: process.execPath, args: [KERNEL_CLI, 'ui', '.'], cwd: p.dir });
+      if (manifest?.neuralis?.app?.module) steps.push({ cmd: process.execPath, args: [kernelCli(s), 'ui', '.'], cwd: p.dir });
     }
     for (const step of steps) {
-      const built = run(step.cmd ?? 'pnpm', step.args, { quiet: true, cwd: step.cwd });
+      const built = runSync(step.cmd ?? 'pnpm', step.args, { quiet: true, cwd: step.cwd });
       if (built.code !== 0) {
         console.error(c.red(`  build failed${step.cwd ? ` in ${step.cwd}` : ''} — nothing was swapped.`));
         console.error(c.dim(`  ${(built.err.trim() || built.out.trim()).split('\n').slice(-3).join('\n  ')}`));
-        process.exit(1);
+        return 1;
       }
     }
   }
@@ -542,7 +544,7 @@ function main(): void {
   // folder, so the build above IS the update — the process only has to restart
   // to load it (and to recompute the UI module table, built once per package
   // set). A folder without that bind is swapped like any other.
-  const overrideText = readOverride();
+  const overrideText = readOverride(s);
   const bound = new Set(
     requested.filter((p) => p.local && packageBindHostPath(overrideText, p.name) === p.dir).map((p) => p.name),
   );
@@ -551,7 +553,7 @@ function main(): void {
   const targets = plans.filter((p) => p.diverged);
   if (targets.length === 0 && bound.size === 0) {
     console.log(c.green('\n  Nothing to sync — every requested package matches the container.\n'));
-    return;
+    return 0;
   }
 
   const results: Array<{ slug: string; ok: boolean; detail: string }> = [];
@@ -566,14 +568,14 @@ function main(): void {
   for (const plan of targets) {
     try {
       assertSyncable(plan.pkg);
-      assertNotBundled(plan.pkg);
+      assertNotBundled(s, plan.pkg);
     } catch (err) {
       const refusal = err as SyncRefusal;
       results.push({ slug: plan.pkg.slug, ok: false, detail: `REFUSED — ${refusal.reason}: ${refusal.detail}` });
       continue;
     }
-    const swapped = swapPackage(plan.pkg, dryRun);
-    if (swapped.ok && !dryRun && !verifySwap(plan.pkg, plan.hostDigest)) {
+    const swapped = swapPackage(s, plan.pkg, dryRun);
+    if (swapped.ok && !dryRun && !verifySwap(s, plan.pkg, plan.hostDigest)) {
       results.push({ slug: plan.pkg.slug, ok: false, detail: 'swap reported success but the tree is empty' });
       continue;
     }
@@ -584,16 +586,13 @@ function main(): void {
   const failed = results.filter((r) => !r.ok);
 
   if (!dryRun && succeeded.length > 0) {
-    writeMarker(succeeded);
+    writeMarker(s, succeeded);
     if (!flags.has('--no-restart')) {
       // `restart`, never `up -d`: `up` can RECREATE the container, and if an
       // image was built meanwhile it pairs the new container with the old
       // `_runtime` volume — the documented `-V` trap, reached by accident.
-      docker(['restart', CONTAINER]);
-      if (!waitHealthy()) {
-        console.error(c.red('\n  Container did not become healthy after the restart.'));
-        process.exit(1);
-      }
+      docker(['restart', s.container]);
+      if (!waitHealthy(s)) throw new CliExit(1, 'Container did not become healthy after the restart.');
     }
   }
 
@@ -615,7 +614,5 @@ function main(): void {
     }
   }
 
-  if (failed.length > 0) process.exit(1);
+  return failed.length > 0 ? 1 : 0;
 }
-
-main();

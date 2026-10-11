@@ -5,7 +5,7 @@ import { getEnv } from './config/env';
 export class SetupRequiredError extends Error {
   readonly code = 'SETUP_REQUIRED';
 
-  constructor(message = 'Neuralis setup has not been completed. Run `pnpm neuralis:setup` first.') {
+  constructor(message = 'Neuralis setup has not been completed. Run `npx neuralis setup` first.') {
     super(message);
     this.name = 'SetupRequiredError';
   }

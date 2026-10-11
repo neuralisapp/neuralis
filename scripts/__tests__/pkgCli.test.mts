@@ -20,7 +20,7 @@ const realHost = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const sandbox = mkdtempSync(join(tmpdir(), 'neuralis-pkg-cli-'));
 const host = join(sandbox, 'host');
 const home = join(sandbox, 'home');
-const HOST_MANIFEST = `{\n  "name": "neuralis",\n  "dependencies": {\n    "react": "19.3.0"\n  }\n}\n`;
+const HOST_MANIFEST = `{\n  "name": "neuralis",\n  "bin": { "neuralis": "bin/neuralis.mjs" },\n  "dependencies": {\n    "react": "19.3.0"\n  }\n}\n`;
 
 mkdirSync(host, { recursive: true });
 cpSync(join(realHost, 'scripts'), join(host, 'scripts'), { recursive: true });
@@ -39,8 +39,13 @@ function pkg(...args: string[]) {
 }
 
 function pkgWith(buildNpmrc: string, ...args: string[]) {
-  const res = spawnSync(process.execPath, ['--import', 'tsx', join(host, 'scripts', 'pkg.mts'), ...args], {
-    cwd: host,
+  return pkgIn(host, buildNpmrc, ...args);
+}
+
+/** `cwd` is the install folder the command walks up to: the host package itself, or an npm install folder. */
+function pkgIn(cwd: string, buildNpmrc: string, ...args: string[]) {
+  const res = spawnSync(process.execPath, ['--import', 'tsx', join(host, 'scripts', 'cli', 'registry.mts'), 'pkg', ...args], {
+    cwd,
     encoding: 'utf8',
     env: { ...process.env, NEURALIS_HOME: home, NEURALIS_BUILD_NPMRC: buildNpmrc },
   });
@@ -79,7 +84,8 @@ describe('pkg add --path — the build contract is checked before the write', ()
     const res = pkg('add', '@acme/ok', '--path', dir);
     expect(res.status, res.out).toBe(0);
     expect(JSON.parse(manifestText()).dependencies['@acme/ok']).toBe(`file:${dir}`);
-    expect(res.out).toMatch(/Next step:.*pnpm neuralis:rebuild/);
+    // The sandbox host is the host package outside a workspace and a clone: the bin form.
+    expect(res.out).toMatch(/Next step:.*node bin\/neuralis.mjs rebuild/);
   });
 });
 
@@ -136,6 +142,43 @@ describe('pkg add --version / --tarball', () => {
   });
 });
 
+describe('pkg on an npm install folder — the next step is its own derived image', () => {
+  it('add --version names `npx neuralis rebuild`, never the monorepo lock step; remove names it too', () => {
+    // Inside the sandbox host only so `--import tsx` resolves; the walk-up stops at the folder's own manifest.
+    const folder = join(host, 'install-folder');
+    mkdirSync(folder, { recursive: true });
+    const before = '{\n  "private": true,\n  "dependencies": {\n    "neuralis": "0.2.0"\n  }\n}\n';
+    writeFileSync(join(folder, 'package.json'), before);
+    const added = pkgIn(folder, '', 'add', '@acme/ops', '--version', '1.0.0');
+    expect(added.status, added.out).toBe(0);
+    expect(added.out).toMatch(/Next step:.*npx neuralis rebuild.*the release image plus its operator packages/);
+    expect(added.out).not.toContain('pnpm install');
+    expect(added.out).not.toContain('pnpm neuralis:rebuild');
+    // The trust notice names the folder's own manifest and no checkout-only lock step.
+    expect(added.out).toContain('to package.json#dependencies');
+    expect(added.out).not.toContain('neuralis/package.json');
+    expect(JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8')).dependencies).toEqual({ '@acme/ops': '1.0.0', neuralis: '0.2.0' });
+    const removed = pkgIn(folder, '', 'remove', '@acme/ops');
+    expect(removed.status, removed.out).toBe(0);
+    expect(removed.out).toMatch(/Next step:.*npx neuralis rebuild/);
+    expect(removed.out).toContain('from package.json#dependencies');
+    expect(readFileSync(join(folder, 'package.json'), 'utf8')).toBe(before);
+  });
+
+  it('list shows every operator line of the folder — a registry package installed only in the derived image too', () => {
+    const folder = join(host, 'list-folder');
+    mkdirSync(folder, { recursive: true });
+    const local = folderPackage('@acme/local', { version: '0.1.0', neuralis: {} });
+    writeFileSync(join(folder, 'package.json'), JSON.stringify({ private: true, dependencies: { '@acme/ops': '1.0.0', '@acme/local': `file:${local}`, neuralis: '0.2.0' } }, null, 2));
+    const listed = pkgIn(folder, '', 'list');
+    expect(listed.status, listed.out).toBe(0);
+    expect(listed.out).toMatch(/@acme\/ops.*1\.0\.0/);
+    expect(listed.out).toMatch(/builtin-class.*@acme\/local/);
+    expect(listed.out).not.toMatch(/ neuralis .*0\.2\.0/);
+    expect(listed.out).not.toContain('No builtin-class');
+  });
+});
+
 describe('pkg remove', () => {
   it('restores the manifest byte-exactly, records the default-granted features for the next boot, names the leftover zone', () => {
     resetHost();
@@ -152,7 +195,8 @@ describe('pkg remove', () => {
       },
     });
     expect(pkg('add', '@acme/gone', '--path', dir).status).toBe(0);
-    const zone = join(home, 'projects', 'p1', 'data', '_installed', 'acme-gone');
+    // A plain npm id's zone is the id verbatim under `runtime/_npm/` — scope included.
+    const zone = join(home, 'projects', 'p1', 'data', 'runtime', '_npm', '@acme', 'gone');
     mkdirSync(zone, { recursive: true });
     const res = pkg('remove', '@acme/gone');
     expect(res.status, res.out).toBe(0);
@@ -243,7 +287,7 @@ describe('pkg add — the grant-change record for the next boot', () => {
 });
 
 describe('pkg add — the loader\'s own admission check runs before the write', () => {
-  const WITH_RUNTIME = `{\n  "name": "neuralis",\n  "dependencies": {\n    "@neuralis/agent-core": "workspace:*",\n    "react": "19.3.0"\n  }\n}\n`;
+  const WITH_RUNTIME = `{\n  "name": "neuralis",\n  "bin": { "neuralis": "bin/neuralis.mjs" },\n  "dependencies": {\n    "@neuralis/agent-core": "workspace:*",\n    "react": "19.3.0"\n  }\n}\n`;
   const tool = (category: string | undefined) => JSON.stringify({
     $schema: 'http://json-schema.org/draft-07/schema#', title: 'Ping', type: 'object', description: 'p', properties: {}, additionalProperties: false,
     'x-neuralis': { family: 't', operation: 't.ping', transport: 'embedded', annotations: { title: 'Ping', ...(category ? { category } : {}) } },

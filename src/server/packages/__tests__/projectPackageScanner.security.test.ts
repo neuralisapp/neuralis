@@ -176,3 +176,33 @@ describe('ProjectPackageScanner — DIST1 (any recognizesPackages source, not ju
     expect(scanner.getPackage('liar-pkg')?.definition.access?.trust).toBe('untrusted');
   });
 });
+
+it('separates present-invalid and unreachable source from a proved absent child, and scans a source-root package', async () => {
+  const sourceDir = path.join(tempRoot, 'presence');
+  const packageRoot = path.join(sourceDir, 'folder');
+  await writeMaliciousPackage(packageRoot, { id: 'valid-name' });
+  const { logger } = makeSpyLogger();
+  const scanner = new ProjectPackageScanner(sourceDir, logger);
+  await scanner.scan();
+  expect(scanner.scanComplete).toBe(true);
+  expect(scanner.getPackage('folder')).not.toBeNull();
+  await fs.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ neuralis: { id: 'invalid://authored' } }));
+  await scanner.scan();
+  expect(scanner.getPackage('folder')).toBeNull();
+  expect(scanner.isConfirmedDeleted(packageRoot)).toBe(false);
+  expect(scanner.scanComplete).toBe(false);
+  await fs.rm(packageRoot, { recursive: true });
+  await scanner.scan();
+  expect(scanner.isConfirmedDeleted(packageRoot)).toBe(true);
+  await fs.rm(sourceDir, { recursive: true });
+  await scanner.scan();
+  expect(scanner.isConfirmedDeleted(packageRoot)).toBe(false);
+  scanner.startWatching('p1', () => undefined);
+  expect(existsSync(sourceDir)).toBe(false);
+  await scanner.stopWatching();
+  await scanner.scan();
+  expect(scanner.isConfirmedDeleted(packageRoot)).toBe(false);
+  await writeMaliciousPackage(sourceDir, { id: 'root-package' });
+  await scanner.scan();
+  expect(scanner.getPackage('')?.packageRoot).toBe(sourceDir);
+});

@@ -10,7 +10,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -57,13 +57,13 @@ describe('the claim is order-free', () => {
     await ensureHostDataFormat(HOST_DATA_FORMATS.user);
     expect(Object.keys(readLedger()).sort()).toEqual(Object.values(HOST_DATA_FORMATS).map((f) => f.kind).sort());
 
-    declareDataFormats([{ kind: 'some-pkg/record', version: 2, files: [] }]);
+    declareDataFormats([{ kind: 'some-pkg/record', version: 2, files: [], upgrade: { mode: 'offline', id: 'record-v2' } }]);
     await claimAllDeclaredDataFormats();
     expect(readLedger()['some-pkg/record']?.version).toBe(2);
   });
 
   it('the reverse order lands the same ledger', async () => {
-    declareDataFormats([{ kind: 'some-pkg/record', version: 2, files: [] }]);
+    declareDataFormats([{ kind: 'some-pkg/record', version: 2, files: [], upgrade: { mode: 'offline', id: 'record-v2' } }]);
     await claimAllDeclaredDataFormats();
     await ensureHostDataFormat(HOST_DATA_FORMATS.project);
     expect(Object.keys(readLedger()).sort()).toEqual(
@@ -99,32 +99,29 @@ describe('newer data stops the boot and names the way back', () => {
     const before = readFileSync(ledgerPath, 'utf-8');
 
     const refusal = claimHostDataFormats();
-    await expect(refusal).rejects.toThrow(/neuralis\/project v7 \(this build reads v1\)/);
+    await expect(refusal).rejects.toThrow(/neuralis\/project v7 \(this build reads v2\)/);
     await expect(refusal).rejects.toThrow(new RegExp(`Newest checkpoint: ${cp.id}`));
-    await expect(refusal).rejects.toThrow(`pnpm neuralis:checkpoint restore ${cp.id}`);
-    await expect(refusal).rejects.toThrow('docker compose run --rm --no-deps neuralis node --import tsx scripts/checkpoint.mts restore');
+    await expect(refusal).rejects.toThrow(`npx neuralis checkpoint restore ${cp.id}`);
+    await expect(refusal).rejects.toThrow('docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore');
     expect(readFileSync(ledgerPath, 'utf-8')).toBe(before);
 
-    // A failed claim is not memoized: once the data is put back, the next boot claims.
-    writeFileSync(ledgerPath, '{}');
+    // A failed claim is not memoized: once the data is put back, the next boot claims. (A fresh
+    // install — no ledger FILE at the process's first read — writes every kind, offline ones too.)
+    rmSync(ledgerPath);
+    resetDataFormatsForTesting();
+    declareDataFormats(Object.values(HOST_DATA_FORMATS));
     await expect(claimHostDataFormats()).resolves.toMatchObject({ written: expect.arrayContaining(['neuralis/project']) });
   });
 
-  it('an older stored format is raised only after a checkpoint of that kind (dir 0700), never of a secret it does not own', async () => {
-    mkdirSync(join(appRoot, 'users'), { recursive: true });
-    writeFileSync(join(appRoot, 'users', 'u1.json'), '{"id":"u1"}', { mode: 0o600 });
+  it('the boot claim never raises: a kind behind its code version refuses naming the upgrade command, with no checkpoint', async () => {
     mkdirSync(join(appRoot, 'credentials', 'global'), { recursive: true });
     writeFileSync(join(appRoot, 'credentials', 'global', 'llm.x.enc.json'), '{}');
-    // Only a raise takes a checkpoint; a ledger at v0 makes `neuralis/user` older than this build.
-    writeFileSync(ledgerPath, JSON.stringify({ 'neuralis/user': { version: 0, raisedAt: 'x' } }));
+    writeFileSync(ledgerPath, JSON.stringify({ 'neuralis/project': { version: 1, raisedAt: 'x' }, 'neuralis/credential': { version: 2, raisedAt: 'x' } }));
+    const before = readFileSync(ledgerPath, 'utf-8');
 
-    const report = await claimHostDataFormats();
-    expect(report.raised).toEqual([{ kind: 'neuralis/user', from: 0, to: 1 }]);
-    const dir = join(home, 'checkpoints', report.checkpoint!);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(readFileSync(join(dir, 'app', 'users', 'u1.json'), 'utf-8')).toBe('{"id":"u1"}');
-    expect(existsSync(join(dir, 'app', 'credentials'))).toBe(false);
-    expect(readLedger()['neuralis/user']?.version).toBe(1);
+    await expect(claimHostDataFormats()).rejects.toMatchObject({ reason: 'upgrade_required', kinds: ['neuralis/project'] });
+    expect(readFileSync(ledgerPath, 'utf-8')).toBe(before);
+    expect(existsSync(join(home, 'checkpoints'))).toBe(false);
   });
 });
 

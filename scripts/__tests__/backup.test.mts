@@ -143,7 +143,7 @@ function setup(opts: { mode?: 'docker' | 'binary'; freeBytes?: number; offline?:
     freeBytes: async () => opts.freeBytes ?? 1e12,
     now: () => new Date('2026-10-04T12:00:00Z'),
     monotonicMs: () => (clock += 1500),
-    composeRunning: async () => ({ kind: 'services', running: [...world.running] }),
+    composeRunning: async () => ({ kind: 'services', project: 'neuralis', app: 'neuralis', vectorstore: 'qdrant', running: [...world.running] }),
     appOffline: async () => (opts.offline === false ? { offline: false, reason: 'the app answers on http://127.0.0.1:3100/api/health' } : { offline: true }),
     qdrantAnswers: async () => opts.qdrantAnswers ?? false,
     ask: async () => answers.shift() ?? '',

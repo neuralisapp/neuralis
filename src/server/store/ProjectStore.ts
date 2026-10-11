@@ -1,3 +1,4 @@
+import { revokeGrantsPatch } from '../packages/reconcileBuiltinGrantChanges';
 import { FileStore, reportStoreIntegrity, type Logger } from './FileStore';
 import { getEnv } from '../config/env';
 import { ensureHostDataFormat, HOST_DATA_FORMATS } from './dataFormats';
@@ -5,14 +6,7 @@ import { assertRecordFormat } from '@neuralis/package-system/data';
 import { join } from 'path';
 import { stat } from 'fs/promises';
 import { nowISO, projectIdFromName } from '@/lib/utils';
-import {
-  rolePriority,
-  isBuiltinRole,
-  DEFAULT_CUSTOM_ROLE_PRIORITY,
-  BUILTIN_ROLE_PRIORITY,
-  MIN_ROLE_PRIORITY,
-  MAX_ROLE_PRIORITY,
-} from '@neuralis/package-system/access';
+import { BUILTIN_ROLE_PRIORITY } from '@neuralis/package-system/access';
 import { isSafePathSegment, resolveProjectRoot } from '@neuralis/package-system/paths';
 import { initProjectDirectory } from '../projects/projectInit';
 import { validateProjectInvariants } from './projectInvariants';
@@ -20,9 +14,7 @@ import {
   DEFAULT_ROLES,
   DEFAULT_SPEND_LIMITS,
   type ProjectRecord,
-  type ProjectMember,
   type RoleDefinition,
-  type SpendLimits as SpendLimitsShape,
 } from './projectTypes';
 
 export type { ProjectRecord, ProjectMember } from './projectTypes';
@@ -63,6 +55,11 @@ export { DEFAULT_ROLES } from './projectTypes';
  * defect — the defect was that a bust could not reach the other caches.
  */
 const STORE_SLOT = Symbol.for('@neuralis/host:projectStore');
+/**
+ * The role-grant revision every seeded record carries (`roleGrantVersion`) —
+ * a per-record marker, raised only by an offline upgrade together with
+ * `HOST_DATA_FORMATS.project` (`roleGrantFormatLockstep.test.ts`).
+ */
 const ROLE_GRANT_VERSION = 19;
 
 /**
@@ -146,396 +143,24 @@ export class ProjectUpdateError extends Error {
 }
 
 /**
- * Version-keyed additive grant REPAIRS — the propagation half of a manifest
- * `defaultRoleGrants` change. Builtin defaults apply at PROJECT CREATION (an
- * added builtin once more, by its grant-change record), so a new default of an
- * installed builtin never reaches an EXISTING project without a row here.
- *
- * `'*'` holders are skipped by the applier (the wildcard already covers every
- * id). Since role-grant version 13 that means only owner-strength roles are
- * skipped: `admin` now carries an ENUMERATED list, so a newly declared
- * `defaultRoleGrants.admin` id reaches existing projects through this lane like
- * any other role's — add `<next version>: { admin: ['<new.id>'] }` alongside the
- * manifest declaration.
- */
-const ROLE_GRANT_REPAIRS: Record<number, Record<string, string[]>> = {
-  1: {
-    manager: ['core.agents'],
-    member: ['core.agents'],
-    viewer: ['core.agents'],
-  },
-  // S2c C1 — `core.execute` split into `core.observe` (read-only introspection)
-  // + `core.web` (web tools). Backfill the new read-tier grants onto existing
-  // projects so the reassigned routes/tools stay reachable. `'*'` roles
-  // (owner/admin) are skipped by the applier. Member `core.execute` is a
-  // separate, deliberate change (C-mid, D1) under its own version.
-  2: {
-    manager: ['core.observe', 'core.web'],
-    member: ['core.observe', 'core.web'],
-    viewer: ['core.observe'],
-  },
-  // S2c C-mid (D1) — members stream: grant `core.execute`.
-  3: {
-    member: ['core.execute'],
-  },
-  // modular-meerkat Inc 1 — workflow engine grants (M10): manager full
-  // r/w/dispatch, member r/w (no dispatch), viewer read-only. The legacy
-  // `orchestrator.*` ids die with the package (never granted by repair, so
-  // nothing to revoke).
-  4: {
-    manager: ['workflow.read', 'workflow.write', 'workflow.dispatch'],
-    member: ['workflow.read', 'workflow.write'],
-    viewer: ['workflow.read'],
-  },
-  // modular-meerkat Inc 4 — per-user channels (M10 revised / M12, architect
-  // F1): `channels.connect` authorizes USER-scope connections only, so it is
-  // member-granted by default; project-scope ops sit behind `channels.manage`
-  // (no grant below the `admin` tier — enumerated for `admin`, `'*'` for
-  // `owner`, grantable per role; the C8 pattern).
-  // Manifest defaultRoleGrants alone never reach EXISTING projects — this
-  // repair is the propagation half.
-  5: {
-    manager: ['channels.connect'],
-    member: ['channels.connect'],
-  },
-  // Composer prompt-polish — one-shot draft rewrite, manager+member default
-  // (mirrors the agent-core manifest defaultRoleGrants; live-test found the
-  // missing propagation half: members on existing projects got 403).
-  6: {
-    manager: ['core.prompt-polish'],
-    member: ['core.prompt-polish'],
-  },
-  // MCP1 Inc2 — `mcp.connect` authorizes connecting YOUR OWN external MCP
-  // servers (OAuth flow initiation + self-scope token storage). Mirrors the
-  // channels.connect pattern: manager+member default; project/global MCP
-  // secrets stay on the admin Credentials surface (`project.credentials.write`
-  // — no grant below the `admin` tier).
-  7: {
-    manager: ['mcp.connect'],
-    member: ['mcp.connect'],
-  },
-  // G4 keyring-kestrel — `git.connect` authorizes connecting YOUR OWN git
-  // remotes (token/PAT self-scope storage). Mirrors mcp.connect/channels.connect:
-  // manager+member default; project/agent-scope git tokens stay on the admin
-  // Credentials surface (`project.credentials.write` — no grant below the
-  // `admin` tier).
-  8: {
-    manager: ['git.connect'],
-    member: ['git.connect'],
-  },
-  // Phase M (credentials BYOK) — `credentials.self` authorizes setting YOUR OWN
-  // credentials (catalog + custom ids) in your OWN user scope from the chat
-  // config panel. Mirrors git.connect/mcp.connect/channels.connect: manager+member
-  // default; reserved git/channel/MCP ids stay on their own connect surfaces;
-  // project/global secrets stay on the admin Credentials surface
-  // (`project.credentials.write` — no grant below the `admin` tier).
-  // Propagation half for existing
-  // projects (manifest defaultRoleGrants alone never reach EXISTING projects).
-  9: {
-    manager: ['credentials.self'],
-    member: ['credentials.self'],
-  },
-  // native-nightjar H0 follow-up (live-caught 2026-07-21) — `terminal.read` for
-  // the two roles agent-core declares it for.
-  //
-  // Builtin `defaultRoleGrants` are applied at PROJECT CREATION (an added
-  // builtin once more, through `reconcileBuiltinGrantChanges` — never a new
-  // default of an installed one), so a project created before the terminal shipped — or one whose roles were
-  // hand-edited — never receives a later default. The live test found exactly
-  // that: one project's `member`/`manager` hold no `terminal.*` id at all, so
-  // the Terminal widget is not merely locked but ABSENT from the widget and
-  // dock listings, with no diagnostic anywhere. A silently missing capability
-  // is worse than a denied one.
-  //
-  // The terminal package folding into agent-core is what makes this the right
-  // moment: the feature's declaring package changed, and this is the mechanism
-  // that carries a builtin's declared default onto existing projects. Scoped to
-  // `manager` + `member` to match the manifest — `viewer`/`newRole` keep their
-  // v3 revoke.
-  11: {
-    manager: ['terminal.read'],
-    member: ['terminal.read'],
-  },
-  // neuralweb repair Inc 3 — `packages.registry` gates being SHOWN the
-  // neuralweb marketplace skill (advertisement control; access stays at
-  // core.execute + the shell gates). Declared by brain-core — NOT by the CLI
-  // package that carries the skill — so `adminGrantCoverage.test.ts` governs
-  // it (the test derives its set from `@neuralis/*` manifests only; a feature
-  // declared by any other builtin reaches DEFAULT_ROLES.admin at runtime but
-  // escapes the test — P3). Granted down to `member` to match the manifest;
-  // `viewer` holds no shell, so advertising it there would be noise.
-  //
-  // `admin` MUST be named here too (live-tester catch, 2026-08-06): since the
-  // D-C de-wildcard, an EXISTING project's `admin` holds an enumerated list
-  // that was materialized when v13 ran — the manifest-derived union is NOT
-  // re-derived on later migrations, so a new id declared after v13 reaches an
-  // existing project's admin ONLY through a repair row naming it. "admin
-  // arrives through the manifest union" is true at PROJECT CREATION only.
-  // Only `'*'` holders (owner-strength) are skipped by the applier.
-  14: {
-    admin: ['packages.registry'],
-    manager: ['packages.registry'],
-    member: ['packages.registry'],
-  },
-  // agent-governance Increment A — the create-projects-and-users skill's two
-  // admin-granted ids (`platform.projects.create` deliberately has NO grant:
-  // its real floor is owner-strength inside the host service). Both ids ship
-  // in the SAME commit as this row — a later-landing feature needs its OWN
-  // version row, editing an already-stamped one is inert on deployed projects.
-  15: {
-    admin: ['project.members.invite', 'project.agents.assign'],
-  },
-  // periodic-pelican phase 2 (D2) — `project.limits` gates READING other
-  // members' per-user spend caps through the new feature-keyed project
-  // projection (`server/projects/projectView.ts`). Admin-tier read by default;
-  // writing limits stays behind the `canManageRoles` flag (which also implies
-  // the full read via the projection's write-implies-read carve-out). `admin`
-  // must be named per the v14 lesson: an existing project's admin holds an
-  // enumerated list, so a post-v13 id reaches it only through a repair row.
-  16: {
-    admin: ['project.limits'],
-  },
-  // partitioned-plover — `core.connectors` gates every MUTATING arm of
-  // `/connectors/*`. Those seven arms previously sat behind the module's
-  // `core.observe`, which is a VIEWER default, so the weakest role in the
-  // product could create, repoint, disable and delete connectors. READ stays on
-  // `core.observe` — the gate moves, it does not shrink.
-  //
-  // `admin` must be named for the same v14 reason as the two rows above: an
-  // existing project's admin holds an ENUMERATED list, so a newly declared
-  // `defaultRoleGrants.admin` id reaches it only through a repair row. Without
-  // this, every existing project's admin would be locked out of a plane they
-  // hold today.
-  18: {
-    admin: ['core.connectors'],
-  },
-};
-
-/**
- * Version-keyed feature RENAMES — the third migration primitive
- * (native-nightjar H1', 2026-07-21).
- *
- * The additive repairs and subtractive revokes above are keyed by ROLE NAME, so
- * neither can express "this feature id was renamed" for a role the platform
- * does not enumerate. A CUSTOM role (`devops`) that explicitly holds
- * `core.shell.host` would silently LOSE the grant under a repair+revoke pair,
- * because no repair row names it. That is a capability regression, and exactly
- * the thing a rename must not do.
- *
- * So renames iterate `Object.keys(r.roles)` — every role, builtin or custom —
- * and rewrite the id in place, preserving position and de-duplicating if the
- * target id is already present. `'*'` holders are skipped: the wildcard already
- * covers both the old and the new id, so touching them would be a no-op that
- * only risks losing the wildcard.
- *
- * A value may be a single id (1:1) or an ARRAY (1:N fan-out) — a namespace SPLIT
- * cannot be expressed as a 1:1 rename, and a custom role that held the old fused
- * id must receive every successor or it silently loses capability.
- *
- * A source id MAY appear in its own fan-out (a DERIVED grant): the id is kept,
- * at its original position, and the successor is added beside it. That is the
- * only shape in which a rename may hand out an id the role did not literally
- * hold, and it is capability PRESERVATION, not invention — the successor gates
- * exactly what the retained id already reached, so leaving it out would be the
- * regression. It is idempotent by the same de-duplication as every other row.
- */
-const ROLE_GRANT_RENAMES: Record<number, Record<string, string | string[]>> = {
-  // native-nightjar H1' — the exec/terminal features split into two PLANES.
-  // The old ids said "host" but only ever meant "unrestricted INSIDE the
-  // container"; the genuinely host-plane features were that round's NEW
-  // `core.shell.native` / `terminal.native` (no grant below the admin tier,
-  // gated behind operator-provisioned broker artifacts) — `core.shell.native`
-  // is `exec.host` since v19. Renaming keeps every existing grant's real-world
-  // meaning byte-identical.
-  10: {
-    'core.shell.host': 'core.shell.container',
-    'terminal.host': 'terminal.container',
-  },
-  // D-D — the `admin.*` namespace is REPLACED by `project.*` (the decision acts
-  // inside `session.projectId`) and `platform.*` (the decision crosses the
-  // project boundary: another tenant, a platform-global file, cross-user PII,
-  // the `global` credential scope).
-  //
-  // Two of the old ids each fused several independent powers onto one grantable
-  // thing — `admin.users` was simultaneously the Users tab, the cross-project
-  // list, the platform audit log and the whole `assertScopeMatchesSession`
-  // bypass. Those fan out 1:N so an existing custom holder keeps every power it
-  // had; the SPLIT is what makes the new ids individually grantable.
-  13: {
-    'admin.dashboard': 'project.dashboard',
-    'admin.audit': 'project.audit',
-    'admin.canvas': 'project.canvas',
-    'admin.credentials': 'project.credentials',
-    'admin.credentials.write': 'project.credentials.write',
-    'admin.vector': 'platform.vector.reset',
-    'admin.users': [
-      'project.members',
-      'platform.projects',
-      'platform.users',
-      'platform.scope',
-      'platform.audit',
-    ],
-    'admin.config': ['project.roles', 'project.sources', 'platform.config', 'platform.vector'],
-  },
-  // v19 — every shell ENTRY moves into the `exec.*` namespace, so the
-  // id names the PLANE a shell opens on: `exec.unconfined` (the container
-  // bypass, formerly `core.shell.container`), `exec.host` (the host plane,
-  // formerly `core.shell.native`), `exec.machine` (machine-core's Webtop,
-  // formerly `machine.exec`). The terminal ids are deliberately untouched.
-  //
-  // `core.execute` fans out onto ITSELF plus the NEW container ENTRY: until now
-  // the container plane had no entry feature at all, so every role that could
-  // run the `execute` tool could open a container shell. `exec.container` is
-  // that door, and a role holding `core.execute` already walked through it —
-  // without the derived grant the migration would silently take a working
-  // capability away from every custom role.
-  19: {
-    'core.shell.container': 'exec.unconfined',
-    'core.shell.native': 'exec.host',
-    'machine.exec': 'exec.machine',
-    'core.execute': ['core.execute', 'exec.container'],
-  },
-};
-
-// Version-keyed grant REVOCATIONS (the additive repairs above cannot remove).
-// Used for deliberate grant tightenings on existing projects. `'*'` roles are
-// skipped (they hold everything by wildcard, nothing to remove).
-const ROLE_GRANT_REVOKES: Record<number, Record<string, string[]>> = {
-  // S2c C-mid (D4) — viewer/newRole lose terminal.read (a viewer must not reach
-  // terminal routes/widget; the Container Root tab is gated by terminal.container).
-  3: {
-    viewer: ['terminal.read'],
-    newRole: ['terminal.read'],
-  },
-};
-
-// ---------------------------------------------------------------------------
-// D-F (role-grant version 12) — the priority SCALE change.
-//
-// The five built-in anchors moved from 1/2/3/4/5 to 1/2/10/20/30 so a custom
-// role can slot BETWEEN two built-ins without renumbering, and the declared
-// range became 1..99 (`isValidRolePriority`, the ONE kernel predicate). Three
-// version-keyed phases carry that onto existing records.
-//
-// Every phase REPLACES the role/member object (`{ ...role, … }`) and never
-// mutates it in place: `migrateProjectRecord` seeds a role-less legacy record
-// with `r.roles = { ...DEFAULT_ROLES }`, a SHALLOW spread, so the role objects
-// are the very `DEFAULT_ROLES` entries — an in-place write would corrupt the
-// module-level seed for every project handled later in the same process.
-//
-// These phases fire only while the loop is at version 12, which is what makes a
-// second boot a no-op. The priority re-anchor is deliberately NOT self-
-// idempotent (it rewrites a 1..5 scale onto a 1..30 scale, and 10/20/30 are
-// themselves legal inputs on the old scale), so the version gate is load-bearing
-// here in a way it is not for repairs/renames/revokes. Do not call these
-// helpers outside the version loop.
-// ---------------------------------------------------------------------------
-
-/** P0 — re-anchor every role's priority onto the 1..99 scale. */
-const ROLE_PRIORITY_REANCHOR_VERSIONS = new Set([12]);
-/** P5 — translate the deleted `PRIVILEGED_ROLE_NAMES` set into the stored flag. */
-const ROLE_MANAGE_FLAG_VERSIONS = new Set([12]);
-/** P6 — re-derive the `ProjectMember.tier` mirror from the new priorities. */
-const MEMBER_TIER_REDERIVE_VERSIONS = new Set([12]);
-
-// ---------------------------------------------------------------------------
-// D-C (role-grant version 13) — take the `'*'` wildcard off every role that is
-// not owner-STRENGTH and hand it the enumerated, manifest-derived catalog
-// instead. Runs AFTER the v13 renames, which skip `'*'` roles: an admin still
-// holding the wildcard at that point is untouched by the rename pass and is
-// de-wildcarded here directly with the NEW ids.
-// ---------------------------------------------------------------------------
-
-/** P4 — replace `'*'` with the enumerated project-tier catalog. */
-const ROLE_DEWILDCARD_VERSIONS = new Set([13]);
-
-// ---------------------------------------------------------------------------
-// S1 (role-grant version 17) — SEEDED-OWNER AUTHORITY HEAL.
-//
-// The S1 role-map floor makes "you may only edit roles strictly weaker than
-// yourself" structural. That closes the hole that let a priority-2 caller empty
-// a priority-1 role's grant list — but it also makes any damage ALREADY on disk
-// permanent: the role's own holders cannot restore what they no longer hold, and
-// nobody weaker may reach up to it. So the repair ships in the SAME increment as
-// the closure, unconditionally.
-//
-// Fingerprint: ONE key — the seeded `owner` role — carrying an EMPTY grant list.
-//
-// It is deliberately NOT "any apex role with an empty list", and the difference
-// matters. `canManageRoles` is a FLAG, not a feature, so a custom priority-1 role
-// with `grantedFeatures: []` is a coherent operator design: a governance-only
-// apex role that holds no capability at all. Pre-S1 an owner could mint exactly
-// that (CREATE compared with `<`, and `validateRoles` accepts an empty list), and
-// promoting it to `'*'` would be a privilege ESCALATION granted by a migration —
-// against the operator's explicit configuration, and across the project boundary,
-// because `hasFeature`'s `'*'` arm matches `platform.*` too. That is precisely
-// the ambiguity `seedRolesForNewProject`'s docblock below refuses to guess at,
-// and this phase must not contradict it.
-//
-// `roles.owner` is the one key where the fingerprint is NOT ambiguous, and the
-// reason is structural rather than name-based: `validateProjectInvariants`
-// REQUIRES it to exist and requires the project's provenance owner to hold it,
-// and the seed defines its value as `['*']`. A project whose seeded owner role
-// holds nothing has no functioning owner — that is broken, not configured.
-//
-// Name-keyed, therefore, exactly like `LEGACY_ROLE_MANAGE_NAMES` (P5) two phases
-// up: a one-time DATA translation, never an authorization path. D-A forbids a
-// role NAME on a decision path; the S1 write floor it repairs is keyed on the
-// priority NUMBER and stays that way.
-//
-// RAISE-ONLY, idempotent (after the first pass the list is `['*']`), and it WARNS
-// — a silent repair of a security-relevant field is not acceptable, and P4 one
-// phase up sets the precedent.
-// ---------------------------------------------------------------------------
-
-/** P7 — restore `'*'` on the seeded owner role when its grant list was emptied. */
-const APEX_AUTHORITY_HEAL_VERSIONS = new Set([17]);
-
-/**
- * The role key `validateProjectInvariants` pins (it must exist, and the project's
- * provenance owner must hold it). Seed data / migration data only — never a
- * decision path (D-A).
- */
-const SEEDED_OWNER_ROLE_NAME = 'owner';
-
-/**
- * Liveness probe for the enumerated admin union — the SHARED floor of BOTH
- * writers that can persist it.
+ * Liveness probe for the enumerated admin union — the floor of the ONE role
+ * seed (`seedRolesForNewProject`).
  *
  * `DEFAULT_ROLES.admin.grantedFeatures` is derived at module load from every
  * builtin manifest through `readPackageRequires`, whose body swallows ALL read
  * errors (`catch { return undefined }`), over a builtin set the `NEURALIS_BUILTINS`
  * env var can override (documented for slim images). A missing, unreadable or
  * deliberately-narrowed manifest therefore yields a SHORT or EMPTY union with no
- * throw and no log — and either writer would persist it at
- * `roleGrantVersion: ROLE_GRANT_VERSION`, after which the version gate makes it
- * unrepeatable. Every project admin would lose the dashboard, credentials,
- * config, canvas, logs, terminal, workflows, MCP and every `core.*` id, silently
- * and permanently.
+ * throw and no log — and a seed would persist it at `roleGrantVersion:
+ * ROLE_GRANT_VERSION`, which nothing at runtime revisits: every project admin
+ * would lose the dashboard, credentials, config, canvas, logs, terminal,
+ * workflows, MCP and every `core.*` id, silently and permanently, and the three
+ * non-admin builtins would be seeded from the same degenerate lists.
  *
- * So both writers fail CLOSED on the same input — one id from each of the three
- * packages that must be present in a healthy union — but they fail closed
- * DIFFERENTLY, because the record they act on is different:
- *
- *  - `migrateProjectRecord` P4 (EXISTING records) HALTS: the record keeps the
- *    `'*'` it already held, its `roleGrantVersion` stops one BELOW the
- *    de-wildcard row (12), and the next healthy boot replays P4 — the v13
- *    renames that already ran are idempotent. Keeping a wildcard a record
- *    ALREADY carries is status quo, not a widening.
- *  - `createProject` (NEW records) REFUSES — it throws
- *    `ROLE_SEED_UNION_DEGENERATE` and persists nothing. A record born after D-C
- *    never had a pre-de-wildcard state, so seeding `'*'` on it would be a real
- *    widening: `hasFeature`'s `'*'` arm matches `platform.*` too, so that
- *    project's `admin` would hold PLATFORM-tier power (foreign projects, the
- *    `global` credential scope, the platform audit log) until the next healthy
- *    boot. And the three non-admin builtins would be seeded from the same
- *    degenerate module-load lists with NO later repair at all — there is no
- *    `ROLE_GRANT_REPAIRS` row at 12 or 13 — so `manager`/`member`/`viewer`
- *    would stay permanently empty.
- *
- * A missed tightening is deferrable; a bricked admin is an outage; a
- * platform-tier admin on a brand-new project is neither — it is a hole, and the
- * deny-by-default answer is to write nothing.
+ * So the seed fails CLOSED on one id from each of the three packages that must
+ * be present in a healthy union: `createProject` refuses and persists nothing,
+ * and a setup-written record stays unseeded (its empty role map grants nothing)
+ * until a boot with every builtin manifest readable seeds it.
  */
 const DEWILDCARD_LIVENESS_IDS = ['project.dashboard', 'drive.read', 'core.agents'] as const;
 
@@ -549,49 +174,6 @@ let warnedDegenerateAdminGrants = false;
 export function adminGrantUnionIsLive(nextAdminGrants: readonly string[]): boolean {
   if (nextAdminGrants.length === 0) return false;
   return DEWILDCARD_LIVENESS_IDS.every((id) => nextAdminGrants.includes(id));
-}
-
-/** Old built-in scale → new anchors. Applied to CUSTOM roles only (built-ins take their anchor directly). */
-const LEGACY_PRIORITY_BANDS: Record<number, number> = { 1: 1, 2: 2, 3: 10, 4: 20, 5: 30 };
-
-/**
- * Roles whose name USED to imply `canManageRoles` through the deleted
- * `PRIVILEGED_ROLE_NAMES` set in `projects/access.ts`.
- *
- * This is a one-time DATA translation of the old name-keyed semantics into the
- * stored flag — the same class as `ROLE_GRANT_RENAMES`, and exactly what D-A
- * preserves ("`DEFAULT_ROLES` stays seed data; the hardcode to kill is on the
- * decision PATHS"). It is deliberately NOT priority-keyed: a CUSTOM role at
- * priority 2 named e.g. `lead` with `canManageRoles: false` cannot manage roles
- * today (its name is not in the set), so raising it by priority would be a
- * privilege ESCALATION granted by a migration, against the owner's explicit
- * configuration.
- */
-const LEGACY_ROLE_MANAGE_NAMES = ['owner', 'admin'] as const;
-
-/**
- * Map a CUSTOM role's stored priority from the old 1..5 scale onto the new
- * 1..99 scale, **never toward stronger**.
- *
- * - unparseable / non-finite ⇒ `MAX_ROLE_PRIORITY` (weakest — fail safe);
- * - `<= 0` (storable today: there was no range check) ⇒ `MIN_ROLE_PRIORITY`.
- *   It already resolved as "stronger than owner", so clamping it INTO the range
- *   at the strongest legal value is the smallest possible demotion and can never
- *   be an escalation;
- * - `1..5` ⇒ the band table, preserving relative strength against the built-ins;
- * - `>= 6` ⇒ clamped into `viewer+1 .. MAX`. Under the old scale such a role was
- *   WEAKER than `viewer` (5); leaving it at its face value would silently make it
- *   STRONGER than `manager` (10) on the new scale — a migration-granted
- *   escalation. Ordering among these roles is preserved.
- */
-function remapLegacyCustomPriority(value: number): number {
-  if (!Number.isFinite(value)) return MAX_ROLE_PRIORITY;
-  const rounded = Math.round(value);
-  if (rounded <= 0) return MIN_ROLE_PRIORITY;
-  const banded = LEGACY_PRIORITY_BANDS[rounded];
-  if (banded !== undefined) return banded;
-  const weakestBuiltin = BUILTIN_ROLE_PRIORITY.viewer;
-  return Math.min(Math.max(rounded, weakestBuiltin + 1), MAX_ROLE_PRIORITY);
 }
 
 function getStore(): FileStore<ProjectRecord> {
@@ -619,18 +201,20 @@ async function claimedStore(): Promise<FileStore<ProjectRecord>> {
 }
 
 /**
- * THE per-record write floor. `roleGrantVersion` is the project record's format
- * marker: a record stamped by a NEWER build stays readable, but this build
+ * THE per-record write floor. Role-grant and host identity format revisions
+ * are independent markers: a record stamped by a NEWER build stays readable, but this build
  * refuses to write it (`RecordNewerError`) — every write here would run this
  * build's normalizers over fields it does not know.
  */
 function assertProjectRecordWritable(raw: unknown): void {
   assertRecordFormat(HOST_DATA_FORMATS.project.kind, storedRoleGrantVersion(raw), ROLE_GRANT_VERSION);
+  assertRecordFormat(HOST_DATA_FORMATS.project.kind, (raw as { formatVersion?: number } | null)?.formatVersion, HOST_DATA_FORMATS.project.version);
 }
 
 function isNewerProjectRecord(raw: unknown): boolean {
   const stored = storedRoleGrantVersion(raw);
-  return stored !== undefined && stored > ROLE_GRANT_VERSION;
+  const format = (raw as { formatVersion?: number } | null)?.formatVersion;
+  return (stored !== undefined && stored > ROLE_GRANT_VERSION) || (typeof format === 'number' && format > HOST_DATA_FORMATS.project.version);
 }
 
 function storedRoleGrantVersion(raw: unknown): number | undefined {
@@ -699,254 +283,77 @@ async function resolveUniqueId(baseId: string): Promise<string> {
   return candidate;
 }
 
-/** Exported for tests — applies role-grant repairs + revokes by version. */
+/**
+ * The project record as this build reads it — the ONE read normalizer, applied
+ * on every read (and persisted by `getAndMigrate` when it changed anything).
+ *
+ * A record setup wrote is born UNSEEDED (an empty role map, no
+ * `roleGrantVersion`, no `agentOwnership`, no `limits`: setup cannot derive the
+ * role catalog, the host derives it from the package manifests). Its first read
+ * seeds it through the ONE `seedRolesForNewProject`, the same seed
+ * `createProject` stamps, and fills the two defaults setup does not write.
+ *
+ * Nothing else is converted. Every record since role-grant version 19 is born
+ * current (both writers seed at 19), so a record is either current or unseeded.
+ * A role-grant change after 19 — a new `defaultRoleGrants` feature for existing
+ * projects, a rename, a revoke — ships as an OFFLINE upgrade module under
+ * `scripts/upgrades/` that raises `neuralis/project` in the same change, never
+ * as a replay table read here. A record stamped by a NEWER build is served as
+ * read and never rewritten (`assertProjectRecordWritable`).
+ */
 export function migrateProjectRecord(raw: Record<string, unknown>): ProjectRecord {
   const r = raw as ProjectRecord;
-
-  // Migrate legacy members array → map
-  if (Array.isArray(r.members)) {
-    const legacy = r.members as unknown as Array<{
-      userId: string;
-      name?: string;
-      email?: string;
-      role?: string;
-      addedAt?: string;
-    }>;
-    const membersMap: Record<string, ProjectMember> = {};
-    for (const m of legacy) {
-      const roleName = m.role === 'editor' ? 'admin' : (m.role ?? 'member');
-      membersMap[m.userId] = {
-        userId: m.userId,
-        name: m.name ?? '',
-        email: m.email ?? '',
-        role: roleName,
-        // D-A — `position` is a free-text label an admin edits in the Users tab.
-        // Synthesizing "Owner"/"Team Member" FROM the role name is exactly the
-        // name-coupling D-A removes, and it made a custom priority-1 role read
-        // as a plain team member. Empty = "not set", the same as an invite.
-        position: '',
-        // `tier` mirrors the role's priority. P6 re-derives it below once
-        // `r.roles` is populated; this seeds it from the anchors so the record
-        // is never internally inconsistent between the two statements.
-        tier: rolePriority(roleName),
-        addedAt: m.addedAt ?? r.createdAt ?? nowISO(),
-      };
-    }
-    r.members = membersMap;
-  }
-
-  if (!r.roles || Object.keys(r.roles).length === 0) {
-    r.roles = { ...DEFAULT_ROLES };
-  }
-  // Backfill role priority on legacy records (added with the role-priority gate).
-  // Built-in names get their anchored priority; pre-existing custom roles get a
-  // gated mid-tier default. New/edited roles must carry an explicit priority.
-  //
-  // The backfill writes values on the CURRENT scale, so the v12 re-anchor below
-  // must not then re-map them as if they were old-scale numbers: a custom role
-  // with no stored priority is backfilled to `DEFAULT_CUSTOM_ROLE_PRIORITY` (20)
-  // and must STAY there, not be pushed past `viewer` by the out-of-band clamp.
-  const backfilledRoleNames = new Set<string>();
-  for (const [roleName, role] of Object.entries(r.roles)) {
-    if (typeof role.priority !== 'number' || !Number.isFinite(role.priority)) {
-      backfilledRoleNames.add(roleName);
-      r.roles[roleName] = {
-        ...role,
-        priority: isBuiltinRole(roleName) ? rolePriority(roleName) : DEFAULT_CUSTOM_ROLE_PRIORITY,
-      };
-    }
-  }
-  if (!r.agentOwnership) {
-    r.agentOwnership = {};
-  }
-  if (!r.limits) {
-    r.limits = { spend: structuredClone(DEFAULT_SPEND_LIMITS) };
-  }
-  // periodic-pelican — legacy `limits.daily` (plain USD/day numbers) becomes
-  // `limits.spend` (per-rule { amountUsd, period }). Structural + idempotent:
-  // an already-converted record has no `daily` key and is untouched. Persisted
-  // by the snapshot-compare write-back on first read, like every normalize here.
-  const legacyLimits = r.limits as unknown as {
-    daily?: { projectTotal?: unknown; byRole?: Record<string, unknown>; byUser?: Record<string, unknown>; byAgent?: Record<string, unknown> };
-    spend?: SpendLimitsShape;
-    rateLimitRpm?: number | null;
-  };
-  if (legacyLimits.daily) {
-    const toRule = (v: unknown): { amountUsd: number; period: 'day' } | null =>
-      typeof v === 'number' && Number.isFinite(v) ? { amountUsd: v, period: 'day' } : null;
-    const mapRules = (m: Record<string, unknown> | undefined): Record<string, { amountUsd: number; period: 'day' } | null> => {
-      const out: Record<string, { amountUsd: number; period: 'day' } | null> = {};
-      for (const [k, v] of Object.entries(m ?? {})) out[k] = toRule(v);
-      return out;
-    };
-    legacyLimits.spend = {
-      projectTotal: toRule(legacyLimits.daily.projectTotal),
-      byRole: mapRules(legacyLimits.daily.byRole),
-      byUser: mapRules(legacyLimits.daily.byUser),
-      byAgent: mapRules(legacyLimits.daily.byAgent),
-    };
-    delete legacyLimits.daily;
-  }
-  if (!legacyLimits.spend) {
-    legacyLimits.spend = structuredClone(DEFAULT_SPEND_LIMITS);
-  }
-
-  const currentVersion = typeof r.roleGrantVersion === 'number' ? r.roleGrantVersion : 0;
-  // Rollback leg: a record stamped by a NEWER binary must never be dragged
-  // BACKWARDS. What the `<` gate guarantees, exactly: no version-keyed phase
-  // runs, and `roleGrantVersion` is never reassigned (it is only written inside
-  // that branch), so the stored version can never be lowered.
-  //
-  // The structural normalizers ABOVE this line still run on such a record, in
-  // memory; this function never writes. The WRITE side is the floor:
-  // `getAndMigrate` persists nothing for a newer record and every mutation
-  // refuses it (`assertProjectRecordWritable`, `RecordNewerError`), so a newer
-  // build's record is served as read and never rewritten by this one.
-  if (currentVersion < ROLE_GRANT_VERSION) {
-    // Set by a phase that must NOT be recorded as applied (today: P4's
-    // fail-closed liveness guard). The stored version then stops one short so a
-    // later, healthy boot retries that version instead of freezing the record.
-    let haltedAtVersion: number | null = null;
-    for (let version = currentVersion + 1; version <= ROLE_GRANT_VERSION; version += 1) {
-      // P0 — priority re-anchor. Runs FIRST in its version because P6 (tier)
-      // mirrors the result, and because both role write paths reject a built-in
-      // whose EXPLICIT priority differs from its anchor: without this, no admin
-      // could ever PATCH a legacy project's role map again.
-      if (ROLE_PRIORITY_REANCHOR_VERSIONS.has(version)) {
-        for (const roleName of Object.keys(r.roles)) {
-          const role = r.roles[roleName];
-          if (!role) continue;
-          // Just backfilled ⇒ already on the current scale, nothing to re-map.
-          if (!isBuiltinRole(roleName) && backfilledRoleNames.has(roleName)) continue;
-          const next = isBuiltinRole(roleName)
-            ? BUILTIN_ROLE_PRIORITY[roleName]
-            : remapLegacyCustomPriority(role.priority);
-          if (role.priority !== next) r.roles[roleName] = { ...role, priority: next };
-        }
-      }
-      const repairs = ROLE_GRANT_REPAIRS[version];
-      if (repairs) {
-        for (const [roleName, features] of Object.entries(repairs)) {
-          const role = r.roles[roleName];
-          if (!role || role.grantedFeatures.includes('*')) continue;
-          const next = new Set(role.grantedFeatures);
-          for (const feature of features) next.add(feature);
-          r.roles[roleName] = { ...role, grantedFeatures: [...next] };
-        }
-      }
-      // Renames run BETWEEN repairs and revokes: a repair may have just added
-      // the old id (it never does today, but the ordering keeps the primitive
-      // total), and a revoke in the same version must see the NEW id.
-      const renames = ROLE_GRANT_RENAMES[version];
-      if (renames) {
-        for (const roleName of Object.keys(r.roles)) {
-          const role = r.roles[roleName];
-          if (!role || role.grantedFeatures.includes('*')) continue;
-          let changed = false;
-          const next: string[] = [];
-          for (const feature of role.grantedFeatures) {
-            const renamed = renames[feature];
-            if (renamed === undefined) {
-              if (!next.includes(feature)) next.push(feature);
-              continue;
-            }
-            changed = true;
-            // 1:1 or 1:N — a namespace split hands the holder every successor.
-            for (const id of Array.isArray(renamed) ? renamed : [renamed]) {
-              if (!next.includes(id)) next.push(id);
-            }
-          }
-          if (changed) r.roles[roleName] = { ...role, grantedFeatures: next };
-        }
-      }
-      const revokes = ROLE_GRANT_REVOKES[version];
-      if (revokes) {
-        for (const [roleName, features] of Object.entries(revokes)) {
-          const role = r.roles[roleName];
-          if (!role || role.grantedFeatures.includes('*')) continue;
-          const remove = new Set(features);
-          r.roles[roleName] = {
-            ...role,
-            grantedFeatures: role.grantedFeatures.filter((f) => !remove.has(f)),
-          };
-        }
-      }
-      // P4 — de-wildcard. Any role holding `'*'` that is NOT owner-strength
-      // (priority > the owner anchor) exchanges the wildcard for the enumerated
-      // manifest-derived catalog. Keyed on PRIORITY, so it is name-free (D-A)
-      // and covers a custom priority-2 role exactly like the built-in `admin`.
-      if (ROLE_DEWILDCARD_VERSIONS.has(version)) {
-        const nextAdminGrants = DEFAULT_ROLES.admin.grantedFeatures;
-        if (!adminGrantUnionIsLive(nextAdminGrants)) {
-          if (!warnedDegenerateAdminGrants) {
-            warnedDegenerateAdminGrants = true;
-            console.warn(
-              '[ProjectStore] role-grant migration v13 SKIPPED: the builtin feature union is ' +
-                `degenerate (${nextAdminGrants.length} ids; expected ${DEWILDCARD_LIVENESS_IDS.join(', ')}). ` +
-                "Roles keep the '*' wildcard and roleGrantVersion stays at 12; " +
-                'a boot with all builtin manifests readable will retry.',
-            );
-          }
-          // Stop BEFORE advancing the stored version. The v13 renames that ran
-          // earlier in this iteration are idempotent (their lookups miss on
-          // already-new ids), so replaying v13 on the next boot is safe.
-          haltedAtVersion = version - 1;
-          break;
-        }
-        for (const roleName of Object.keys(r.roles)) {
-          const role = r.roles[roleName];
-          if (!role || !role.grantedFeatures.includes('*')) continue;
-          if (rolePriority(roleName, role.priority) <= BUILTIN_ROLE_PRIORITY.owner) continue;
-          r.roles[roleName] = { ...role, grantedFeatures: [...nextAdminGrants] };
-        }
-      }
-      // P5 — the name→flag translation. RAISE-ONLY: never writes `false`, so it
-      // cannot take role management away from anyone.
-      if (ROLE_MANAGE_FLAG_VERSIONS.has(version)) {
-        for (const roleName of LEGACY_ROLE_MANAGE_NAMES) {
-          const role = r.roles[roleName];
-          if (!role || role.canManageRoles === true) continue;
-          r.roles[roleName] = { ...role, canManageRoles: true };
-        }
-      }
-      // P6 — `ProjectMember.tier` is a stored MIRROR of the role's priority
-      // (`admin/users/route.ts` already writes it that way). Re-derive it, or
-      // every existing member keeps a 1..5 tier while the roles carry 1..30.
-      if (MEMBER_TIER_REDERIVE_VERSIONS.has(version)) {
-        for (const [userId, member] of Object.entries(r.members)) {
-          const next = rolePriority(member.role, r.roles[member.role]?.priority);
-          if (member.tier !== next) r.members[userId] = { ...member, tier: next };
-        }
-      }
-      // P7 — seeded-owner authority heal (S1). One key, and it LOGS.
-      if (APEX_AUTHORITY_HEAL_VERSIONS.has(version)) {
-        const seededOwner = r.roles[SEEDED_OWNER_ROLE_NAME];
-        if (seededOwner && seededOwner.grantedFeatures.length === 0) {
-          console.warn(
-            `[ProjectStore] role-grant migration v17 repaired project "${String(r.id ?? '<unknown>')}": ` +
-              `the seeded "${SEEDED_OWNER_ROLE_NAME}" role carried an EMPTY grant list and was restored to ['*']. ` +
-              'This is the one-time repair for damage a pre-S1 role write could inflict.',
-          );
-          r.roles[SEEDED_OWNER_ROLE_NAME] = { ...seededOwner, grantedFeatures: ['*'] };
-        }
-      }
-    }
-    if (haltedAtVersion !== null) {
-      // Never move BACKWARDS: a record already past the halt point keeps its
-      // version (nothing was undone, only a later phase deferred).
-      r.roleGrantVersion = Math.max(currentVersion, haltedAtVersion);
+  if (isUnseededProjectRecord(r)) {
+    const seeded = seedRolesForNewProject();
+    if (seeded) {
+      r.roles = seeded.roles;
+      r.roleGrantVersion = seeded.roleGrantVersion;
     } else {
-      r.roleGrantVersion = ROLE_GRANT_VERSION;
+      // Fail closed: an empty role map grants nothing, and nothing is persisted.
+      r.roles = r.roles ?? {};
+      if (!warnedDegenerateAdminGrants) {
+        warnedDegenerateAdminGrants = true;
+        console.warn(
+          `[ProjectStore] project "${String(r.id ?? '<unknown>')}" was NOT seeded: the builtin feature union is ` +
+            `degenerate (${DEFAULT_ROLES.admin.grantedFeatures.length} ids; expected ${DEWILDCARD_LIVENESS_IDS.join(', ')}). ` +
+            'Its role map stays empty (nobody holds a feature) until a boot with every builtin manifest readable seeds it.',
+        );
+      }
     }
   }
-
+  if (!r.agentOwnership) r.agentOwnership = {};
+  if (!r.limits) r.limits = { spend: structuredClone(DEFAULT_SPEND_LIMITS) };
   return r;
+}
+
+/** Setup's shape: no role map and no `roleGrantVersion` — the one record `migrateProjectRecord` seeds. */
+function isUnseededProjectRecord(r: Partial<ProjectRecord>): boolean {
+  return r.roleGrantVersion === undefined && (!r.roles || Object.keys(r.roles).length === 0);
+}
+
+/** Would `migrateProjectRecord` change this record? A constant-time gate for the list readers. */
+function projectRecordNeedsMigration(raw: Partial<ProjectRecord>): boolean {
+  return isUnseededProjectRecord(raw) || !raw.agentOwnership || !raw.limits;
 }
 
 async function getAndMigrate(id: string): Promise<ProjectRecord | null> {
   const store = await claimedStore();
   const raw = await store.get(id);
   if (!raw) return null;
+  return persistMigrated(store, id, raw);
+}
+
+/**
+ * The ONE read normalizer's persist: migrate, and write back only when the
+ * migration changed something. A list read goes through here for exactly the
+ * records {@link projectRecordNeedsMigration} names, so a setup-written project
+ * is persisted seeded by whichever host read meets it first.
+ */
+async function persistMigrated(
+  store: Awaited<ReturnType<typeof claimedStore>>,
+  id: string,
+  raw: ProjectRecord,
+): Promise<ProjectRecord> {
   // A newer build's record is served as read, never migrated back to disk.
   if (isNewerProjectRecord(raw)) return migrateProjectRecord(raw as unknown as Record<string, unknown>);
   // Snapshot BEFORE migrating: migrateProjectRecord mutates `raw` in place,
@@ -982,7 +389,7 @@ async function getAndMigrate(id: string): Promise<ProjectRecord | null> {
 export type ProjectRecordPatch = Partial<
   Pick<
     ProjectRecord,
-    'name' | 'description' | 'members' | 'roles' | 'agentOwnership' | 'limits' | 'appliedPackageGrants'
+    'name' | 'description' | 'members' | 'roles' | 'agentOwnership' | 'limits' | 'appliedPackageGrants' | 'packageGrantFeatures'
   >
 > & {
   /** `null` clears the appearance; absent keeps it. */
@@ -1038,6 +445,14 @@ async function mutateProject(
 
 /** Apply a patch with the field rules every project write shares. */
 function applyProjectPatch(project: ProjectRecord, patch: ProjectRecordPatch): ProjectRecord {
+  let packageGrantFeatures = patch.packageGrantFeatures ?? project.packageGrantFeatures;
+  if (patch.roles && patch.packageGrantFeatures === undefined && packageGrantFeatures) {
+    packageGrantFeatures = Object.fromEntries(Object.entries(packageGrantFeatures).map(([id, claims]) => [id,
+      Object.fromEntries(Object.entries(claims).map(([role, features]) => [role,
+        features.filter((feature) => Boolean(project.roles[role]?.grantedFeatures.includes(feature)) === Boolean(patch.roles?.[role]?.grantedFeatures.includes(feature))),
+      ])),
+    ]));
+  }
   return {
     ...project,
     name: patch.name ?? project.name,
@@ -1061,65 +476,30 @@ function applyProjectPatch(project: ProjectRecord, patch: ProjectRecordPatch): P
         }
       : project.limits,
     appliedPackageGrants: patch.appliedPackageGrants ?? project.appliedPackageGrants,
+    packageGrantFeatures,
     updatedAt: nowISO(),
   };
 }
 
 /**
- * Seed a new project's role map, fail-closed on the admin union.
+ * THE role seed of a project record — `createProject` stamps it on a new
+ * record, `migrateProjectRecord` on the record setup wrote. `null` when the
+ * admin union is degenerate (`adminGrantUnionIsLive`): the system cannot
+ * compute what the roles should CONTAIN, so it seeds nothing — R-4 measured
+ * that seeding anyway leaves permanent damage (`manager` / `member` / `viewer`
+ * seeded from the same degenerate module-load lists, measured `0/33`, `0/19`,
+ * `0/7`, with nothing at runtime ever revisiting them).
  *
- * `DEFAULT_ROLES.admin.grantedFeatures` is the manifest-derived list read at
- * module load (see `adminGrantUnionIsLive`). When it is degenerate the system
- * cannot compute what a new project's roles should CONTAIN, so it persists
- * nothing: R-4 measured that the alternative leaves permanent damage.
- *
- * Why not the migration's halt-and-retry shape here — measured, not assumed:
- *
- *  - the halt version is 12 (one below the de-wildcard row) and
- *    `ROLE_GRANT_REPAIRS` has no
- *    row at 12 or 13, so the ONLY thing a later healthy boot repairs is the
- *    `'*'` on `admin` (P4 looks at wildcard holders and nothing else).
- *    `manager` / `member` / `viewer` are seeded from the SAME degenerate
- *    module-load lists and are never revisited — measured `0/33`, `0/19`,
- *    `0/7`, permanently.
- *  - `hasFeature`'s `'*'` arm matches `platform.*` as well, so the interim
- *    wildcard on a record that never had a pre-D-C state is a genuine
- *    platform-tier widening, not the status quo it is for an existing record.
- *
- * A "refill empty builtin roles" repair phase is deliberately NOT the answer:
- * an empty `grantedFeatures` list is also what a deliberate revoke leaves
- * behind (`PATCH /config/roles` accepts truncating a surviving role), so the
- * fingerprint is ambiguous and the repair would silently undo an operator's
- * intent.
- *
- * NARROWED, not lifted, by S1 (2026-08-22): the prohibition still stands for
- * every role in general — including a custom priority-1 role, where an empty
- * list is a coherent governance-only design. The ONE exception is the seeded
- * `owner` key, and only because `validateProjectInvariants` makes it structural:
- * it must exist, the provenance owner must hold it, and the seed defines its
- * value. See the P7 docblock above for the full reasoning. Do not widen P7 back
- * to a priority test — that is the escalation this paragraph exists to prevent.
- *
- * The single server-side caller (`POST /api/projects`) already runs inside a
- * try/catch that answers `409 {error}`, and first boot does NOT come through
- * here — `scripts/setup.mts` writes the first project record directly — so this
- * throw is a handled response, never an unhandled 500 and never boot-fatal.
+ * A "refill empty builtin roles" repair is deliberately NOT the answer to a
+ * degenerate seed: an empty `grantedFeatures` list is also what a deliberate
+ * revoke leaves behind (`PATCH /config/roles` accepts truncating a surviving
+ * role), so the fingerprint is ambiguous and a repair would silently undo an
+ * operator's intent. The same holds for a custom priority-1 role, where an
+ * empty list is a coherent governance-only design — never widen one.
  */
-function seedRolesForNewProject(projectName: string): {
-  roles: Record<string, RoleDefinition>;
-  roleGrantVersion: number;
-} {
-  if (adminGrantUnionIsLive(DEFAULT_ROLES.admin.grantedFeatures)) {
-    return { roles: { ...DEFAULT_ROLES }, roleGrantVersion: ROLE_GRANT_VERSION };
-  }
-  throw new Error(
-    `ROLE_SEED_UNION_DEGENERATE: createProject("${projectName}") refused — the builtin feature ` +
-      `union is degenerate (${DEFAULT_ROLES.admin.grantedFeatures.length} ids; expected at least ` +
-      `${DEWILDCARD_LIVENESS_IDS.join(', ')}). Nothing was written. A boot with every builtin ` +
-      'manifest readable (check NEURALIS_BUILTINS and the node_modules/@neuralis/* tree) seeds ' +
-      'the project correctly; seeding it now would leave manager/member/viewer permanently ' +
-      "empty and hand admin a '*' that also matches platform.* ids.",
-  );
+function seedRolesForNewProject(): { roles: Record<string, RoleDefinition>; roleGrantVersion: number } | null {
+  if (!adminGrantUnionIsLive(DEFAULT_ROLES.admin.grantedFeatures)) return null;
+  return { roles: { ...DEFAULT_ROLES }, roleGrantVersion: ROLE_GRANT_VERSION };
 }
 
 export async function createProject(
@@ -1132,12 +512,19 @@ export async function createProject(
   const baseId = projectIdFromName(name);
   const now = nowISO();
 
-  // The SECOND writer of the manifest-derived admin union (the first is
-  // `migrateProjectRecord` P4). It runs the SAME liveness floor, because
-  // stamping `ROLE_GRANT_VERSION` on a record whose `admin` carries a degenerate
-  // union would freeze it: the version gate never revisits it, and P4 — the only
-  // code that could repair it — never runs for this project.
-  const seededRoles = seedRolesForNewProject(name);
+  // The ONE seed, fail-closed: a degenerate admin union persists nothing. The
+  // single server-side caller (`POST /api/projects`) answers this throw `409`.
+  const seededRoles = seedRolesForNewProject();
+  if (!seededRoles) {
+    throw new Error(
+      `ROLE_SEED_UNION_DEGENERATE: createProject("${name}") refused — the builtin feature ` +
+        `union is degenerate (${DEFAULT_ROLES.admin.grantedFeatures.length} ids; expected at least ` +
+        `${DEWILDCARD_LIVENESS_IDS.join(', ')}). Nothing was written. A boot with every builtin ` +
+        'manifest readable (check NEURALIS_BUILTINS and the node_modules/@neuralis/* tree) seeds ' +
+        'the project correctly; seeding it now would leave manager/member/viewer permanently ' +
+        "empty and hand admin a list that no later boot repairs.",
+    );
+  }
 
   const seed: Omit<ProjectRecord, 'id'> = {
     name,
@@ -1160,6 +547,7 @@ export async function createProject(
     agentOwnership: {},
     limits: { spend: structuredClone(DEFAULT_SPEND_LIMITS) },
     roleGrantVersion: seededRoles.roleGrantVersion,
+    formatVersion: 2,
     createdAt: now,
     updatedAt: now,
   };
@@ -1216,10 +604,11 @@ export async function listProjectsForUser(
   userId: string,
   { includeArchived = false }: { includeArchived?: boolean } = {},
 ): Promise<ProjectRecord[]> {
-  const all = await (await claimedStore()).list();
+  const store = await claimedStore();
+  const all = await store.list();
   const results: ProjectRecord[] = [];
   for (const raw of all) {
-    const migrated = migrateProjectRecord(raw as unknown as Record<string, unknown>);
+    const migrated = await readListed(store, raw);
     if (!includeArchived && migrated.archivedAt != null) continue;
     const isMember = migrated.members[userId] !== undefined;
     if (isMember) results.push(migrated);
@@ -1277,9 +666,19 @@ export async function updateProject(
 export async function listAllProjects(
   { includeArchived = false }: { includeArchived?: boolean } = {},
 ): Promise<ProjectRecord[]> {
-  const all = await (await claimedStore()).list();
-  const migrated = (all as unknown as Record<string, unknown>[]).map(migrateProjectRecord);
+  const store = await claimedStore();
+  const all = await store.list();
+  const migrated: ProjectRecord[] = [];
+  for (const raw of all) migrated.push(await readListed(store, raw));
   return includeArchived ? migrated : migrated.filter((p) => p.archivedAt == null);
+}
+
+/** A listed record, normalized — persisted through {@link persistMigrated} only when the migration changes it. */
+async function readListed(store: Awaited<ReturnType<typeof claimedStore>>, raw: ProjectRecord): Promise<ProjectRecord> {
+  if (!projectRecordNeedsMigration(raw) || typeof raw.id !== 'string' || !isSafePathSegment(raw.id)) {
+    return migrateProjectRecord(raw as unknown as Record<string, unknown>);
+  }
+  return persistMigrated(store, raw.id, raw);
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
@@ -1395,4 +794,19 @@ export async function ensureDefaultProject(
  */
 export function verifyProjectRecords(logger: Logger): Promise<number> {
   return reportStoreIntegrity(getStore(), 'app/projects', logger);
+}
+
+/** Only the scanner's positively proved deletions may clear mutable instance provenance. */
+export async function removeDeletedPackageReferences(projectId: string, packageId: string, revoke: ReadonlySet<string>): Promise<void> {
+  await mutateProject(projectId, (project) => {
+    const packageTrust = { ...project.packageTrust };
+    const packageAccessFeature = { ...project.packageAccessFeature };
+    const hadMutable = packageId in packageTrust || packageId in packageAccessFeature;
+    delete packageTrust[packageId];
+    delete packageAccessFeature[packageId];
+    const patch = revokeGrantsPatch(project, packageId, revoke);
+    if (!hadMutable && !patch) return undefined;
+    return { ...project, ...(patch?.roles ? { roles: patch.roles } : {}),
+      appliedPackageGrants: patch?.appliedPackageGrants ?? project.appliedPackageGrants, packageGrantFeatures: patch?.packageGrantFeatures ?? project.packageGrantFeatures, packageTrust, packageAccessFeature, updatedAt: nowISO() };
+  });
 }

@@ -6,7 +6,7 @@ import { ensureCommunityRuntime, getCommunityPackageRegistry } from '../packages
 const mocks = vi.hoisted(() => ({
   runtime: vi.fn<() => Promise<void>>(), ui: vi.fn<() => Promise<void>>(),
   whenReady: vi.fn<() => Promise<void>>(), registry: { listPackages: vi.fn(() => []) },
-  error: vi.fn(), order: [] as string[],
+  error: vi.fn(), order: [] as string[], startMcp: vi.fn<() => Promise<void>>(),
 }));
 vi.mock('../upgradeWatchdog', () => ({ installUpgradeWatchdog: () => mocks.order.push('watchdog') }));
 vi.mock('../requestPeerStamp', () => ({ installRequestPeerStamp: () => mocks.order.push('peer') }));
@@ -26,6 +26,7 @@ vi.mock('../host/principalRevocation', () => ({ startPrincipalRevocation: vi.fn(
 vi.mock('../store/ProjectStore', () => ({ verifyProjectRecords: vi.fn() }));
 vi.mock('../store/UserStore', () => ({ verifyUserRecords: vi.fn() }));
 vi.mock('../logging/processMonitor', () => ({ startProcessMonitor: () => mocks.order.push('monitor'), stopProcessMonitor: vi.fn() }));
+vi.mock('../mcp/startMcpServer', () => ({ startMcpServer: () => mocks.startMcp() }));
 vi.mock('../packages/packageUiModules', () => ({ getUiAttachments: () => {
   getCommunityPackageRegistry();
   return mocks.ui();
@@ -68,6 +69,21 @@ describe('runtime-ready attachment prewarm', () => {
     await register();
     await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith('package-ui-prewarm', 'UI pre-warm failed: Error'));
     expect(mocks.error).not.toHaveBeenCalledWith('bootstrap-prewarm', expect.anything());
+  });
+});
+
+describe('the MCP server step', () => {
+  it('a rejected bootstrap under the MCP start never rejects register() (no hook 500 on every request)', async () => {
+    vi.stubEnv('MCP_HTTP_PORT', '3101');
+    const refusal = Object.assign(new Error('Data format upgrade required (neuralis/credential): /srv/home'), { name: 'DataFormatClaimError' });
+    mocks.runtime.mockRejectedValue(refusal);
+    mocks.startMcp.mockRejectedValueOnce(refusal);
+    await expect(register()).resolves.toBeUndefined();
+    expect(mocks.startMcp).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith('bootstrap-prewarm', `Bootstrap pre-warm failed: ${refusal.message}`));
+    // Logged once in full (pre-warm); the MCP line names the class only.
+    expect(mocks.error).toHaveBeenCalledWith('mcp-server', expect.stringMatching(/^MCP server not started: DataFormatClaimError/));
+    expect(mocks.error.mock.calls.filter(([, message]) => String(message).includes('/srv/home'))).toHaveLength(1);
   });
 });
 

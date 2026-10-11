@@ -1,8 +1,7 @@
 /**
- * periodic-pelican — legacy `limits.daily` (plain USD/day numbers) → `limits.spend`
- * (per-rule { amountUsd, period }) structural normalize, plus the field-wise
- * `limits` merge in `updateProject` (a spend-only patch must not erase
- * `rateLimitRpm` — the `{"roles":{}}`-wipe class, F4).
+ * The spend-limit default a setup-written record gets on its first read, plus
+ * the field-wise `limits` merge in `updateProject` (a spend-only patch must not
+ * erase `rateLimitRpm` — the `{"roles":{}}`-wipe class, F4).
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +29,11 @@ const fileStoreDouble = {
   }),
 };
 
+// A per-run root: the real data-format claim writes its ledger under `appRoot`, and a
+// FIXED path keeps that ledger across runs — a later build's format raise then reads
+// as "stored data predates this build" on every machine that ran the suite before.
+const TEST_ROOT = vi.hoisted(() => `/tmp/nrs-${process.pid}-${Math.random().toString(36).slice(2)}`);
+
 vi.mock('../FileStore', () => ({
   FileStore: class {
     constructor() {
@@ -39,7 +43,7 @@ vi.mock('../FileStore', () => ({
 }));
 
 vi.mock('../../config/env', () => ({
-  getEnv: () => ({ appRoot: '/tmp/appRoot', projectsRoot: '/tmp/projectsRoot' }),
+  getEnv: () => ({ appRoot: `${TEST_ROOT}/appRoot`, projectsRoot: `${TEST_ROOT}/projectsRoot` }),
 }));
 
 import { migrateProjectRecord, updateProject } from '../ProjectStore';
@@ -61,43 +65,16 @@ function rawProject(over: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-describe('migrateProjectRecord — limits.daily → limits.spend', () => {
-  it('converts plain numbers to day rules and drops the daily key', () => {
-    const r = migrateProjectRecord(rawProject({
-      limits: {
-        daily: { projectTotal: 200, byRole: { manager: 10, owner: null }, byUser: { u1: 10 }, byAgent: { coder: 10 } },
-        rateLimitRpm: 100,
-      },
-    }));
-    expect(r.limits.spend).toEqual({
-      projectTotal: { amountUsd: 200, period: 'day' },
-      byRole: { manager: { amountUsd: 10, period: 'day' }, owner: null },
-      byUser: { u1: { amountUsd: 10, period: 'day' } },
-      byAgent: { coder: { amountUsd: 10, period: 'day' } },
-    });
-    expect((r.limits as Record<string, unknown>).daily).toBeUndefined();
-    expect(r.limits.rateLimitRpm).toBe(100);
-  });
-
-  it('is idempotent — an already-converted record is untouched', () => {
-    const once = migrateProjectRecord(rawProject({
-      limits: { daily: { projectTotal: 5, byRole: {}, byUser: {}, byAgent: {} } },
-    }));
-    const twice = migrateProjectRecord(once as unknown as Record<string, unknown>);
-    expect(twice.limits.spend.projectTotal).toEqual({ amountUsd: 5, period: 'day' });
-  });
-
-  it('seeds empty spend limits when the record has none', () => {
+describe('migrateProjectRecord — the spend-limit default', () => {
+  it('seeds empty spend limits when the record has none (setup writes no `limits`)', () => {
     const r = migrateProjectRecord(rawProject({}));
     expect(r.limits.spend).toEqual({ projectTotal: null, byRole: {}, byUser: {}, byAgent: {} });
   });
 
-  it('drops non-numeric legacy values to null instead of fabricating rules', () => {
-    const r = migrateProjectRecord(rawProject({
-      limits: { daily: { projectTotal: 'oops', byRole: { x: Infinity }, byUser: {}, byAgent: {} } },
-    }));
-    expect(r.limits.spend.projectTotal).toBeNull();
-    expect(r.limits.spend.byRole.x).toBeNull();
+  it('converts nothing: a `limits` object is served exactly as stored', () => {
+    const limits = { daily: { projectTotal: 200 }, rateLimitRpm: 100 };
+    const r = migrateProjectRecord(rawProject({ limits: structuredClone(limits) }));
+    expect(r.limits).toEqual(limits);
   });
 });
 

@@ -77,7 +77,7 @@ describe('toResolvedRecord — scope-namespacing (tenant-namespaced-packages)', 
     expect(r.manifestId).toBe('my-pkg');
     expect(r.packageId).not.toBe('my-pkg');
     expect(r.packageId).toBe(r.definition.id);       // loader id == definition.id
-    expect(r.packageId.startsWith('p.')).toBe(true);
+    expect(r.packageId).toBe('packages://my-pkg?project=proj-1&scope=agent&user=u1&agent=a1');
     expect(r.ownerScope).toEqual({ kind: 'agent', userId: 'u1', agentId: 'a1' });
   });
 
@@ -94,3 +94,28 @@ describe('toResolvedRecord — scope-namespacing (tenant-namespaced-packages)', 
     expect(a.packageId).not.toBe(b.packageId);
   });
 });
+
+ it('same authored name in different source roots has independent instance identity; authored URI is refused', () => {
+   const record: ProjectPackageRecord = { slug: 'folder', packageId: 'shared-name', definition: { id: 'shared-name', name: 'Shared' }, packageRoot: '/tmp/source/folder', discoveredAt: 1, trust: 'untrusted' };
+   const a = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' });
+   const b = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'right://' });
+   expect(a.manifestId).toBe(b.manifestId);
+   expect(a.packageId).toBe('left://folder?project=p&scope=project');
+   expect(a.packageId).not.toBe(b.packageId);
+   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' }).packageId).toBe('left://?project=p&scope=project');
+   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source/dir/folder' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' }).packageId).toBe('left://dir/folder?project=p&scope=project');
+   expect(() => toResolvedRecord({ ...record, packageId: a.packageId, definition: { id: a.packageId, name: 'Shared' } }, 'p', { kind: 'project' })).toThrow('Invalid authored package manifest');
+ });
+
+  it('a directory whose data-zone name would exceed 255 bytes is refused at the record, never mid-provision', () => {
+    const long = (n: number): ProjectPackageRecord => ({
+      slug: 'é'.repeat(n),
+      packageId: 'foo',
+      packageRoot: `/tmp/p/_packages/${'é'.repeat(n)}`,
+      discoveredAt: 1,
+      trust: 'untrusted',
+      definition: { id: 'foo', name: 'foo' } as any,
+    });
+    expect(() => toResolvedRecord(long(43), 'p', { kind: 'project' })).toThrow('exceeds 255 bytes');
+    expect(toResolvedRecord(long(42), 'p', { kind: 'project' }).packageId).toBe(`packages://${encodeURIComponent('é'.repeat(42))}?project=p&scope=project`);
+  });

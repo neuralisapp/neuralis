@@ -2,8 +2,8 @@
  * Singleton accessor for the CredentialStore.
  * Initialized lazily from getEnv().
  *
- * Uses dedicated master key file + installation salt if available,
- * falls back to NEXTAUTH_SECRET for legacy credentials.
+ * Keys derive from the dedicated master key file + installation salt only; a
+ * missing file beside encrypted credentials is a refusal, never a fallback.
  *
  * The singleton is anchored on globalThis so Next.js dev HMR cannot create
  * two stores with disjoint listener sets — critical for the credential
@@ -25,8 +25,6 @@ export function getCredentialStore(): CredentialStore {
     const instance = new CredentialStore(
       env.appRoot,
       configDir,
-      // Legacy fallback: use NEXTAUTH_SECRET if no credential-master.key exists yet
-      () => env.auth.secret,
       () => ensureHostDataFormat(HOST_DATA_FORMATS.credential),
     );
     slot.__neuralis_credential_store__ = instance;

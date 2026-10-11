@@ -198,13 +198,12 @@ async function detectExistingSetup(neuralisHome: string): Promise<boolean> {
 
 // ── Main detect ────────────────────────────────────────────────
 
-export async function detectEnvironment(): Promise<DetectedEnv> {
+/** `projectRoot` is the install folder the operator command runs for (`ctx.installDir`). */
+export async function detectEnvironment(projectRoot: string): Promise<DetectedEnv> {
   const platform = detectPlatform();
   const docker = detectDocker();
   const neuralisHome = resolveHome();
-  const cwd = process.cwd();
-  const isClone = await detectIsClone(cwd);
-  const projectRoot = isClone ? cwd : cwd;
+  const isClone = await detectIsClone(projectRoot);
   const envPath = isClone
     ? join(projectRoot, '.env')
     : join(neuralisHome, '.env');

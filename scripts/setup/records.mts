@@ -182,7 +182,6 @@ export async function createDirectorySkeleton(neuralisHome: string, projectId: s
     join(neuralisHome, 'app', 'credentials', 'global'),
     join(neuralisHome, 'app', 'credentials', 'projects', projectId),
     join(neuralisHome, 'app', 'sessions'),
-    join(neuralisHome, 'app', 'packages'),
     join(neuralisHome, 'app', 'logs'),
     join(neuralisHome, 'projects'),
     join(neuralisHome, 'projects', projectId),
@@ -212,13 +211,12 @@ export async function writeOwnerRecord(config: SetupConfig): Promise<string> {
 }
 
 /**
- * The project record, minimal by design.
- *
- * `roles: {}` rather than a hand-written map: the platform derives the
- * canonical role definitions from package manifests and the record migration
- * seeds them on first read, replaying every repair the record has not seen.
- * An empty map (not an absent key) is what the admin readers dereference
- * safely, and omitting `roleGrantVersion` is what makes the migration run.
+ * The project record, minimal by design: no role definition, no
+ * `roleGrantVersion`, no `agentOwnership`, no `limits`. The host derives the
+ * canonical roles from the package manifests and seeds this UNSEEDED record on
+ * its first read through the one seed `createProject` stamps. `roles` stays an
+ * EMPTY map rather than an absent key: admin's raw `app/projects/*.json`
+ * readers dereference it before the host has persisted the seed.
  */
 export function buildProjectRecord(config: SetupConfig, userId: string, now = new Date().toISOString()) {
   return {

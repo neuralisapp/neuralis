@@ -37,7 +37,6 @@ import {
   SHARED_ASSET_DIR,
   type SurfaceAssetKind,
 } from '@neuralis/package-system';
-import { resolveProjectRoot } from '@neuralis/package-system/paths';
 import type { SessionContext } from '@neuralis/package-system/contracts';
 import {
   resolveSessionContext,
@@ -48,9 +47,7 @@ import { resolveVerifiedAgentScope } from '@/server/auth/resolveVerifiedAgentSco
 import { resolveVisiblePackageSurface } from '@/server/packages/packageVisibility';
 import { getPackageAssetScopeAuthority } from '@/server/packages/PackageAssetScopeAuthority';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
-import { getProjectPackageScanner } from '@/server/packages/ProjectPackageScanner';
-import { getEnv } from '@/server/config/env';
-import { getLogger } from '@/server/logging/setup';
+import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
 
 export const dynamic = 'force-dynamic';
 
@@ -127,25 +124,19 @@ export async function POST(req: NextRequest, { params }: Params): Promise<Respon
   );
   if (!entry.ok) return notVisible();
 
-  // Resolve the on-disk roots from the project scanner record (asset-backed
-  // surfaces are project-scanner packages; the root is server-derived, never
-  // caller-supplied). BUG-A: scanner records carry the RAW manifest id and
-  // cache on the dir slug — the namespaced registry id (`surface.packageId`)
-  // matches NEITHER, so the lookup goes through the ONE canonical translation
-  // (`surface.manifestId`, resolved by `resolveVisiblePackageSurface`). No
-  // slug fallback: the URL slug is the namespaced id, and a directory
-  // literally named like it would resolve the WRONG package's roots.
-  const env = getEnv();
-  const logger = getLogger().child('asset-scope');
-  const projectRoot = resolveProjectRoot(env.projectsRoot, session.projectId);
-  const scanner = getProjectPackageScanner(projectRoot, logger);
-  const record = scanner.getPackageById(surface.manifestId);
-  if (!record) return notVisible();
+  // Authored names may identify multiple installations. The root comes from the
+  // exact visible instance this project loaded — the loader holds the root the
+  // scanner stamped, so a widget open costs no rescan — never from a caller path.
+  const runtime = getPackageRuntimeManager();
+  const packageRoot = runtime.getProjectPackageIds(session.projectId).has(surface.packageId)
+    ? runtime.getLoader().getStatus(surface.packageId)?.packageRoot
+    : undefined;
+  if (!packageRoot) return notVisible();
 
-  const appRoot = resolve(record.packageRoot, 'app');
-  const surfaceRoot = resolve(record.packageRoot, entry.root);
+  const appRoot = resolve(packageRoot, 'app');
+  const surfaceRoot = resolve(packageRoot, entry.root);
   if (surfaceRoot !== appRoot && !surfaceRoot.startsWith(appRoot + sep)) return notVisible();
-  const sharedRoot = resolve(record.packageRoot, SHARED_ASSET_DIR);
+  const sharedRoot = resolve(packageRoot, SHARED_ASSET_DIR);
 
   const minted = getPackageAssetScopeAuthority().mint({
     userId: session.userId,

@@ -242,16 +242,14 @@ describe('CredentialStore', () => {
       expect(result).toBe('user-secret');
     });
 
-    it('legacy fallback works when no key files exist', async () => {
-      const legacyDir = mkdtempSync(join(tmpdir(), 'neuralis-legacy-test-'));
-      const legacyStore = new CredentialStore(
-        legacyDir,
-        join(legacyDir, 'config'), // config dir doesn't exist, no key files
-        () => 'legacy-nextauth-secret',
-      );
-      await legacyStore.write('proj-1', 'cred', 'legacy-value');
-      expect(await legacyStore.read('proj-1', 'cred')).toBe('legacy-value');
-      rmSync(legacyDir, { recursive: true, force: true });
+    it('a store with no key files and no credential generates BOTH files on its first write', async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), 'neuralis-fresh-test-'));
+      const freshStore = new CredentialStore(freshDir, join(freshDir, 'config'));
+      await freshStore.write('proj-1', 'cred', 'fresh-value');
+      expect(existsSync(join(freshDir, 'config', 'credential-master.key'))).toBe(true);
+      expect(existsSync(join(freshDir, 'config', 'credential-salt.bin'))).toBe(true);
+      expect(await freshStore.read('proj-1', 'cred')).toBe('fresh-value');
+      rmSync(freshDir, { recursive: true, force: true });
     });
   });
 
@@ -342,25 +340,6 @@ describe('CredentialStore', () => {
       store = new CredentialStore(tempDir, configDir);
     });
 
-    /** A blob exactly as the pre-qualification store wrote it: `agents/<slug>/`, keyed on `agent:<slug>`. */
-    async function writeLegacy(slug: string, credentialId: string, plaintext: string): Promise<string> {
-      const key = await deriveKey(
-        readFileSync(join(configDir, 'credential-master.key')),
-        readFileSync(join(configDir, 'credential-salt.bin')),
-        `agent:${slug}`,
-      );
-      const dir = join(agentsRoot(), slug);
-      mkdirSync(dir, { recursive: true });
-      const path = join(dir, `${credentialId}.enc.json`);
-      writeFileSync(path, JSON.stringify(encrypt(plaintext, key)), 'utf-8');
-      return path;
-    }
-
-    const port = (owners: Record<string, string[]>) => ({
-      listProjectIds: async () => ['p1', 'p2'],
-      agentBelongsToProject: async (projectId: string, agentId: string) => (owners[agentId] ?? []).includes(projectId),
-    });
-
     it('two tenants\' same-slug agents are two directories, and neither resolves the other', async () => {
       await store.writeAgent('p1', 'coder', 'llm.openai-codex.oauth', 'p1-login');
       expect(existsSync(join(agentsRoot(), 'p1', 'coder', 'llm.openai-codex.oauth.enc.json'))).toBe(true);
@@ -382,8 +361,6 @@ describe('CredentialStore', () => {
       }
       await expect(store.writeAgent('p1', '../../global', 'x', 'v')).rejects.toThrow(/not a safe path segment/);
       await expect(store.writeUser('../global', 'x', 'v')).rejects.toThrow(/not a safe path segment/);
-      // The quarantine is not a project any id can name.
-      await expect(store.readAgent('_unresolved', 'coder', 'x')).rejects.toThrow(/quarantine/);
       expect(existsSync(join(tempDir, 'credentials', 'global'))).toBe(false);
     });
 
@@ -432,98 +409,6 @@ describe('CredentialStore', () => {
       expect(existsSync(join(agentsRoot(), 'p1'))).toBe(false);
       expect(await store.readAgent('p2', 'coder', 'cred-a')).toBe('other-tenant');
       expect(store.deleteProjectAgentScopes('p1')).toBe(0);
-    });
-
-    it('migration: ONE owning project ⇒ re-encrypted under the qualified scope, decodes there, legacy gone', async () => {
-      const legacyPath = await writeLegacy('solo', 'llm.openai-codex.oauth', 'the-login');
-      const legacyBytes = readFileSync(legacyPath, 'utf-8');
-
-      const result = await store.migrateAgentCredentialLayout(port({ solo: ['p2'] }));
-
-      expect(result).toEqual({ migrated: 1, quarantined: 0, removedEmpty: 0 });
-      expect(existsSync(join(agentsRoot(), 'solo'))).toBe(false);
-      expect(await store.readAgent('p2', 'solo', 'llm.openai-codex.oauth')).toBe('the-login');
-      // Re-encrypted, not moved: the new file is not the legacy ciphertext.
-      const moved = readFileSync(join(agentsRoot(), 'p2', 'solo', 'llm.openai-codex.oauth.enc.json'), 'utf-8');
-      expect(moved).not.toBe(legacyBytes);
-      expect(await store.readAgent('p1', 'solo', 'llm.openai-codex.oauth')).toBeUndefined();
-    });
-
-    it('migration: NO owner or SEVERAL owners ⇒ quarantined under _unresolved, resolvable from nowhere', async () => {
-      await writeLegacy('coder', 'cred-a', 'shared-by-two');
-      await writeLegacy('orphan', 'cred-a', 'nobody');
-
-      const result = await store.migrateAgentCredentialLayout(port({ coder: ['p1', 'p2'] }));
-
-      expect(result).toEqual({ migrated: 0, quarantined: 2, removedEmpty: 0 });
-      expect(readdirSync(join(agentsRoot(), '_unresolved')).sort()).toEqual(['coder', 'orphan']);
-      expect(existsSync(join(agentsRoot(), '_unresolved', 'coder', 'cred-a.enc.json'))).toBe(true);
-      for (const projectId of ['p1', 'p2']) {
-        expect(await store.readAgent(projectId, 'coder', 'cred-a')).toBeUndefined();
-        expect(await store.readAgent(projectId, 'orphan', 'cred-a')).toBeUndefined();
-      }
-    });
-
-    it('migration: a blob that does not decode, or whose qualified twin exists, is quarantined — never lost, never overwriting', async () => {
-      await writeLegacy('solo', 'cred-good', 'moves');
-      await writeLegacy('solo', 'cred-twin', 'legacy-copy');
-      await store.writeAgent('p1', 'solo', 'cred-twin', 'already-qualified');
-      mkdirSync(join(agentsRoot(), 'solo'), { recursive: true });
-      writeFileSync(join(agentsRoot(), 'solo', 'cred-bad.enc.json'), '{"not":"a payload"}', 'utf-8');
-
-      const result = await store.migrateAgentCredentialLayout(port({ solo: ['p1'] }));
-
-      expect(result).toEqual({ migrated: 1, quarantined: 1, removedEmpty: 0 });
-      expect(await store.readAgent('p1', 'solo', 'cred-good')).toBe('moves');
-      expect(await store.readAgent('p1', 'solo', 'cred-twin')).toBe('already-qualified');
-      expect(readdirSync(join(agentsRoot(), '_unresolved', 'solo')).sort()).toEqual([
-        'cred-bad.enc.json',
-        'cred-twin.enc.json',
-      ]);
-      expect(existsSync(join(agentsRoot(), 'solo'))).toBe(false);
-    });
-
-    it('migration: a directory whose every blob is quarantined does not count as migrated', async () => {
-      mkdirSync(join(agentsRoot(), 'solo'), { recursive: true });
-      writeFileSync(join(agentsRoot(), 'solo', 'cred-bad.enc.json'), 'garbage', 'utf-8');
-
-      expect(await store.migrateAgentCredentialLayout(port({ solo: ['p1'] }))).toEqual({
-        migrated: 0,
-        quarantined: 1,
-        removedEmpty: 0,
-      });
-    });
-
-    it('migration: an emptied qualified project directory is left alone and never counted', async () => {
-      await store.writeAgent('p1', 'coder', 'cred-a', 'a');
-      store.deleteAgentScope('p1', 'coder');
-      expect(readdirSync(join(agentsRoot(), 'p1'))).toEqual([]);
-
-      expect(await store.migrateAgentCredentialLayout(port({}))).toEqual({
-        migrated: 0,
-        quarantined: 0,
-        removedEmpty: 0,
-      });
-    });
-
-    it('migration: an empty legacy directory is removed, and a second run finds nothing', async () => {
-      mkdirSync(join(agentsRoot(), 'empty'), { recursive: true });
-      await writeLegacy('solo', 'cred-a', 'v');
-
-      expect(await store.migrateAgentCredentialLayout(port({ solo: ['p1'] }))).toEqual({
-        migrated: 1,
-        quarantined: 0,
-        removedEmpty: 1,
-      });
-      expect(existsSync(join(agentsRoot(), 'empty'))).toBe(false);
-
-      // Idempotent by shape: qualified `agents/<projectId>/` dirs hold only directories.
-      expect(await store.migrateAgentCredentialLayout(port({ solo: ['p1'] }))).toEqual({
-        migrated: 0,
-        quarantined: 0,
-        removedEmpty: 0,
-      });
-      expect(await store.readAgent('p1', 'solo', 'cred-a')).toBe('v');
     });
   });
 
@@ -648,14 +533,25 @@ describe('CredentialStore', () => {
       expect(await store.read('p1', 'llm.y')).toBe('v');
     });
 
-    it('the legacy secret arm runs BEFORE the refusal: a legacy install keeps decrypting', async () => {
+    it('a key file LOST beside existing blobs is refused by name on the next store — nothing is derived from another secret', async () => {
       const configDir = join(tempDir, 'config');
-      const legacy = new CredentialStore(tempDir, configDir, () => 'legacy-nextauth-secret');
-      await legacy.write('p1', 'llm.y', 'legacy-value');
-      // Blobs now exist and there is still no key file: the legacy arm must win.
-      const again = new CredentialStore(tempDir, configDir, () => 'legacy-nextauth-secret');
-      expect(await again.read('p1', 'llm.y')).toBe('legacy-value');
+      const first = new CredentialStore(tempDir, configDir);
+      await first.write('p1', 'llm.y', 'value');
+      rmSync(join(configDir, 'credential-master.key'), { force: true });
+      const next = new CredentialStore(tempDir, configDir);
+      await expect(next.read('p1', 'llm.y')).rejects.toMatchObject({ code: 'credential_master_key_missing', file: 'credential-master.key' });
+      await expect(next.write('p1', 'llm.z', 'v')).rejects.toBeInstanceOf(CredentialMasterKeyMissingError);
       expect(existsSync(join(configDir, 'credential-master.key'))).toBe(false);
+    });
+
+    it('a salt file LOST beside existing blobs is refused by name, never replaced by a static salt or a new one', async () => {
+      const configDir = join(tempDir, 'config');
+      const first = new CredentialStore(tempDir, configDir);
+      await first.write('p1', 'llm.y', 'value');
+      rmSync(join(configDir, 'credential-salt.bin'), { force: true });
+      const next = new CredentialStore(tempDir, configDir);
+      await expect(next.read('p1', 'llm.y')).rejects.toMatchObject({ code: 'credential_master_key_missing', file: 'credential-salt.bin' });
+      expect(existsSync(join(configDir, 'credential-salt.bin'))).toBe(false);
     });
 
     it('a write leaves no temp file behind and the blob is 0600', async () => {
@@ -677,7 +573,7 @@ describe('CredentialStore', () => {
       mkdirSync(configDir, { recursive: true });
       writeFileSync(join(configDir, 'credential-master.key'), randomBytes(32), { mode: 0o400 });
       let calls = 0;
-      const refusing = new CredentialStore(tempDir, configDir, undefined, async () => {
+      const refusing = new CredentialStore(tempDir, configDir, async () => {
         calls += 1;
         throw new Error('stored data is newer');
       });

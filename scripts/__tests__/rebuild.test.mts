@@ -18,8 +18,9 @@ import assert from 'node:assert/strict';
 // and print a passing TAP summary (`# pass 9`) while vitest collected ZERO tests
 // and failed the file — a suite that looked green in its own output and red in
 // the runner's. Read the exit code, never the TAP tail.
-import { describe, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { sha256Dir } from '../build/treeDigest.mjs';
+import { composeAppImage } from '../rebuild.mts';
 
 type Scenario = {
   buildCode?: number;
@@ -34,8 +35,10 @@ type Scenario = {
   sidecarBuildCode?: number;
   /** Run a scratch copy of `scripts/` with no `packages/` beside it — an installed tree. */
   installedTree?: boolean;
-  /** Exit code of the compose regeneration (`pnpm run neuralis:setup --compose-only`). */
+  /** Exit code of the compose regeneration (the in-process `setup --compose-only` step). */
   composeCode?: number;
+  /** Installed tree only: what the regeneration writes as the install folder's docker-compose.yml. */
+  composeText?: string;
   /** The container answers `compose ps` and `docker cp` hands back this build report. */
   report?: { uiCompat?: unknown; lock?: string; trackedSha?: string };
 };
@@ -45,6 +48,8 @@ const sidecarDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..
 
 
 const neuralisDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+/** The sidecar tag is the HOST version — the tag agent-core's `mcpSidecarImage` default resolves. */
+const SIDECAR_IMAGE = `neuralisapp/mcp-sidecar:${(JSON.parse(readFileSync(join(neuralisDir, 'package.json'), 'utf8')) as { version: string }).version}`;
 
 function runScenario(scenario: Scenario, args: string[] = []) {
   const sandbox = mkdtempSync(join(tmpdir(), 'neuralis-rebuild-test-'));
@@ -82,6 +87,9 @@ if (args[0] === 'builder' && args[1] === 'prune' && args.includes('--max-used-sp
 }
 if (args[0] === 'builder' && args[1] === 'prune') {
   finish(scenario.hardCode ?? 0, 'Total reclaimed space: 3GB\\n', 'hard prune failed');
+}
+if (args[0] === 'compose' && args[1] === '-p' && args[3] === 'config') {
+  finish(0, JSON.stringify({ services: { neuralis: { labels: { 'neuralis.kind': 'app' } }, qdrant: { labels: { 'neuralis.kind': 'vectorstore' } } } }));
 }
 if (args[0] === 'compose' && args[1] === '-p' && args[3] === 'ps') {
   finish(0, scenario.hostPlane || scenario.report ? 'ctr-fake-1\\n' : '');
@@ -122,17 +130,10 @@ finish(98, '', 'unexpected fake docker command: ' + args.join(' '));
       { mode: 0o755 },
     );
     chmodSync(dockerPath, 0o755);
-    // The compose regeneration runs through `pnpm` — faked on the same PATH, so a
-    // test never reads the live .env nor rewrites the live docker-compose.yml.
-    const pnpmLogPath = join(sandbox, 'pnpm.jsonl');
-    writeFileSync(
-      join(binDir, 'pnpm'),
-      `#!/usr/bin/env node
-require('node:fs').appendFileSync(${JSON.stringify(pnpmLogPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');
-process.exit(${scenario.composeCode ?? 0});
-`,
-      { mode: 0o755 },
-    );
+    // The compose regeneration is the setup verb called in-process; the harness
+    // below hands `run` a recorder in its place, so a test never reads the live
+    // .env nor rewrites the live docker-compose.yml.
+    const setupLogPath = join(sandbox, 'setup.jsonl');
 
     // Hermetic host plane: NEURALIS_HOME points into the sandbox, so the real
     // machine's provisioned broker never leaks into the command log. When the
@@ -156,9 +157,29 @@ process.exit(${scenario.composeCode ?? 0});
       cwd = join(sandbox, 'installed', 'neuralis');
       cpSync(join(neuralisDir, 'scripts'), join(cwd, 'scripts'), { recursive: true });
     }
+    const harness = join(sandbox, 'harness.mts');
+    writeFileSync(
+      harness,
+      `import { appendFileSync, writeFileSync } from 'node:fs';
+import { run } from ${JSON.stringify(join(cwd, 'scripts', 'rebuild.mts'))};
+import { exitCodeFor } from ${JSON.stringify(join(cwd, 'scripts', 'cli', 'registry.mts'))};
+const ctx = {
+  packageDir: ${JSON.stringify(cwd)}, installDir: ${JSON.stringify(cwd)}, cwd: ${JSON.stringify(cwd)}, env: process.env, stdin: process.stdin,
+  stdout: (t) => { process.stdout.write(t); }, stderr: (t) => { process.stderr.write(t); },
+};
+const regenerate = async () => {
+  appendFileSync(${JSON.stringify(setupLogPath)}, JSON.stringify(['setup', '--compose-only']) + '\\n');
+  ${scenario.installedTree && scenario.composeText !== undefined ? `writeFileSync(${JSON.stringify(join(cwd, 'docker-compose.yml'))}, ${JSON.stringify(scenario.composeText)});` : ''}
+  return ${scenario.composeCode ?? 0};
+};
+let code;
+try { code = await run(process.argv.slice(2), ctx, regenerate); } catch (err) { code = exitCodeFor(err, ctx); }
+process.exit(code);
+`,
+    );
     const result = spawnSync(
       process.execPath,
-      ['scripts/rebuild.mts', ...args],
+      [harness, ...args],
       {
         cwd,
         encoding: 'utf8',
@@ -180,7 +201,7 @@ process.exit(${scenario.composeCode ?? 0});
       return text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
     };
     const commands = readLog(logPath);
-    const pnpmCommands = readLog(pnpmLogPath);
+    const setupCommands = readLog(setupLogPath);
     let exportedLock: string | null = null;
     let exportedSha: string | null = null;
     try {
@@ -197,20 +218,20 @@ process.exit(${scenario.composeCode ?? 0});
       }
     }
 
-    return { ...result, commands, pnpmCommands, exportedLock, exportedSha };
+    return { ...result, commands, setupCommands, exportedLock, exportedSha };
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
 }
 
-/** The post-build report read (`compose -p <project> ps`, `cp`) — its project name comes from the live `.env`. */
+/** The post-build report read (`compose -p <project> config` + `ps`, `cp`) — its project name comes from the live `.env`. */
 const isReportProbe = (c: string[]): boolean => (c[0] === 'compose' && c[1] === '-p') || c[0] === 'cp';
 
 describe('neuralis:rebuild — the compose file is regenerated before the build', () => {
-  it('regenerates through `pnpm run neuralis:setup --compose-only` BEFORE compose up', () => {
+  it('regenerates through the setup verb, in-process, BEFORE compose up', () => {
     const result = runScenario({}, ['--no-prune', '--no-sidecar']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.deepEqual(result.pnpmCommands, [['run', '--silent', 'neuralis:setup', '--compose-only']]);
+    assert.deepEqual(result.setupCommands, [['setup', '--compose-only']]);
     assert.ok(result.commands.some((c) => c[0] === 'compose' && c[1] === 'up'));
   });
 
@@ -219,6 +240,27 @@ describe('neuralis:rebuild — the compose file is regenerated before the build'
     assert.equal(result.status, 3);
     assert.deepEqual(result.commands, []);
     assert.match(result.stdout, /compose regeneration failed \(exit 3\) — nothing was built/);
+  });
+});
+
+describe('neuralis:rebuild — the installed arm says what it builds', () => {
+  const app = (image: string, build: boolean) =>
+    `name: neuralis\nservices:\n  neuralis:\n${build ? '    build:\n      context: "/i/operator-image"\n' : ''}    image: ${image}\n    user: "1000:1000"\n\n  qdrant:\n    image: qdrant/qdrant:v1\n`;
+
+  it('reads the app service off the generated compose: the derived image, the release image, or the monorepo build', () => {
+    expect(composeAppImage(app('neuralis-neuralis:0.2.0-0123456789ab', true))).toEqual({ image: 'neuralis-neuralis:0.2.0-0123456789ab', builds: true });
+    expect(composeAppImage(app('neuralisapp/neuralis:0.2.0', false))).toEqual({ image: 'neuralisapp/neuralis:0.2.0', builds: false });
+    expect(composeAppImage('services:\n  neuralis:\n    build:\n      context: ..\n  qdrant:\n    image: qdrant/qdrant:v1\n')).toEqual({ image: null, builds: true });
+    expect(composeAppImage(null)).toEqual({ image: null, builds: false });
+  });
+
+  it('an install folder with operator packages names its derived image; with none, says there is nothing to build', () => {
+    const derived = runScenario({ installedTree: true, composeText: app('neuralis-neuralis:0.2.0-0123456789ab', true) }, ['--no-prune', '--no-sidecar']);
+    assert.equal(derived.status, 0, derived.stdout + derived.stderr);
+    assert.match(derived.stdout, /app image {6}: .*neuralis-neuralis:0\.2\.0-0123456789ab.*derived image/);
+    const plain = runScenario({ installedTree: true, composeText: app('neuralisapp/neuralis:0.2.0', false) }, ['--no-prune', '--no-sidecar']);
+    assert.match(plain.stdout, /app image {6}: .*neuralisapp\/neuralis:0\.2\.0.*nothing to build/);
+    assert.deepEqual(plain.commands.filter((c) => c[0] === 'compose' && c[1] === 'up'), [['compose', 'up', '-d', '--build', '-V']]);
   });
 });
 
@@ -269,7 +311,7 @@ describe('neuralis:rebuild cache guard', () => {
     );
     assert.deepEqual(result.commands.filter((c) => !isReportProbe(c)), [
       ['compose', 'up', '-d', '--build', '-V'],
-      ['image', 'inspect', '--format', `{{ index .Config.Labels "${SIDECAR_LABEL}" }}`, 'neuralisapp/mcp-sidecar:dev'],
+      ['image', 'inspect', '--format', `{{ index .Config.Labels "${SIDECAR_LABEL}" }}`, SIDECAR_IMAGE],
     ]);
   });
 
@@ -403,7 +445,7 @@ describe('neuralis:rebuild sidecar image — built only when there is a reason',
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const builds = result.commands.filter(build);
     assert.equal(builds.length, 1);
-    assert.deepEqual(builds[0].slice(0, 5), ['build', '-f', join(sidecarDir, 'Dockerfile'), '-t', 'neuralisapp/mcp-sidecar:dev']);
+    assert.deepEqual(builds[0].slice(0, 5), ['build', '-f', join(sidecarDir, 'Dockerfile'), '-t', SIDECAR_IMAGE]);
     assert.equal(builds[0][6], `${SIDECAR_LABEL}=${sha256Dir(sidecarDir)}`);
     assert.equal(builds[0][7], sidecarDir);
     assert.ok(result.commands.findIndex(build) > result.commands.findIndex((c) => c[0] === 'compose' && c[1] === 'up'));

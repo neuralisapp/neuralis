@@ -23,30 +23,28 @@
  */
 
 import { userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import { loadHostEnv } from './setup/detect.mts';
 import { askLine } from './setup/ownerCheck.mts';
 import { findUserByEmail, listUsers } from '../src/server/store/UserStore';
 import { enableUser, resetUserPassword, type UserLifecycleActor } from '../src/server/admin/offboardUser';
 
-const neuralisDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-
 const USAGE = `Usage:
-  pnpm neuralis:user list
-  pnpm neuralis:user enable <email>
-  pnpm neuralis:user reset-password <email>`;
+  ${spell('user list')}
+  ${spell('user enable <email>')}
+  ${spell('user reset-password <email>')}`;
 
 async function confirm(email: string, action: string): Promise<boolean> {
   const typed = await askLine(`Type ${email} again to ${action}`);
   return typed.trim().toLowerCase() === email.trim().toLowerCase();
 }
 
-async function main(): Promise<void> {
-  const [command, email] = process.argv.slice(2);
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
+  const [command, email] = argv;
   // The store reads its root through the host env module, which requires the
   // session secret; on the host shell that value lives in `.env`.
-  await loadHostEnv(neuralisDir);
+  await loadHostEnv(ctx.installDir);
 
   if (command === 'list') {
     const users = await listUsers();
@@ -55,14 +53,10 @@ async function main(): Promise<void> {
       console.log(`  ${u.status.padEnd(8)} ${u.email}  ${u.name}  (${u.id})`);
     }
     console.log(`  ${live.length} user(s); ${users.length - live.length} deleted record(s) not shown.`);
-    return;
+    return 0;
   }
 
-  if ((command !== 'enable' && command !== 'reset-password') || !email) {
-    console.log(USAGE);
-    process.exitCode = 1;
-    return;
-  }
+  if ((command !== 'enable' && command !== 'reset-password') || !email) throw new CliExit(1, 'user needs a command', USAGE.split('\n'));
   const user = await findUserByEmail(email);
   if (!user || user.status === 'deleted') throw new Error(`No user with email ${email}.`);
   const actor: UserLifecycleActor = { kind: 'cli', operator: userInfo().username };
@@ -70,12 +64,12 @@ async function main(): Promise<void> {
   if (command === 'enable') {
     if (user.status === 'active') {
       console.log(`  ${user.email} is already active.`);
-      return;
+      return 0;
     }
     if (!(await confirm(user.email, 'enable the account'))) throw new Error('Not confirmed; nothing changed.');
     await enableUser(user.id, actor);
     console.log(`  Enabled ${user.email}. Work paused while it was disabled stays paused.`);
-    return;
+    return 0;
   }
 
   if (!(await confirm(user.email, 'reset the password'))) throw new Error('Not confirmed; nothing changed.');
@@ -89,9 +83,5 @@ async function main(): Promise<void> {
   console.log('  `docker compose restart neuralis` in the host folder (a host-plane terminal ends with the broker).');
   console.log('  A reset made in the app closes them at once.');
   if (user.status === 'disabled') console.log('  The account is still disabled — run `enable` to let it sign in.');
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`  ${err instanceof Error ? err.message : String(err)}`);
-  process.exitCode = 1;
-});

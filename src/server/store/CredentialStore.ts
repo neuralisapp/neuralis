@@ -35,15 +35,12 @@ import {
   readdirSync,
   existsSync,
   mkdirSync,
-  renameSync,
-  rmdirSync,
   rmSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { isValidCredentialId } from '@neuralis/package-system/contracts';
 import { assertRecordFormat, durableReplaceFile } from '@neuralis/package-system/data';
-import { assertPathSegment, isSafePathSegment } from '@neuralis/package-system/paths';
-import type { ScopeMembershipPort } from '@neuralis/package-system/access';
+import { assertPathSegment } from '@neuralis/package-system/paths';
 import { HOST_DATA_FORMATS } from './dataFormats';
 
 // ---------------------------------------------------------------------------
@@ -53,15 +50,7 @@ import { HOST_DATA_FORMATS } from './dataFormats';
 export const GLOBAL_SCOPE = '_global';
 export const USER_SCOPE_PREFIX = 'user:';
 export const AGENT_SCOPE_PREFIX = 'agent:';
-/**
- * Where a legacy bare-slug agent directory whose owning project cannot be named
- * (none, or several) is parked. Its blobs stay under the LEGACY key, and no
- * project id can spell this directory (`credentialsDir` refuses it), so nothing
- * ever resolves from here — it is a trace for the operator, not a value.
- */
-export const UNRESOLVED_AGENT_DIR = '_unresolved';
 const KEY_LENGTH = 32; // 256-bit
-const DEFAULT_SALT = Buffer.from('neuralis-credential-v1', 'utf-8');
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,18 +75,19 @@ export type CredentialChangeListener = (event: CredentialChangeEvent) => void;
 const ENVELOPE_VERSION = 1;
 
 /**
- * The master key is missing while encrypted credentials exist. Generating a
- * new key here would make every stored secret permanently undecryptable, so
- * the store refuses and names the recovery instead.
+ * The master key (or the installation salt it is derived with) is missing
+ * while encrypted credentials exist. Generating a new one here would make every
+ * stored secret permanently undecryptable, so the store refuses and names the
+ * recovery instead.
  */
 export class CredentialMasterKeyMissingError extends Error {
   readonly code = 'credential_master_key_missing' as const;
-  constructor() {
+  constructor(readonly file: 'credential-master.key' | 'credential-salt.bin' = 'credential-master.key') {
     super(
-      'credential-master.key is missing but encrypted credentials exist. ' +
-        'A new key would make every one of them undecryptable, so none is generated. Put the ' +
-        'original key back (a backup, or a checkpoint that carries it: `pnpm neuralis:checkpoint list`, ' +
-        'then `restore <id>` with the app stopped); only if the key is lost for good, delete the ' +
+      `${file} is missing but encrypted credentials exist. ` +
+        'A new one would make every credential undecryptable, so none is generated. Put the ' +
+        'original file back (a backup, or a checkpoint that carries it: `npx neuralis checkpoint list`, ' +
+        'then `restore <id>` with the app stopped); only if it is lost for good, delete the ' +
         '*.enc.json files under app/credentials and set every credential again.',
     );
     this.name = 'CredentialMasterKeyMissingError';
@@ -131,7 +121,7 @@ function hasEncryptedCredential(dir: string): boolean {
  * Derive a per-credential encryption key via HKDF-SHA256.
  *
  * @param masterKey - The CREDENTIAL_MASTER_KEY (32+ bytes)
- * @param salt - Per-installation random salt (16 bytes) or fallback static salt
+ * @param salt - Per-installation random salt (16 bytes)
  * @param info - The scope string (e.g. "abc123", "user:u1", "agent:abc123/coder" or "_global")
  */
 export function deriveKey(masterKey: string | Buffer, salt: Buffer, info: string): Promise<Buffer> {
@@ -219,11 +209,6 @@ export class CredentialStore {
      */
     private readonly configDir?: string,
     /**
-     * Legacy: direct secret getter for backward compat with Phase 1.
-     * If provided AND no key files exist, uses this as the master secret.
-     */
-    private readonly legacyGetMasterSecret?: () => string,
-    /**
      * Awaited before every read and write — the host singleton passes the
      * data-format claim (`dataFormats.ts`), so no envelope is touched before
      * this build has claimed the credential kind. Unset in a unit-test store.
@@ -263,18 +248,9 @@ export class CredentialStore {
       return this.masterKey;
     }
 
-    // Fallback to legacy secret (NEXTAUTH_SECRET from Phase 1)
-    if (this.legacyGetMasterSecret) {
-      this.masterKey = Buffer.from(this.legacyGetMasterSecret(), 'utf-8');
-      return this.masterKey;
-    }
-
-    // Generate only when there is nothing a new key would orphan. This sits
-    // AFTER the legacy arm on purpose: an install whose blobs were written under
-    // the legacy secret keeps decrypting them, and only a store with neither a
-    // key nor a legacy secret reaches this line.
+    // Generate only when there is nothing a new key would orphan.
     if (hasEncryptedCredential(join(this.appRoot, 'credentials'))) {
-      throw new CredentialMasterKeyMissingError();
+      throw new CredentialMasterKeyMissingError('credential-master.key');
     }
     this.masterKey = ensureMasterKeyFile(cfgDir);
     return this.masterKey;
@@ -291,8 +267,11 @@ export class CredentialStore {
       return this.installSalt;
     }
 
-    // Fallback to static salt (backward compat with Phase 1 credentials)
-    this.installSalt = DEFAULT_SALT;
+    // Generate only when there is nothing a new salt would orphan.
+    if (hasEncryptedCredential(join(this.appRoot, 'credentials'))) {
+      throw new CredentialMasterKeyMissingError('credential-salt.bin');
+    }
+    this.installSalt = ensureSaltFile(cfgDir);
     return this.installSalt;
   }
 
@@ -334,9 +313,6 @@ export class CredentialStore {
 
   private agentProjectDir(projectId: string): string {
     assertPathSegment(projectId, 'credential project id');
-    if (projectId === UNRESOLVED_AGENT_DIR) {
-      throw new Error(`"${UNRESOLVED_AGENT_DIR}" is the quarantine for unresolvable legacy agent credentials, not a project`);
-    }
     return join(this.appRoot, 'credentials', 'agents', projectId);
   }
 
@@ -499,104 +475,11 @@ export class CredentialStore {
     return removed;
   }
 
-  /**
-   * One-time move of the legacy bare-slug layout (`agents/<slug>/*.enc.json`)
-   * into `agents/<projectId>/<slug>/`. Idempotent by shape: a qualified
-   * `agents/<projectId>/` holds only directories, so a second run finds nothing.
-   *
-   * - EXACTLY ONE project (archived included) holds an agent of that slug ⇒ each
-   *   blob is decrypted under the legacy scope and RE-ENCRYPTED under the
-   *   qualified one (the key is the scope string, so a moved file would not
-   *   decode), then the legacy file is removed. A blob that does not decode, or
-   *   whose qualified twin already exists, is quarantined instead of lost.
-   * - none or several ⇒ the directory moves to `agents/_unresolved/<slug>/`:
-   *   copying a shared directory to every claimant IS the leak this closes.
-   * - an empty legacy directory is removed.
-   *
-   * "Owner" is where the agent EXISTS (`agentBelongsToProject`), never the
-   * `agentOwnership` map — an unowned agent is legal and unique.
-   */
-  async migrateAgentCredentialLayout(
-    port: Pick<ScopeMembershipPort, 'agentBelongsToProject'> & { listProjectIds(): Promise<string[]> },
-  ): Promise<{ migrated: number; quarantined: number; removedEmpty: number }> {
-    const result = { migrated: 0, quarantined: 0, removedEmpty: 0 };
-    const agentsRoot = join(this.appRoot, 'credentials', 'agents');
-    if (!existsSync(agentsRoot)) return result;
-    const legacy = readdirSync(agentsRoot, { withFileTypes: true }).filter(
-      (e) => e.isDirectory() && e.name !== UNRESOLVED_AGENT_DIR,
-    );
-    if (legacy.length === 0) return result;
-    const projectIds = await port.listProjectIds();
-    for (const entry of legacy) {
-      const slug = entry.name;
-      const dir = join(agentsRoot, slug);
-      const children = readdirSync(dir, { withFileTypes: true });
-      if (children.length === 0) {
-        // An emptied qualified `agents/<projectId>/` (an agent delete leaves it)
-        // is not legacy residue — leave it, or every boot would count it.
-        if (!projectIds.includes(slug)) {
-          rmdirSync(dir);
-          result.removedEmpty++;
-        }
-        continue;
-      }
-      const blobs = children.filter((c) => c.isFile() && c.name.endsWith('.enc.json')).map((c) => c.name);
-      if (blobs.length === 0) continue; // a qualified `agents/<projectId>/` — only directories
-      const quarantine = (file: string): void => {
-        const target = join(agentsRoot, UNRESOLVED_AGENT_DIR, slug);
-        mkdirSync(target, { recursive: true, mode: 0o700 });
-        renameSync(join(dir, file), join(target, file));
-      };
-      const owners: string[] = [];
-      if (isSafePathSegment(slug)) {
-        for (const projectId of projectIds) {
-          if (projectId !== UNRESOLVED_AGENT_DIR && (await port.agentBelongsToProject(projectId, slug))) {
-            owners.push(projectId);
-          }
-        }
-      }
-      if (owners.length === 1) {
-        const owner = owners[0]!;
-        let moved = 0;
-        let kept = 0;
-        for (const file of blobs) {
-          const credentialId = file.replace(/\.enc\.json$/, '');
-          const legacyPath = join(dir, file);
-          let plaintext: string | undefined;
-          try {
-            const payload = JSON.parse(readFileSync(legacyPath, 'utf-8')) as EncryptedPayload;
-            plaintext = await this.decryptPayload(`${AGENT_SCOPE_PREFIX}${slug}`, payload);
-          } catch {
-            plaintext = undefined;
-          }
-          const exists = existsSync(join(this.agentDir(owner, slug), file));
-          if (plaintext === undefined || exists || !isValidCredentialId(credentialId)) {
-            quarantine(file);
-            kept++;
-            continue;
-          }
-          await this.writeAgent(owner, slug, credentialId, plaintext);
-          unlinkSync(legacyPath);
-          moved++;
-        }
-        // Counted per directory, by what actually happened to its blobs.
-        if (moved > 0) result.migrated++;
-        if (kept > 0) result.quarantined++;
-      } else {
-        for (const file of blobs) quarantine(file);
-        result.quarantined++;
-      }
-      if (readdirSync(dir).length === 0) rmdirSync(dir);
-    }
-    return result;
-  }
-
   // -- Raw decrypt (for host-injected callbacks) ----------------------------
 
   /**
-   * Decrypt a raw EncryptedPayload using scope-level key derivation.
-   * Used by bootstrap to provide a decrypt callback to agent-core's
-   * CredentialEnvManager without duplicating key derivation logic.
+   * Decrypt a raw EncryptedPayload under the scope's key — the offline
+   * credential upgrade proves with it that every blob opens under the key file.
    */
   async decryptPayload(scope: string, payload: EncryptedPayload): Promise<string> {
     const key = await this.deriveKeyFor(scope);

@@ -8,12 +8,15 @@
  *   add <name> --tarball <x.tgz>       a packed package (file:<abs .tgz>) — installed as packed
  *   add <name> --version <x.y.z>       a registry package at an EXACT version (private scopes: .env NEURALIS_BUILD_NPMRC)
  *   remove <name>                      the deps entry (byte-exact restore), its --pkg mount, its role grants at the next boot
- *   list                               show builtin-class deps (neuralis-block carriers)
+ *   list                               show builtin-class deps (neuralis-block carriers); on an
+ *                                      install folder every operator line, registry ones included
  *
- * Every source arrives through ONE lifecycle: `pnpm neuralis:rebuild` installs,
- * builds and deploys it into the image's `node_modules/<name>` as a real
- * directory — any scope or none (scripts/build/build-workspace.mjs). Nothing
- * here installs anything.
+ * Every source arrives through the image `neuralis rebuild` builds: on the
+ * development checkout the whole image, a real `node_modules/<name>` directory
+ * for any scope or none; on an npm install folder its derived image — the
+ * release image plus these lines (`planOperatorImage`, setup/compose.mts;
+ * `operatorInstall`, scripts/build/build-workspace.mjs). Nothing here installs
+ * anything.
  *
  * THE TRUST ACT. Presence in `neuralis/package.json#dependencies` is the
  * builtin-class authorization boundary: every dep whose own package.json
@@ -34,7 +37,6 @@
 import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
 import { dirname, resolve, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { resolveNeuralisHome, sanitizePackageId } from '@neuralis/package-system/paths';
@@ -44,6 +46,7 @@ import {
   PRIVATE_SCOPES_FILE,
   describeUnroutedScope,
   filesWhitelistProblems,
+  insertDependencyLine,
   listLocalSources,
   npmrcProblems,
   prepareLocalManifest,
@@ -56,8 +59,11 @@ import {
   unroutedPrivateScopes,
   validatePackageRoots,
 } from './build/build-workspace.mjs';
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import { packageBindHostPath } from './mount/packageBind.mts';
 import { loadHostEnv } from './setup/detect.mts';
+import { operatorDependencies } from './setup/compose.mts';
 import { HOST_CONFIG_SETTINGS } from '../src/server/config/hostConfigSettings.ts';
 
 // ── ANSI Colors ───────────────────────────────────────────────────
@@ -77,11 +83,14 @@ const fail = `${c.red}✗${c.reset}`;
 const warn = `${c.yellow}⚠${c.reset}`;
 
 // ── Paths ─────────────────────────────────────────────────────────
+//
+// `host` is the install folder (`ctx.installDir`): its `package.json` is the
+// trust list, its `node_modules` what npm installed, its compose override the
+// mounts. On the development checkout and a public clone that is the host
+// package itself.
 
-const neuralisDir = join(import.meta.dirname, '..');
-
-function hostPackageJsonPath(): string {
-  return join(neuralisDir, 'package.json');
+function hostPackageJsonPath(host: string): string {
+  return join(host, 'package.json');
 }
 
 // ── package.json textual editing ─────────────────────────────────
@@ -102,17 +111,6 @@ function assertValidJson(content: string, context: string): void {
 function readDependencies(content: string): Record<string, string> {
   const parsed = JSON.parse(content) as { dependencies?: Record<string, string> };
   return parsed.dependencies ?? {};
-}
-
-function insertDependencyLine(content: string, name: string, spec: string): string {
-  const match = content.match(/^([ \t]*)"dependencies"\s*:\s*\{\s*\n([ \t]*)/m);
-  if (!match) {
-    throw new Error('Could not locate the "dependencies" object in neuralis/package.json');
-  }
-  const indent = match[2];
-  const insertAt = match.index! + match[0].length - indent.length;
-  const line = `${indent}${JSON.stringify(name)}: ${JSON.stringify(spec)},\n`;
-  return content.slice(0, insertAt) + line + content.slice(insertAt);
 }
 
 function removeDependencyLine(content: string, name: string): string | null {
@@ -165,11 +163,11 @@ async function readManifest(dir: string): Promise<DepManifest | null> {
 }
 
 /** The manifest of a dependency already in the deps: its installed copy, else its local source. */
-async function readDependencyManifest(name: string, spec: string): Promise<DepManifest | null> {
-  const installed = await readManifest(join(neuralisDir, 'node_modules', name));
+async function readDependencyManifest(host: string, name: string, spec: string): Promise<DepManifest | null> {
+  const installed = await readManifest(join(host, 'node_modules', name));
   if (installed) return installed;
   if (!spec.startsWith('file:') && !spec.startsWith('link:')) return null;
-  const path = resolve(neuralisDir, spec.replace(/^(file|link):/, ''));
+  const path = resolve(host, spec.replace(/^(file|link):/, ''));
   return path.endsWith('.tgz') ? (existsSync(path) ? readTarballManifest(path) : null) : readManifest(path);
 }
 
@@ -182,14 +180,27 @@ function warnNeuralisBlock(name: string, manifest: DepManifest): void {
   }
 }
 
-function printTrustNotice(name: string, spec: string): void {
+/** The trust list's name as the operator sees it: the install folder's own manifest, or the host package's in a checkout. */
+function trustList(folder: boolean): string {
+  return folder ? 'package.json#dependencies' : 'neuralis/package.json#dependencies';
+}
+
+function printTrustNotice(name: string, spec: string, folder: boolean): void {
   console.log('');
   console.log(`${c.yellow}${c.bold}── TRUST NOTICE ─────────────────────────────────────────────${c.reset}`);
-  console.log(`${c.yellow}Added ${c.bold}"${name}": "${spec}"${c.reset}${c.yellow} to neuralis/package.json#dependencies.${c.reset}`);
+  console.log(`${c.yellow}Added ${c.bold}"${name}": "${spec}"${c.reset}${c.yellow} to ${trustList(folder)}.${c.reset}`);
   console.log(`${c.yellow}This grants the package FIRST-PARTY IN-PROCESS trust at the next${c.reset}`);
   console.log(`${c.yellow}boot — the same trust as the platform's own packages.${c.reset}`);
-  console.log(`${c.yellow}  • Commit or remove this entry deliberately (the git diff is the audit trail).${c.reset}`);
-  if (spec.startsWith('file:')) {
+  if (folder) {
+    console.log(`${c.yellow}  • Remove this entry deliberately — this file is the install's trust list.${c.reset}`);
+    if (spec.startsWith('file:')) {
+      console.log(`${c.yellow}  • A file: dep is a LOCAL package: this install's derived image builds it from${c.reset}`);
+      console.log(`${c.yellow}    that path at every rebuild, so the path must stay where it is.${c.reset}`);
+    }
+  } else {
+    console.log(`${c.yellow}  • Commit or remove this entry deliberately (the git diff is the audit trail).${c.reset}`);
+  }
+  if (!folder && spec.startsWith('file:')) {
     console.log(`${c.yellow}  • A file: dep is a LOCAL package: this machine's image builds it, and it${c.reset}`);
     console.log(`${c.yellow}    must NEVER enter pnpm-lock.yaml (a machine path in a tracked file) —${c.reset}`);
     console.log(`${c.yellow}    never run a plain \`pnpm install\` here while this line exists (host dev:${c.reset}`);
@@ -199,23 +210,21 @@ function printTrustNotice(name: string, spec: string): void {
   console.log('');
 }
 
+/** No problems ⇒ false; otherwise the refusal, through the CLI boundary — nothing was written. */
 function fails(problems: string[]): boolean {
-  for (const p of problems) console.log(`${fail} ${p}`);
-  if (problems.length > 0) {
-    console.log(`  ${c.dim}Nothing was written.${c.reset}`);
-    process.exitCode = 1;
-  }
-  return problems.length > 0;
+  if (problems.length === 0) return false;
+  for (const p of problems.slice(0, -1)) console.log(`${fail} ${p}`);
+  throw new CliExit(1, problems.at(-1)!, ['Nothing was written.']);
 }
 
 /** An exact registry version (`1.2.3`, `1.2.3-beta.1`) — a range would float past what was vetted. */
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /** The private-registry checks for a scoped registry package, against `.env NEURALIS_BUILD_NPMRC`. */
-async function registryProblems(name: string): Promise<string[]> {
+async function registryProblems(host: string, name: string): Promise<string[]> {
   if (!name.startsWith('@')) return [];
   const scope = name.split('/')[0];
-  await loadHostEnv(neuralisDir);
+  await loadHostEnv(host);
   const npmrc = process.env.NEURALIS_BUILD_NPMRC?.trim();
   if (!npmrc) {
     console.log(`${c.dim}  No .env NEURALIS_BUILD_NPMRC: ${scope} resolves from the public registry. For a private registry, point it at an .npmrc with${c.reset}`);
@@ -241,8 +250,8 @@ async function registryProblems(name: string): Promise<string[]> {
  * build's own check (`unroutedPrivateScopes`), run before the write. A scope
  * never seen privately here is indistinguishable from a public one.
  */
-async function privateScopeProblems(name: string, manifest: object): Promise<string[]> {
-  await loadHostEnv(neuralisDir);
+async function privateScopeProblems(host: string, name: string, manifest: object): Promise<string[]> {
+  await loadHostEnv(host);
   const buildDir = join(resolveNeuralisHome().home, 'build');
   let record: ReturnType<typeof readPrivateScopeRecord>;
   try {
@@ -253,7 +262,7 @@ async function privateScopeProblems(name: string, manifest: object): Promise<str
   const npmrc = process.env.NEURALIS_BUILD_NPMRC?.trim();
   const npmrcText = npmrc && existsSync(npmrc) ? await readFile(npmrc, 'utf-8') : '';
   const lockTexts: string[] = [];
-  for (const lock of [join(buildDir, 'pnpm-lock.yaml'), join(neuralisDir, '..', 'pnpm-lock.yaml')]) {
+  for (const lock of [join(buildDir, 'pnpm-lock.yaml'), join(host, '..', 'pnpm-lock.yaml')]) {
     if (existsSync(lock)) lockTexts.push(await readFile(lock, 'utf-8'));
   }
   const unrouted = unroutedPrivateScopes({ lockTexts, manifests: [manifest], npmrcText, record });
@@ -270,10 +279,10 @@ async function privateScopeProblems(name: string, manifest: object): Promise<str
  * cannot run here — the runtime provider is not built in this tree — that is a
  * warning, not a refusal: the image build runs the same check and fails on it.
  */
-async function admissionProblems(name: string, root: string): Promise<string[]> {
-  const nm = join(neuralisDir, 'node_modules');
+async function admissionProblems(host: string, name: string, root: string): Promise<string[]> {
+  const nm = join(host, 'node_modules');
   try {
-    const hostManifest = JSON.parse(await readFile(hostPackageJsonPath(), 'utf-8')) as unknown;
+    const hostManifest = JSON.parse(await readFile(hostPackageJsonPath(host), 'utf-8')) as unknown;
     const provider = runtimeProviderRoot(hostManifest, (dep: string) => realpathSync(join(nm, dep)));
     if (!provider) throw new Error('no dependency provides the runtime contract');
     const [result] = await validatePackageRoots([root], provider, realpathSync(join(nm, '@neuralis', 'package-system')));
@@ -287,10 +296,12 @@ async function admissionProblems(name: string, root: string): Promise<string[]> 
 // ── Commands ──────────────────────────────────────────────────────
 
 async function addPackage(
+  ctx: CliContext,
   name: string,
   mode: { path?: string; tarball?: string; version?: string },
 ): Promise<void> {
-  const pkgJsonPath = hostPackageJsonPath();
+  const host = ctx.installDir;
+  const pkgJsonPath = hostPackageJsonPath(host);
   const content = await readFile(pkgJsonPath, 'utf-8');
   const deps = readDependencies(content);
 
@@ -298,7 +309,7 @@ async function addPackage(
     console.log(`${warn} "${name}" is already in dependencies (${deps[name]}). Remove it first to change the spec.`);
     // Re-affirming an existing dependency re-records it: a builtin that arrived
     // before this record existed grants its defaults to existing projects too.
-    const existing = await readDependencyManifest(name, deps[name]);
+    const existing = await readDependencyManifest(host, name, deps[name]);
     if (existing === null || (existing.neuralis && existing.neuralis.referenceOnly !== true)) {
       await recordAddition(name);
       console.log(`${ok} Its default role grants reach every existing project once at the next boot ${c.dim}(a grant an owner revoked by hand comes back — revoke it again in Admin → Roles)${c.reset}.`);
@@ -309,9 +320,9 @@ async function addPackage(
   let spec: string;
   let manifest: DepManifest | null = null;
   if (mode.path) {
-    const dir = resolve(mode.path);
+    const dir = resolve(ctx.cwd, mode.path);
     if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-      fails([`Not a directory: ${dir} (resolved from ${process.cwd()}; pass an ABSOLUTE host path)`]);
+      fails([`Not a directory: ${dir} (resolved from ${ctx.cwd}; pass an ABSOLUTE host path)`]);
       return;
     }
     manifest = await readManifest(dir);
@@ -327,14 +338,14 @@ async function addPackage(
     const registered = new Map(
       listLocalSources({ dependencies: deps })
         .filter((s) => s.kind === 'dir')
-        .map((s) => [resolve(neuralisDir, s.path), s.name] as const),
+        .map((s) => [resolve(host, s.path), s.name] as const),
     );
     const { problems } = prepareLocalManifest(manifest, { name, kind: 'dir', hostPackageDir: dir, registered });
     if (fails([...problems, ...filesWhitelistProblems(manifest, dir).map((p) => `${name}: ${p}`)])) return;
-    if (fails(await privateScopeProblems(name, manifest))) return;
-    if (fails(await admissionProblems(name, dir))) return;
+    if (fails(await privateScopeProblems(host, name, manifest))) return;
+    if (fails(await admissionProblems(host, name, dir))) return;
   } else if (mode.tarball) {
-    const tgz = resolve(mode.tarball);
+    const tgz = resolve(ctx.cwd, mode.tarball);
     if (!existsSync(tgz) || !statSync(tgz).isFile() || !tgz.endsWith('.tgz')) {
       fails([`Not a .tgz file: ${tgz}`]);
       return;
@@ -345,10 +356,10 @@ async function addPackage(
       return;
     }
     if (fails(prepareLocalManifest(manifest, { name, kind: 'tgz', hostPackageDir: dirname(tgz), registered: new Map() }).problems)) return;
-    if (fails(await privateScopeProblems(name, manifest))) return;
+    if (fails(await privateScopeProblems(host, name, manifest))) return;
     const unpacked = unpackTarball(tgz, join(tmpdir(), 'neuralis-pkg-add'));
     try {
-      if (fails(await admissionProblems(name, unpacked.root))) return;
+      if (fails(await admissionProblems(host, name, unpacked.root))) return;
     } finally {
       unpacked.cleanup();
     }
@@ -358,8 +369,8 @@ async function addPackage(
       fails([`--version takes an EXACT version (e.g. 1.4.2), not "${mode.version}" — the image installs through the lock, and a range would float past what you vetted.`]);
       return;
     }
-    if (fails(await privateScopeProblems(name, { dependencies: { [name]: mode.version } }))) return;
-    if (fails(await registryProblems(name))) return;
+    if (fails(await privateScopeProblems(host, name, { dependencies: { [name]: mode.version } }))) return;
+    if (fails(await registryProblems(host, name))) return;
     spec = mode.version;
   } else {
     fails(['One of --path <dir>, --tarball <x.tgz> or --version <x.y.z> is required.']);
@@ -367,7 +378,7 @@ async function addPackage(
   }
 
   if (spec.startsWith('file:') && listLocalSources({ dependencies: deps }).length >= LOCAL_SOURCE_SLOTS) {
-    fails([`the image build takes at most ${LOCAL_SOURCE_SLOTS} local packages — remove one first (pnpm neuralis:pkg remove <name>).`]);
+    fails([`the image build takes at most ${LOCAL_SOURCE_SLOTS} local packages — remove one first (${spell('pkg remove <name>', ctx)}).`]);
     return;
   }
 
@@ -383,14 +394,19 @@ async function addPackage(
     await recordAddition(name);
     console.log(`${ok} Its default role grants reach every existing project once at the next boot that carries it ${c.dim}(new projects get them at creation)${c.reset}.`);
   }
-  printTrustNotice(name, spec);
+  const folder = operatorDependencies(JSON.parse(updated)) !== null;
+  printTrustNotice(name, spec, folder);
   printUiLaneNotice(manifest);
 
-  console.log(`${c.cyan}Next step:${c.reset} ${c.bold}pnpm neuralis:rebuild${c.reset} ${c.dim}— installs it into the image as node_modules/${name}${c.reset}`);
+  console.log(
+    `${c.cyan}Next step:${c.reset} ${c.bold}${spell('rebuild', ctx)}${c.reset} ${c.dim}— ` +
+      (folder ? `builds this install's own image: the release image plus its operator packages, ${name} among them` : `installs it into the image as node_modules/${name}`) +
+      c.reset,
+  );
   if (mode.path) {
-    console.log(`  ${c.dim}Then, to edit it live: ${c.reset}${c.bold}pnpm neuralis:mount add ${mode.path} --pkg ${name}${c.reset}${c.dim} (binds the folder over that`);
-    console.log(`  installed copy) and ${c.reset}${c.bold}pnpm neuralis:sync ${name}${c.reset}${c.dim} after each edit (builds it in its folder).${c.reset}`);
-  } else if (mode.version) {
+    console.log(`  ${c.dim}Then, to edit it live: ${c.reset}${c.bold}${spell(`mount add ${mode.path} --pkg ${name}`, ctx)}${c.reset}${c.dim} (binds the folder over that`);
+    console.log(`  installed copy) and ${c.reset}${c.bold}${spell(`sync ${name}`, ctx)}${c.reset}${c.dim} after each edit (builds it in its folder).${c.reset}`);
+  } else if (mode.version && !folder) {
     // A private scope's fresh release is the operator's own: lift the one-day
     // `minimumReleaseAge` for that scope only, on this command line.
     const npmrc = process.env.NEURALIS_BUILD_NPMRC?.trim();
@@ -503,22 +519,23 @@ function printLeftovers(name: string, manifest: DepManifest | null): void {
   }
 }
 
-async function removePackage(name: string): Promise<void> {
-  const pkgJsonPath = hostPackageJsonPath();
+async function removePackage(ctx: CliContext, name: string): Promise<void> {
+  const host = ctx.installDir;
+  const pkgJsonPath = hostPackageJsonPath(host);
   const content = await readFile(pkgJsonPath, 'utf-8');
   const spec = readDependencies(content)[name];
 
   const updated = removeDependencyLine(content, name);
   if (updated === null || spec === undefined) {
-    console.log(`${warn} "${name}" is not in neuralis/package.json#dependencies.`);
+    console.log(`${warn} "${name}" is not in ${trustList(operatorDependencies(JSON.parse(content)) !== null)}.`);
     return;
   }
   // Read BEFORE the line goes: the next image no longer carries the package, so
   // this is the last moment its provided features are knowable.
-  const manifest = await readDependencyManifest(name, spec);
+  const manifest = await readDependencyManifest(host, name, spec);
   assertValidJson(updated, `Removing "${name}"`);
   await writeFile(pkgJsonPath, updated, 'utf-8');
-  console.log(`${ok} Removed "${name}" from neuralis/package.json#dependencies.`);
+  console.log(`${ok} Removed "${name}" from ${trustList(operatorDependencies(JSON.parse(updated)) !== null)}.`);
 
   // Only what the package's own manifest GRANTS by default is revoked — the
   // grants the platform wrote for it; a package with none leaves no record.
@@ -540,30 +557,38 @@ async function removePackage(name: string): Promise<void> {
     console.log(`${warn} Its manifest is not readable here, so no role grant can be revoked automatically — an owner revokes them in Admin → Roles.`);
   }
 
-  const override = join(neuralisDir, 'docker-compose.override.yml');
+  const override = join(host, 'docker-compose.override.yml');
   const overrideText = existsSync(override) ? await readFile(override, 'utf-8') : '';
-  const hasMount = packageBindHostPath(overrideText, name) !== null || overrideText.includes(`NEURALIS_PKG_LINKS=`) && overrideText.includes(`${name}:`);
-  if (hasMount) {
-    const res = spawnSync(process.execPath, ['--import', 'tsx', join(neuralisDir, 'scripts', 'mount.mts'), 'remove', '--pkg', name], {
-      cwd: neuralisDir,
-      stdio: 'inherit',
+  if (packageBindHostPath(overrideText, name) !== null) {
+    // The mount verb, in-process through the same boundary — never a second CLI run.
+    const { run: mount } = await import('./mount.mts');
+    const status = await mount(['remove', '--pkg', name], ctx).catch((err: unknown) => {
+      console.log(`${warn} ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
     });
-    if (res.status !== 0) console.log(`${warn} The --pkg mount could not be removed — run: pnpm neuralis:mount remove --pkg ${name}`);
+    if (status !== 0) console.log(`${warn} The --pkg mount could not be removed — run: ${spell(`mount remove --pkg ${name}`, ctx)}`);
   }
 
   printLeftovers(name, manifest);
   console.log('');
-  console.log(`${c.cyan}Next step:${c.reset} ${c.bold}pnpm neuralis:rebuild${c.reset} ${c.dim}— the image without it; the grant revocation runs at that boot.${c.reset}`);
+  console.log(`${c.cyan}Next step:${c.reset} ${c.bold}${spell('rebuild', ctx)}${c.reset} ${c.dim}— the image without it; the grant revocation runs at that boot.${c.reset}`);
 }
 
-async function listPackages(): Promise<void> {
-  const content = await readFile(hostPackageJsonPath(), 'utf-8');
+async function listPackages(host: string): Promise<void> {
+  const content = await readFile(hostPackageJsonPath(host), 'utf-8');
   const deps = readDependencies(content);
 
+  // An install folder's every line but `neuralis` is the operator's own: a
+  // registry one is installed only in the derived image, so its manifest is
+  // not readable here and it is listed as registered, never dropped.
+  const operator = operatorDependencies(JSON.parse(content));
   const rows: Array<{ name: string; spec: string; status: string }> = [];
-  for (const [name, spec] of Object.entries(deps)) {
-    const manifest = await readDependencyManifest(name, spec);
-    if (!manifest?.neuralis) continue;
+  for (const [name, spec] of Object.entries(operator ?? deps)) {
+    const manifest = await readDependencyManifest(host, name, spec);
+    if (!manifest?.neuralis) {
+      if (operator) rows.push({ name, spec, status: manifest ? `${c.yellow}no neuralis block${c.reset}` : `${c.dim}registered (read at the image build)${c.reset}` });
+      continue;
+    }
     const status = manifest.neuralis.referenceOnly === true ? `${c.dim}reference-only${c.reset}` : `${c.green}builtin-class${c.reset}`;
     rows.push({ name, spec, status });
   }
@@ -572,7 +597,7 @@ async function listPackages(): Promise<void> {
     console.log(`${warn} No builtin-class (neuralis-block) dependencies found.`);
     return;
   }
-  console.log(`${c.bold}Builtin-class dependencies (neuralis/package.json):${c.reset}`);
+  console.log(`${c.bold}${operator ? 'Operator packages (package.json):' : 'Builtin-class dependencies (neuralis/package.json):'}${c.reset}`);
   for (const r of rows) {
     console.log(`  ${r.status}  ${c.cyan}${r.name}${c.reset} ${c.dim}${r.spec}${c.reset}`);
   }
@@ -584,19 +609,19 @@ function printUsage(): void {
   console.log(`${c.bold}neuralis pkg — builtin-class package registration (the admin trust act)${c.reset}
 
 Usage:
-  pnpm neuralis:pkg add <name> --path <abs-host-dir>   a folder you develop (file: dep; ABSOLUTE path)
-  pnpm neuralis:pkg add <name> --tarball <x.tgz>       a packed package (file: dep)
-  pnpm neuralis:pkg add <name> --version <x.y.z>       a registry package, exact version
-  pnpm neuralis:pkg remove <name>
-  pnpm neuralis:pkg list
+  ${spell('pkg add <name> --path <abs-host-dir>')}   a folder you develop (file: dep; ABSOLUTE path)
+  ${spell('pkg add <name> --tarball <x.tgz>')}       a packed package (file: dep)
+  ${spell('pkg add <name> --version <x.y.z>')}       a registry package, exact version
+  ${spell('pkg remove <name>')}
+  ${spell('pkg list')}
 
-Then: pnpm neuralis:rebuild
+Then rebuild: ${spell('rebuild')}
 `);
 }
 
-async function main(): Promise<void> {
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
   const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
+    args: argv,
     allowPositionals: true,
     options: {
       path: { type: 'string' },
@@ -609,36 +634,24 @@ async function main(): Promise<void> {
   const [command, name] = positionals;
   if (values.help || !command) {
     printUsage();
-    return;
+    return 0;
   }
 
   if (command === 'list') {
-    await listPackages();
-    return;
+    await listPackages(ctx.installDir);
+    return 0;
   }
-  if (!name) {
-    console.log(`${fail} Package name required (e.g. @acme/demo).`);
-    process.exitCode = 1;
-    return;
-  }
+  if (!name) throw new CliExit(1, 'Package name required (e.g. @acme/demo).');
   const modes = [values.path, values.tarball, values.version].filter(v => v !== undefined);
-  if (command === 'add' && modes.length > 1) {
-    console.log(`${fail} --path, --tarball and --version are mutually exclusive.`);
-    process.exitCode = 1;
-    return;
-  }
+  if (command === 'add' && modes.length > 1) throw new CliExit(1, '--path, --tarball and --version are mutually exclusive.');
 
   if (command === 'add') {
-    await addPackage(name, { path: values.path, tarball: values.tarball, version: values.version });
+    await addPackage(ctx, name, { path: values.path, tarball: values.tarball, version: values.version });
   } else if (command === 'remove') {
-    await removePackage(name);
+    await removePackage(ctx, name);
   } else {
     printUsage();
-    process.exitCode = 1;
+    return 1;
   }
+  return 0;
 }
-
-main().catch(err => {
-  console.error(`${fail} ${err instanceof Error ? err.message : String(err)}`);
-  process.exitCode = 1;
-});

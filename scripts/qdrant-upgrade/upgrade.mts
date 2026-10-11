@@ -46,6 +46,7 @@ import {
   writeQdrantState,
   type QdrantState,
 } from '../setup/qdrantVersion.mts';
+import { spell } from '../cli/spelling.mts';
 
 // ── Ports ──────────────────────────────────────────────────────
 
@@ -134,8 +135,10 @@ export type BaseContext = {
 };
 
 export type UpgradeContext = BaseContext & {
-  /** The host folder: compose cwd (never `-f`) and setup's location. */
+  /** The install folder: the compose cwd (never `-f`). */
   neuralisDir: string;
+  /** The host package: its `bin/neuralis.mjs` regenerates compose through the one CLI. */
+  packageDir: string;
   composeProject: string;
   /** Rehearsal: a CLONED volume; nothing live is touched. */
   rehearseVolume: string | null;
@@ -225,7 +228,7 @@ export function abortActiveRun(): string | null {
     writeFileSync(join(dir, 'record.json'), JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
   } catch { /* the line below still names the dir */ }
   const hop = lastCompletedHop ? `last completed hop ${lastCompletedHop}` : 'no hop completed';
-  const rollback = `pnpm neuralis:qdrant-upgrade${run.rehearseVolume ? ` --rehearse ${run.rehearseVolume}` : ''} --rollback ${dir}`;
+  const rollback = `${spell('qdrant-upgrade')}${run.rehearseVolume ? ` --rehearse ${run.rehearseVolume}` : ''} --rollback ${dir}`;
   if (run.rehearseVolume) {
     return storageChanged
       ? `ABORTED: the clone ${run.rehearseVolume} may be partly upgraded (${hop}). Restore it with: ${rollback}`
@@ -795,7 +798,7 @@ function nextState(version: string, previous: string, source: QdrantState['sourc
 
 async function regenerateCompose(ctx: UpgradeContext): Promise<void> {
   // Through setup's own generator — the compose file is never hand-edited.
-  const res = await ctx.exec(process.execPath, ['--import', 'tsx', 'scripts/setup.mts', '--compose-only'], { cwd: ctx.neuralisDir });
+  const res = await ctx.exec(process.execPath, [join(ctx.packageDir, 'bin', 'neuralis.mjs'), 'setup', '--compose-only'], { cwd: ctx.neuralisDir });
   if (res.code !== 0) throw new Error(`Regenerating compose failed: ${res.err.trim() || res.out.trim()}`);
 }
 

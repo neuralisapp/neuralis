@@ -57,6 +57,7 @@ function merge(p: ProjectRecord, patch: ReturnType<typeof revokeGrantsPatch>): P
     ...p,
     roles: patch.roles ?? p.roles,
     appliedPackageGrants: patch.appliedPackageGrants ?? p.appliedPackageGrants,
+    packageGrantFeatures: patch.packageGrantFeatures ?? p.packageGrantFeatures,
   };
 }
 
@@ -181,3 +182,27 @@ describe('applyGrantsPatch — merge-once and the reinstall path', () => {
     expect(patch?.roles?.member.grantedFeatures).toEqual(['pkg.read']);
   });
 });
+
+ it('instance removal revokes only automatically added provenance, preserving manual and sibling-backed features', () => {
+   const id = 'packages://one?project=p&scope=project';
+   const p = project({ roles: { member: role({ grantedFeatures: ['manual'] }) } });
+   const apply = applyGrantsPatch(p, id, '1', { member: ['manual', 'automatic', 'shared'] }, new Set(['manual', 'automatic', 'shared']), () => true);
+   const current = merge(p, apply);
+   expect(current.packageGrantFeatures?.[id]?.member).toEqual(['automatic', 'shared']);
+   const patch = revokeGrantsPatch(current, id, new Set(['manual', 'automatic']));
+   expect(patch?.roles?.member.grantedFeatures).toEqual(['manual', 'shared']);
+   expect(patch?.packageGrantFeatures?.[id]).toBeUndefined();
+ });
+
+ it('sequential sibling removals retain a package-origin claim until the final provider, excluding a manual grant', () => {
+   const a = 'packages://a?project=p&scope=project';
+   const b = 'packages://b?project=p&scope=project';
+   const base = project({ roles: { member: role({ grantedFeatures: ['manual'] }) } });
+   const first = merge(base, applyGrantsPatch(base, a, '1', { member: ['manual', 'shared'] }, new Set(['manual', 'shared']), () => true));
+   const both = merge(first, applyGrantsPatch(first, b, '1', { member: ['manual', 'shared'] }, new Set(['manual', 'shared']), () => true));
+   expect(both.packageGrantFeatures?.[b]?.member).toEqual(['shared']);
+   const withoutA = merge(both, revokeGrantsPatch(both, a, new Set(['shared'])));
+   expect(withoutA.roles.member.grantedFeatures).toEqual(['manual', 'shared']);
+   const final = revokeGrantsPatch(withoutA, b, new Set(['manual', 'shared']));
+   expect(final?.roles?.member.grantedFeatures).toEqual(['manual']);
+ });

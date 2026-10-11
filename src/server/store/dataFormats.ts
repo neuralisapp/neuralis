@@ -19,10 +19,11 @@
  *    every declared kind and asserts none was left unclaimed: a missing
  *    declaration stops the boot, it never warns.
  *
- * `files` are RELATIVE to NEURALIS_HOME — what the checkpoint taken before a
- * kind is raised copies. Logs carry none (they are append-only and never
- * restored); the credential blobs and the master key ride only the credential
- * kind, so a raise of any other kind never copies a secret.
+ * `files` are RELATIVE to NEURALIS_HOME — where each kind's records live. The
+ * boot claim never raises a kind and never checkpoints (a kind above v1 is
+ * raised only by `pnpm neuralis:upgrade`, which checkpoints what its module's
+ * dry run names). Logs carry none; the credential blobs and the master key are
+ * named by the credential kind alone.
  *
  * The memo lives on `globalThis` + `Symbol.for`: Next loads this module in the
  * bootstrap graph and in every route graph, and a per-graph memo would claim
@@ -34,22 +35,26 @@ import {
   claimDataFormat,
   claimDeclared,
   declareDataFormats,
+  DataFormatClaimError,
   DataFormatNewerError,
+  type DataFormatClaimFailure,
   type DataFormatClaimReport,
   type DataFormatDeclaration,
 } from '@neuralis/package-system/data';
 import { dirname } from 'node:path';
 import { getEnv } from '../config/env';
-import { getPlatformConfigStore } from './PlatformConfigStore';
 
 /** Kind name → declaration. The version is the on-disk format this build reads and writes. */
 export const HOST_DATA_FORMATS = {
-  project: { kind: 'neuralis/project', version: 1, files: ['app/projects'] },
+  project: { kind: 'neuralis/project', version: 2, files: ['app/projects'], upgrade: { mode: 'offline', id: 'package-identity-v2' } },
   projectPurged: { kind: 'neuralis/project-purged', version: 1, files: ['app/projects-purged'] },
   user: { kind: 'neuralis/user', version: 1, files: ['app/users'] },
+  // v2: every blob opens under the key file + salt file alone (no NEXTAUTH_SECRET or static-salt
+  // fallback); raised by the `credential-key-v2` upgrade, whose dry run names any blob that does not.
   credential: {
     kind: 'neuralis/credential',
-    version: 1,
+    version: 2,
+    upgrade: { mode: 'offline', id: 'credential-key-v2' },
     files: [
       'app/credentials/global',
       'app/credentials/users',
@@ -75,10 +80,10 @@ export type HostDataFormat = (typeof HOST_DATA_FORMATS)[keyof typeof HOST_DATA_F
 declareDataFormats(Object.values(HOST_DATA_FORMATS));
 
 /** The operator command that puts a checkpoint back (host plane, app stopped). */
-export const CHECKPOINT_RESTORE_COMMAND = 'pnpm neuralis:checkpoint restore';
+export const CHECKPOINT_RESTORE_COMMAND = 'npx neuralis checkpoint restore';
 /** The same, inside the image (a pulled image has no host folder). */
 export const CHECKPOINT_RESTORE_DOCKER_COMMAND =
-  'docker compose run --rm --no-deps neuralis node --import tsx scripts/checkpoint.mts restore';
+  'docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore';
 
 type ClaimSlot = { boot?: Promise<DataFormatClaimReport> };
 const CLAIM_SLOT = Symbol.for('@neuralis/host:dataFormatClaim');
@@ -88,25 +93,12 @@ function claimSlot(): ClaimSlot {
   return (g[CLAIM_SLOT] ??= {});
 }
 
-function claimOptions(): { home: string; appRoot: string; checkpointKeep?: number } {
+function claimOptions(): { home: string; appRoot: string } {
   // The SAME roots every host store reads through (`getEnv()` caches
   // `resolveNeuralisHome()`), so the ledger always sits beside the records it
-  // guards. `getEnv()` also registers the host keys; reading one is a READ-ONLY
-  // file read — `get()` never rewrites `platform.json` (only `patch`/`removeOverride`
-  // write it), so it may precede the `neuralis/platform-config` claim.
+  // guards.
   const { appRoot } = getEnv();
-  const home = dirname(appRoot);
-  const config = getPlatformConfigStore(appRoot);
-  // Registered by `getEnv()` on every real host; a store whose env was never
-  // built (an isolated unit test) keeps every checkpoint instead of throwing.
-  const keep = config.getRegisteredSetting('dataCheckpointKeep') ? config.get('dataCheckpointKeep') : undefined;
-  // A hand-edited non-integer is not guessed at: the kernel then keeps every
-  // checkpoint (its documented "no retention" arm), which loses nothing.
-  return {
-    home,
-    appRoot,
-    ...(typeof keep === 'number' && Number.isInteger(keep) && keep >= 1 ? { checkpointKeep: keep } : {}),
-  };
+  return { home: dirname(appRoot), appRoot };
 }
 
 /**
@@ -125,6 +117,21 @@ export function describeDataFormatRefusal(error: unknown): unknown {
   return new Error(`Stored data is newer than this build: ${kinds}. Nothing was changed.${restore}`, {
     cause: error,
   });
+}
+
+/** The closed set of data-format refusal codes a public health answer may carry. */
+export type DataFormatRefusalCode = DataFormatClaimFailure | DataFormatNewerError['code'];
+
+/**
+ * The FIXED code of a data-format refusal (the raw claim error, or the
+ * newer-data refusal {@link describeDataFormatRefusal} wraps), or `null` for any
+ * other error. Never a kind, a version, a checkpoint id or a path — those stay
+ * in the operator log.
+ */
+export function dataFormatRefusalCode(error: unknown): DataFormatRefusalCode | null {
+  if (error instanceof DataFormatClaimError) return error.reason;
+  const newer = error instanceof Error && error.cause instanceof DataFormatNewerError ? error.cause : error;
+  return newer instanceof DataFormatNewerError ? newer.code : null;
 }
 
 /**

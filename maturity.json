@@ -77,7 +77,7 @@
       }
     ]
   },
-  "asOf": "2026-10-05",
+  "asOf": "2026-10-09",
   "pages": {
     "getting-started/maturity": {
       "form": "table"
@@ -278,14 +278,12 @@
       "id": "install-channels",
       "kind": "topic",
       "title": "Install channels",
-      "label": "preview",
-      "score": 50,
-      "gates": [
-        "G-c"
-      ],
-      "summary": "Neuralis is built to ship through npm create neuralis, a Docker image and a public host repository; none of the three is published today, so installs are built from source.",
+      "label": "beta",
+      "score": 70,
+      "gates": [],
+      "summary": "The Neuralis 0.2.0 beta is publicly available through npm create neuralis, the neuralisapp/neuralis Docker image and a validated history-free public host snapshot.",
       "limits": [
-        "No install channel is publicly available; installs are built from the source repository.",
+        "The 0.2.0 beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded.",
         "Native installs on Linux compile the terminal module and need python3, make and a C++ compiler."
       ]
     },
@@ -351,7 +349,7 @@
       "kind": "topic",
       "title": "Enterprise security and governance",
       "label": "stable",
-      "score": 85,
+      "score": 90,
       "gates": [],
       "summary": "Every request, from a person, an agent, a skill script, a scheduled run or an external MCP client, passes the same deny-by-default layers: one session identity, project membership, role and feature grants, path policy, package trust and audit.",
       "limits": [

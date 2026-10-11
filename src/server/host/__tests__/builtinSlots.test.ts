@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { selectBuiltinPackageIds, assignBuiltinTrust, type DepManifest } from '../builtinSlots';
+import { selectBuiltinPackageIds, assignBuiltinTrust, builtinDependencyLines, type DepManifest } from '../builtinSlots';
 import type { PackageDefinition } from '@neuralis/package-system/contracts';
 
 const FIXTURE_DEPS: Record<string, string> = {
@@ -88,6 +88,24 @@ describe('selectBuiltinPackageIds (discovery signal)', () => {
   it('the load-bearing comment on REFERENCE_ONLY_PACKAGE_IDS is present (R2 guard)', () => {
     const source = readFileSync(new URL('../builtinSlots.ts', import.meta.url), 'utf-8');
     expect(source).toMatch(/LOAD-BEARING \(R2\)/);
+  });
+});
+
+describe('builtinDependencyLines (which manifest lines discovery reads)', () => {
+  const hostPackage = { dependencies: { '@neuralis/agent-core': '0.2.0', '@neuralis/brain-core': '0.2.0', zod: '^3.0.0' } };
+  const unreachable = (): never => { throw new Error('the host package must not be read for the host manifest itself'); };
+
+  it('the host manifest itself is read as it is (the image, the clone, the monorepo)', () => {
+    const own = { dependencies: { '@neuralis/agent-core': 'workspace:*', '@acme/demo': 'file:/x' } };
+    expect(builtinDependencyLines(own, unreachable)).toEqual(own.dependencies);
+    expect(builtinDependencyLines({}, unreachable)).toEqual({});
+  });
+
+  it('an npm install folder reads the host package lines plus its own, never the host line — the derived image manifest', () => {
+    const folder = { dependencies: { neuralis: '0.2.0', '@acme/demo': '1.0.0' } };
+    const lines = builtinDependencyLines(folder, () => hostPackage);
+    expect(lines).toEqual({ ...hostPackage.dependencies, '@acme/demo': '1.0.0' });
+    expect(selectBuiltinPackageIds(lines, readFixtureManifest)).toEqual(['@acme/demo', '@neuralis/agent-core']);
   });
 });
 

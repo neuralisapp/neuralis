@@ -9,7 +9,7 @@
  *
  *   - `project.members` → OTHER members' emails
  *   - `project.roles`   → OTHER roles' `grantedFeatures` + `packageTrust` +
- *                         `packageAccessFeature` + `appliedPackageGrants`
+ *                         `packageAccessFeature` + `appliedPackageGrants` + `packageGrantFeatures`
  *   - `project.limits`  → OTHER members' `limits.spend.byUser` rows
  *
  * Two floors that are NOT feature-keyed:
@@ -104,6 +104,7 @@ export function toProjectView(project: ProjectRecord, caller: ProjectViewCaller)
     delete view.packageTrust;
     delete view.packageAccessFeature;
     delete view.appliedPackageGrants;
+    delete view.packageGrantFeatures;
   }
   return view;
 }

@@ -4,8 +4,8 @@ import { canReceivePackageGrant } from '../projects/access';
 import { getRuntime } from '../host/bootstrap';
 import { BUILTIN_PACKAGE_IDS } from '../host/bootstrap';
 import type { ResolvedPackageRecord } from './packageRecords';
-import { applyGrantsPatch, revokeGrantsPatch } from './reconcileBuiltinGrantChanges';
-import { getProjectById, updateProject } from '../store/ProjectStore';
+import { applyGrantsPatch } from './reconcileBuiltinGrantChanges';
+import { getProjectById, updateProject, removeDeletedPackageReferences } from '../store/ProjectStore';
 
 type RuntimeManagerState = {
   loader: RuntimeLoaderPort;
@@ -16,6 +16,7 @@ type RuntimeManagerState = {
 type SyncOptions = {
   invalidate?: boolean;
   reason?: SnapshotInvalidationReason;
+  confirmedDeleted?: readonly string[];
 };
 
 /** A package that failed to load/reload during a project sync. */
@@ -62,13 +63,7 @@ export class PackageRuntimeManager {
    */
   readonly #packageOwnerScope = new Map<string, Map<string, SourceScope>>();
 
-  /**
-   * Scope-namespaced loader id → RAW manifest id, per project. Parallel to
-   * `#packageOwnerScope`. Read via `getPackageManifestId` so a consumer can
-   * translate an admin override (keyed by the manifest id) against a namespaced
-   * registry id — the host advertise resolver (Axis 2) + the client snapshot
-   * base-access gate both need it. Rebuilt fresh each sync (a removed id drops out).
-   */
+  /** Runtime instance ID → authored npm name, retained for manifest/display metadata. */
   readonly #packageManifestId = new Map<string, Map<string, string>>();
 
   /**
@@ -176,16 +171,14 @@ export class PackageRuntimeManager {
     const affected = new Set<string>();
     const errors: PackageLoadError[] = [];
 
-    // Build the desired set keyed by the scope-NAMESPACED loader id. Two records
-    // sharing a namespaced id = the SAME (project, scope, manifest) declared by two
-    // sources (e.g. `_packages/foo` AND a project-scope `recognizesPackages` source
-    // also named `foo`) — surface it instead of the old silent last-writer-wins drop.
+    // Canonical IDs distinguish source roots and folders as well as owning scope.
+    // A repeated exact ID is conflicting inventory, never a second installation.
     const desired = new Map<string, ResolvedPackageRecord>();
     for (const record of records) {
       if (desired.has(record.packageId)) {
         errors.push({
           packageId: record.manifestId,
-          error: `Package id "${record.manifestId}" is declared by two sources in the same scope — keeping the first; rename one.`,
+          error: `Package instance "${record.packageId}" occurs twice — keeping the first.`,
         });
         continue;
       }
@@ -202,11 +195,15 @@ export class PackageRuntimeManager {
         const removedDef = state.loader.getStatus(prevId)?.definition;
         await state.loader.unload(prevId);
         this.#inputKey.delete(prevId);
-        if (removedDef) await this.#revokeFeatureGrants(state, projectId, prevId, removedDef);
+        if (options?.confirmedDeleted?.includes(prevId)) await this.#revokeFeatureGrants(state, projectId, prevId, removedDef);
         affected.add(prevId);
       } catch (err) {
         console.error(`[PackageRuntimeManager] Failed to unload project package ${prevId}:`, err);
       }
+    }
+
+    for (const deletedId of options?.confirmedDeleted ?? []) {
+      if (!previousIds.has(deletedId)) await this.#revokeFeatureGrants(state, projectId, deletedId);
     }
 
     // Load / reload desired project packages
@@ -288,41 +285,18 @@ export class PackageRuntimeManager {
    * ProjectRecord, and invokes the loader so WASM / MCP / declarative state
    * reflects the latest on-disk + config.
    */
-  reloadProjectPackage(projectId: string, slug: string): Promise<void> {
-    return this.#serialize(projectId, () => this.#reloadProjectPackageNow(projectId, slug));
+  async reloadProjectPackage(projectId: string, packageId: string): Promise<void> {
+    const { resolveProjectPackageInstance } = await import('./projectPackages');
+    const resolved = await resolveProjectPackageInstance(projectId, packageId);
+    if (!resolved) throw new Error('Package instance not found in project');
+    return this.#serialize(projectId, () => this.#reloadProjectPackageNow(projectId, resolved));
   }
 
-  async #reloadProjectPackageNow(projectId: string, slug: string): Promise<void> {
+  async #reloadProjectPackageNow(projectId: string, resolved: ResolvedPackageRecord): Promise<void> {
     const state = await this.#ensureCoreState();
 
-    // Lazy imports to avoid circular deps.
-    const [{ getProjectPackageScanner }, { resolveProjectRoot }, { getEnv }, { getLogger }, { toResolvedRecord }, { applyTrustOverrides }] = await Promise.all([
-      import('./ProjectPackageScanner'),
-      import('@neuralis/package-system/paths'),
-      import('../config/env'),
-      import('../logging/setup'),
-      import('./packageRecords'),
-      import('./projectPackages'),
-    ]);
-
-    const env = getEnv();
-    const logger = getLogger().child('project-packages');
-    const projectRoot = resolveProjectRoot(env.projectsRoot, projectId);
-    const scanner = getProjectPackageScanner(projectRoot, logger);
-    await scanner.scan();
-
-    const record = scanner.getPackage(slug);
-    if (!record) {
-      throw new Error(`Package "${slug}" not found in project "${projectId}"`);
-    }
-
-    // Default `_packages/` scanner ⇒ project scope; namespace the loader id so
-    // getStatus/reload/load and the maps all key on the SAME namespaced id. The
-    // admin trust override rides the ONE `applyTrustOverrides`.
-    const [resolved] = await applyTrustOverrides(projectId, [toResolvedRecord(record, projectId, { kind: 'project' })]);
     const runtimeId = resolved.packageId;
     const nextDefinition = resolved.definition;
-
     // `trusted` is the CEILING here — an admin override can never reach
     // `first-party`, which is host-assigned by source. That is what keeps the
     // first-party-only code runtimes (`node`, `mcp`) out of reach of a project
@@ -333,14 +307,14 @@ export class PackageRuntimeManager {
     if (current) {
       await state.loader.reload(
         nextDefinition,
-        record.packageRoot,
+        resolved.packageRoot,
         resolved.manifestId,
         resolved.ownerProjectId,
       );
     } else {
       await state.loader.load(
         nextDefinition,
-        record.packageRoot,
+        resolved.packageRoot,
         resolved.manifestId,
         resolved.ownerProjectId,
       );
@@ -349,14 +323,14 @@ export class PackageRuntimeManager {
     // The same input a sync compares — the next one skips this package.
     this.#inputKey.set(runtimeId, inputKeyOf(resolved));
 
-    // Track project ownership of the NAMESPACED id.
+    // Track project ownership of the canonical instance ID.
     const ids = this.#projectPackageIds.get(projectId) ?? new Set<string>();
     ids.add(runtimeId);
     this.#projectPackageIds.set(projectId, ids);
 
-    // R2b — project-scope owning scope + the manifest map, keyed by the namespaced id.
+    // Preserve the original source scope and authored name on an exact-instance reload.
     const scopeMap = this.#packageOwnerScope.get(projectId) ?? new Map<string, SourceScope>();
-    scopeMap.set(runtimeId, { kind: 'project' });
+    scopeMap.set(runtimeId, resolved.ownerScope ?? { kind: 'project' });
     this.#packageOwnerScope.set(projectId, scopeMap);
     const manifestMap = this.#packageManifestId.get(projectId) ?? new Map<string, string>();
     manifestMap.set(runtimeId, resolved.manifestId);
@@ -401,11 +375,7 @@ export class PackageRuntimeManager {
     return undefined;
   }
 
-  /**
-   * The RAW manifest id for a namespaced loader id within a project, or
-   * `undefined` (builtins / not loaded). Consumers translate an admin override
-   * (keyed by manifest id) against a namespaced registry id via this.
-   */
+  /** Authored npm name for a runtime instance; never mutable override authority. */
   getPackageManifestId(projectId: string, packageId: string): string | undefined {
     return this.#packageManifestId.get(projectId)?.get(packageId);
   }
@@ -501,35 +471,34 @@ export class PackageRuntimeManager {
   }
 
   /**
-   * On uninstall, revoke the package's provided features from every non-`'*'`
-   * role — but only features no OTHER currently-loaded package still provides
-   * (namespaced ids rarely collide, but this avoids stripping a shared feature).
-   * Clears the provenance marker so a later reinstall re-applies grants.
+   * Confirmed deletion clears exact-instance mutable provenance. Revocation
+   * retains builtin/same-project providers, current sibling claims and manual
+   * features; legacy grants without known provenance are preserved.
    */
   async #revokeFeatureGrants(
     state: RuntimeManagerState,
     projectId: string,
     packageId: string,
-    definition: PackageDefinition,
+    definition?: PackageDefinition,
   ): Promise<void> {
     try {
-      const provided = providedFeatureIds(definition.requires?.providesFeatures);
-      if (provided.length === 0 && !(await getProjectById(projectId))?.appliedPackageGrants?.[packageId]) return;
+      const project = await getProjectById(projectId);
+      const provided = [...new Set([...providedFeatureIds(definition?.requires?.providesFeatures), ...Object.values(project?.packageGrantFeatures?.[packageId] ?? {}).flat()])];
       // Features still backed by another loaded package must not be revoked.
       const stillProvided = new Set<string>();
       for (const def of state.loader.listLoaded()) {
-        if (def.id === packageId) continue;
+        if (def.id === packageId || (!BUILTIN_PACKAGE_IDS.has(def.id) && !this.#projectPackageIds.get(projectId)?.has(def.id))) continue;
         for (const f of providedFeatureIds(def.requires?.providesFeatures)) stillProvided.add(f);
       }
       const revoke = new Set(provided.filter((f) => !stillProvided.has(f)));
 
-      await updateProject(projectId, (p) => revokeGrantsPatch(p, packageId, revoke));
+      await removeDeletedPackageReferences(projectId, packageId, revoke);
     } catch {
       console.warn(`[PackageRuntimeManager] Failed to revoke feature grants for ${packageId}`);
     }
   }
 
-  /** Preserve the raw identity when reloading a scope-namespaced package. */
+  /** Preserve the authored npm identity when reloading a canonical instance. */
   #manifestIdOf(packageId: string): string | undefined {
     const projectId = this.#ownerProjectOf(packageId);
     return projectId ? this.#packageManifestId.get(projectId)?.get(packageId) : undefined;

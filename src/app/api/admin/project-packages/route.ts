@@ -19,7 +19,7 @@ import { hasPlatformFeatureInAnyProject } from '@/server/projects/access';
 import { listAllProjects } from '@/server/store/ProjectStore';
 import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
 import { getEnv } from '@/server/config/env';
-import { namespaceProjectPackageId } from '@neuralis/package-system/contracts';
+import { packageInstanceId } from '@neuralis/package-system/contracts';
 
 type AdminPackageRow = {
   projectId: string;
@@ -76,16 +76,20 @@ export async function GET(): Promise<NextResponse> {
       const manifest = await readManifest(pkgRoot);
       if (!manifest) continue;
 
-      const packageId = manifest.id ?? slug;
+      // The `_packages/<slug>` instance is `packages://<slug>` in project scope —
+      // the coordinates the default drop-zone scanner stamps. Trust overrides and
+      // the loader slot are both keyed by that exact instance, never the authored
+      // manifest name a sibling install may share.
+      let packageId: string;
+      try {
+        packageId = packageInstanceId({ originUri: `packages://${slug}`, projectId: project.id, scope: { kind: 'project' } });
+      } catch {
+        continue; // a directory name no instance URI can carry is never loaded either
+      }
       const manifestTrust = (manifest.access?.trust as AdminPackageRow['trust']) ?? 'untrusted';
-      const override = trustOverrides[packageId]; // trust key = manifest id (stable)
+      const override = trustOverrides[packageId];
       const effectiveTrust: AdminPackageRow['trust'] = override ?? manifestTrust;
-      // The loader slot is keyed by the scope-NAMESPACED id. This route reads only
-      // `{projectId}/_packages/` (project scope), so namespace with `{kind:'project'}`
-      // or the status would be stuck at 'loading' forever.
-      const loaderStatus = loader.getStatus(
-        namespaceProjectPackageId(project.id, { kind: 'project' }, packageId),
-      );
+      const loaderStatus = loader.getStatus(packageId);
 
       let status: AdminPackageRow['status'] = 'loading';
       if (loaderStatus?.status === 'partial') status = 'partial';

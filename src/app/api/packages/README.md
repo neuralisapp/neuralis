@@ -122,8 +122,10 @@ widgets/cards are served by an opaque route pair instead:
   `resolveVerifiedAgentScope` (the raw `x-agent-id` header is never an agent
   identity), resolves ONE exact caller-visible surface through the shared
   `resolveVisiblePackageSurface` predicate (the SAME ladder the snapshot
-  applies), resolves the entry path SERVER-side from the declared
-  `component.url`/`render.url` (an arbitrary app path can never be minted) and
+  applies), reads the root of the exact instance the project has ALREADY loaded (no
+  rescan on a widget open; a miss is a 404, because the package was just unloaded),
+  then the entry path SERVER-side from its declared `component.url`/`render.url`
+  (an arbitrary app path or a same-name sibling’s root can never be minted) and
   returns `{ handle, url }`. Every not-visible reason answers ONE uniform,
   non-enumerating 404. `PATCH { handle }` heartbeats (fresh full gate; loss ⇒
   revoke + 410); `DELETE { handle }` is the capability-reducing own close

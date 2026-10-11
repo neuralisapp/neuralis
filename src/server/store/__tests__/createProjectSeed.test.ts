@@ -1,22 +1,13 @@
 /**
- * B1 / R-4 — `createProject` is the SECOND writer of the manifest-derived admin
- * union, and it is the writer that must REFUSE.
+ * R-4 — `createProject` stamps the ONE role seed (`seedRolesForNewProject`),
+ * and it must REFUSE on a degenerate admin union.
  *
  * `DEFAULT_ROLES.admin.grantedFeatures` is built at module load from every
  * builtin manifest through a read that swallows ALL errors, over a builtin set
- * `NEURALIS_BUILTINS` can override for slim images. The migration's P4 fails
- * closed by HALTING (T16 in `roleGrantMigration.test.ts`) — correct there,
- * because the record it halts on already carried `'*'`.
- *
- * A NEW record is a different question, and R-4 measured why:
- *   - `ROLE_GRANT_REPAIRS` has no row at 12 or 13, and P4 only looks at wildcard
- *     holders, so a degenerate seed leaves `manager` / `member` / `viewer` at
- *     0/33, 0/19, 0/7 — permanently, with no later pass that revisits them;
- *   - `hasFeature`'s `'*'` arm matches `platform.*`, so a `'*'` seeded onto a
- *     record that never had a pre-D-C state hands that project's `admin`
- *     platform-tier power until the next healthy boot.
- *
- * So the seed writer now THROWS `ROLE_SEED_UNION_DEGENERATE` and persists
+ * `NEURALIS_BUILTINS` can override for slim images. R-4 measured why a seed
+ * from a degenerate union is permanent damage: `manager` / `member` / `viewer`
+ * land at 0/33, 0/19, 0/7 and nothing at runtime ever revisits a seeded
+ * record. So the create THROWS `ROLE_SEED_UNION_DEGENERATE` and persists
  * nothing. These tests pin both halves: the healthy path is stamped current,
  * and the degenerate path throws WITHOUT reaching the store. The
  * "nothing was written" assert is the actual floor — a throw that already wrote
@@ -36,6 +27,11 @@ const mocks = vi.hoisted(() => ({
   initProjectDirectory: vi.fn(),
 }));
 
+// A per-run root: the real data-format claim writes its ledger under `appRoot`, and a
+// FIXED path keeps that ledger across runs — a later build's format raise then reads
+// as "stored data predates this build" on every machine that ran the suite before.
+const TEST_ROOT = vi.hoisted(() => `/tmp/nrs-${process.pid}-${Math.random().toString(36).slice(2)}`);
+
 vi.mock('../FileStore', () => ({
   FileStore: class {
     put = mocks.put;
@@ -48,8 +44,8 @@ vi.mock('../FileStore', () => ({
 vi.mock('../../config/env', () => ({
   // Both roots: the id choice stats the project tree under `projectsRoot` too.
   getEnv: () => ({
-    appRoot: '/tmp/nrs-create-project-seed-test',
-    projectsRoot: '/tmp/nrs-create-project-seed-test/projects-data',
+    appRoot: TEST_ROOT,
+    projectsRoot: `${TEST_ROOT}/projects-data`,
   }),
 }));
 

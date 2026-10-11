@@ -18,10 +18,6 @@
  * Kept beside it: the `/mounts/<slug>` bind and its `NEURALIS_MOUNT_*` pair
  * (the data-source plane — a source rooted at the folder derives its host path
  * from that pair). The two binds point at the same host folder.
- *
- * An override written before this shape carried `NEURALIS_PKG_LINKS` (+ a
- * `NODE_PATH` fallback); `migrateLegacyPackageLinks` rewrites it on the next
- * `pnpm neuralis:mount` run, keeping every bind it can place.
  */
 
 /** Where a package's folder is bound inside the container. */
@@ -60,45 +56,4 @@ export function insertVolumeLines(content: string, lines: readonly string[]): st
   const match = content.match(VOLUMES_MARKER);
   if (!match) return null;
   return content.replace(match[0], `${match[0]}${lines.map((l) => `${l}\n`).join('')}`);
-}
-
-/**
- * Rewrite a `NEURALIS_PKG_LINKS` override to package binds: every
- * `<name>:<container-path>` entry whose container path is a bind of a host
- * folder gets that folder bound onto `/neuralis/node_modules/<name>` (+ the
- * mask); the links line and the `NODE_PATH` fallback go. An entry with no bind
- * to take the host folder from is reported and dropped — it pointed at nothing.
- */
-export function migrateLegacyPackageLinks(content: string): { content: string; migrated: string[]; dropped: string[] } {
-  const links = content.match(/^[ \t]*- NEURALIS_PKG_LINKS=(.*)\n?/m);
-  const nodePath = /^[ \t]*- NODE_PATH=\/neuralis\/node_modules[ \t]*\n?/m;
-  if (!links) return { content: content.replace(nodePath, ''), migrated: [], dropped: [] };
-
-  let next = content.replace(links[0], '').replace(nodePath, '');
-  const migrated: string[] = [];
-  const dropped: string[] = [];
-  for (const entry of links[1].split(',').map((s) => s.trim()).filter(Boolean)) {
-    const idx = entry.indexOf(':');
-    const name = idx > 0 ? entry.slice(0, idx).trim() : '';
-    const containerPath = idx > 0 ? entry.slice(idx + 1).trim() : '';
-    const bind = containerPath
-      ? next.match(new RegExp(`^\\s*- (.+):${escapeRegExp(containerPath)}\\s*$`, 'm'))
-      : null;
-    if (!name || !bind) {
-      dropped.push(entry);
-      continue;
-    }
-    if (packageBindHostPath(next, name) !== null) {
-      migrated.push(name);
-      continue;
-    }
-    const inserted = insertVolumeLines(next, packageBindLines(bind[1], name));
-    if (inserted === null) {
-      dropped.push(entry);
-      continue;
-    }
-    next = inserted;
-    migrated.push(name);
-  }
-  return { content: next, migrated, dropped };
 }

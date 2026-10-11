@@ -62,8 +62,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
 import {
   buildUnitText,
@@ -82,11 +83,10 @@ import {
   SANDBOXER_CONTAINER_PATH,
   SANDBOXER_SYSTEM_PATH,
   UNIT_NAME,
+  unitFilePath,
 } from './host-broker/helper.mts';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const NEURALIS_ROOT = resolve(HERE, '..');
-const REPO_ROOT = resolve(NEURALIS_ROOT, '..');
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 /**
  * Pinned to `host-broker/server.mjs` `BROKER_VERSION` by
  * `packages/agent-core/__tests__/hostBrokerProtocolVersion.test.ts` — the
@@ -116,11 +116,6 @@ function paths() {
   };
 }
 
-function unitFilePath(): string {
-  const base = process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
-  return join(base, 'systemd', 'user', `${UNIT_NAME}.service`);
-}
-
 function readUnit(): string | null {
   try {
     return readFileSync(unitFilePath(), 'utf-8');
@@ -136,19 +131,20 @@ function unitActive(): boolean {
 }
 
 /**
- * Locate the broker entrypoint. In the monorepo it is the package source; in a
- * deployed install it is the extracted tarball under `node_modules`. Both are
- * the SAME file — `host-broker/` is in the package `files[]` whitelist
- * precisely so the deployed layout has it (drop it and the host plane silently
- * disappears from every non-monorepo install).
+ * Locate the broker entrypoint: `host-broker/server.mjs` of the agent-core the
+ * host package resolves — the workspace source in the monorepo, the installed
+ * copy wherever npm put it (hoisted beside `node_modules/neuralis` in an install
+ * folder). `host-broker/` is in the package `files[]` whitelist precisely so
+ * every deployed layout has it (drop it and the host plane silently disappears).
  */
-function brokerEntry(): string | null {
-  const candidates = [
-    join(REPO_ROOT, 'packages', 'agent-core', 'host-broker', 'server.mjs'),
-    join(NEURALIS_ROOT, 'node_modules', '@neuralis', 'agent-core', 'host-broker', 'server.mjs'),
-    join(REPO_ROOT, 'node_modules', '@neuralis', 'agent-core', 'host-broker', 'server.mjs'),
-  ];
-  return candidates.find((p) => existsSync(p)) ?? null;
+function brokerEntry(packageDir: string): string | null {
+  try {
+    const manifest = createRequire(join(packageDir, 'package.json')).resolve('@neuralis/agent-core/package.json');
+    const entry = join(dirname(manifest), 'host-broker', 'server.mjs');
+    return existsSync(entry) ? entry : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -178,14 +174,14 @@ type ProbeModule = {
  * ONE probe implementation, imported from the broker package — a status screen
  * that disagrees with the broker's own readiness is worse than none.
  */
-async function probeModule(): Promise<ProbeModule | null> {
-  const entry = brokerEntry();
+async function probeModule(packageDir: string): Promise<ProbeModule | null> {
+  const entry = brokerEntry(packageDir);
   if (!entry) return null;
   return (await import(new URL('sandboxProbe.mjs', pathToFileURL(entry)).href)) as ProbeModule;
 }
 
-async function probeSandbox(bin: string): Promise<SandboxProbe & { describe: string }> {
-  const mod = await probeModule();
+async function probeSandbox(bin: string, packageDir: string): Promise<SandboxProbe & { describe: string }> {
+  const mod = await probeModule(packageDir);
   if (!mod) return { helper: false, abi: 0, seccomp: false, reason: 'helper_missing', describe: 'broker package not found' };
   const res = mod.probeSandboxHelper(bin);
   return { ...res, describe: mod.describeSandboxProbe(res.reason) };
@@ -289,7 +285,7 @@ const CEILING_TEMPLATE = {
   trustedSingleOperator: false,
 };
 
-async function cmdInit(): Promise<void> {
+async function cmdInit(args: string[], ctx: CliContext): Promise<void> {
   const p = paths();
   await mkdir(p.dir, { recursive: true, mode: 0o700 });
   await chmod(p.dir, 0o700);
@@ -320,14 +316,14 @@ async function cmdInit(): Promise<void> {
   }
 
   const helper = resolveSandboxer();
-  const sandbox = await probeSandbox(helper.path);
+  const sandbox = await probeSandbox(helper.path, ctx.packageDir);
   if (!sandbox.helper) {
     console.log(
       `\n  ${c.yellow}!${c.reset} the confinement helper is not usable at ${helper.path}\n` +
       `    (${sandbox.describe}).\n` +
       `    The host plane FAILS CLOSED without it — every host command is denied,\n` +
       `    for owners too. Install the image's own verified copy with:\n\n` +
-      `      ${c.cyan}pnpm neuralis:host-broker install${c.reset}\n`,
+      `      ${c.cyan}${spell('host-broker install')}${c.reset}\n`,
     );
   } else {
     console.log(`  ${c.green}✓${c.reset} confinement helper present (ABI ${sandbox.abi}, seccomp proven) at ${helper.path}`);
@@ -335,21 +331,22 @@ async function cmdInit(): Promise<void> {
 
   console.log(`\n${c.bold}Next steps${c.reset}`);
   console.log(`  1. Edit ${c.cyan}${p.ceiling}${c.reset} — it currently denies everything.`);
-  console.log(`  2. Start the broker:   ${c.cyan}pnpm neuralis:host-broker run${c.reset}`);
+  console.log(`  2. Start the broker:   ${c.cyan}${spell('host-broker run')}${c.reset}`);
   console.log(`     …or install the unit printed below.`);
-  console.log(`  3. Regenerate compose: ${c.cyan}pnpm neuralis:setup --compose-only${c.reset}`);
+  console.log(`  3. Regenerate compose: ${c.cyan}${spell('setup --compose-only')}${c.reset}`);
   console.log(`     (adds the read-only runtime-directory bind — ${c.bold}this bind is the real gate${c.reset})`);
   console.log(`  4. In the admin Config tab turn ON ${c.cyan}hostBrokerEnabled${c.reset} (the kill-switch)`);
   console.log(`     and grant ${c.cyan}exec.host${c.reset} / ${c.cyan}terminal.native${c.reset} to the roles that should reach the host.`);
 
-  if (created || process.argv.includes('--print-unit')) printUnit();
+  if (created || args.includes('--print-unit')) printUnit(ctx.packageDir);
 }
 
-function unitText(sandboxer: string): string {
+function unitText(sandboxer: string, packageDir: string): string {
   const p = paths();
   return buildUnitText({
     execPath: process.execPath,
-    entry: brokerEntry() ?? '<agent-core>/host-broker/server.mjs',
+    bin: join(packageDir, 'bin', 'neuralis.mjs'),
+    home: neuralisHome(),
     socket: p.socket,
     secret: p.secret,
     ceiling: p.ceiling,
@@ -358,23 +355,17 @@ function unitText(sandboxer: string): string {
   });
 }
 
-function printUnit(): void {
+function printUnit(packageDir: string): void {
   console.log(`\n${c.bold}systemd user unit${c.reset} ${c.dim}(${unitFilePath()})${c.reset}\n`);
-  console.log(`${c.dim}${unitText(resolveSandboxer().path)}${c.reset}`);
+  console.log(`${c.dim}${unitText(resolveSandboxer().path, packageDir)}${c.reset}`);
   console.log(`  ${c.cyan}systemctl --user daemon-reload && systemctl --user enable --now ${UNIT_NAME}${c.reset}\n`);
 }
 
-async function cmdRun(): Promise<void> {
+async function cmdRun(_args: string[], ctx: CliContext): Promise<number> {
   const p = paths();
-  const entry = brokerEntry();
-  if (!entry) {
-    console.error(`${c.red}✗${c.reset} broker entrypoint not found — is @neuralis/agent-core installed?`);
-    process.exit(2);
-  }
-  if (!existsSync(p.secret)) {
-    console.error(`${c.red}✗${c.reset} no secret at ${p.secret} — run \`pnpm neuralis:host-broker init\` first.`);
-    process.exit(2);
-  }
+  const entry = brokerEntry(ctx.packageDir);
+  if (!entry) throw new CliExit(2, 'broker entrypoint not found — is @neuralis/agent-core installed?');
+  if (!existsSync(p.secret)) throw new CliExit(2, `no secret at ${p.secret} — run \`${spell('host-broker init')}\` first.`);
   const child = spawn(process.execPath, [entry], {
     stdio: 'inherit',
     env: {
@@ -386,7 +377,7 @@ async function cmdRun(): Promise<void> {
       NEURALIS_HOST_BROKER_SANDBOXER: resolveSandboxer({ preferEnv: true }).path,
     },
   });
-  child.on('exit', (code) => process.exit(code ?? 0));
+  return await new Promise<number>((done) => child.on('exit', (code) => done(code ?? 0)));
 }
 
 // NAMED, not `typeof brokerHealth`. At the Promise type argument below the
@@ -444,18 +435,18 @@ async function readyz(timeoutMs = 1_500): Promise<BrokerHealth | null> {
 // The image's helper — the reference copy for install/upgrade and for drift
 // ---------------------------------------------------------------------------
 
-function composeProject(): string {
+function composeProject(installDir: string): string {
   try {
-    return composeProjectFromEnv(readFileSync(join(NEURALIS_ROOT, '.env'), 'utf-8'));
+    return composeProjectFromEnv(readFileSync(join(installDir, '.env'), 'utf-8'));
   } catch {
     return composeProjectFromEnv(null);
   }
 }
 
 /** The running app container's id (compose service `neuralis`), or null. */
-function runningContainerId(): string | null {
-  const res = spawnSync('docker', ['compose', '-p', composeProject(), 'ps', '-q', 'neuralis'], {
-    cwd: NEURALIS_ROOT, encoding: 'utf-8', timeout: 15_000,
+function runningContainerId(installDir: string): string | null {
+  const res = spawnSync('docker', ['compose', '-p', composeProject(installDir), 'ps', '-q', 'neuralis'], {
+    cwd: installDir, encoding: 'utf-8', timeout: 15_000,
   });
   if (res.error || res.status !== 0) return null;
   const id = res.stdout.trim().split('\n')[0]?.trim();
@@ -463,8 +454,8 @@ function runningContainerId(): string | null {
 }
 
 /** sha256 of the helper inside the running image, or null when no container runs / no docker. */
-function imageHelperSha(): string | null {
-  const id = runningContainerId();
+function imageHelperSha(installDir: string): string | null {
+  const id = runningContainerId(installDir);
   if (!id) return null;
   const res = spawnSync('docker', ['exec', id, 'sha256sum', SANDBOXER_CONTAINER_PATH], { encoding: 'utf-8', timeout: 15_000 });
   if (res.error || res.status !== 0) return null;
@@ -478,19 +469,19 @@ type Candidate = { path: string; origin: 'file' | 'image' | 'gcc' };
  * of the running image's binary, else a fresh `gcc` build from the source the
  * image builds from. Every path lands in the same selftest gate afterwards.
  */
-function obtainCandidate(dir: string, from: string | undefined): Candidate | { error: string } {
+function obtainCandidate(dir: string, from: string | undefined, ctx: CliContext): Candidate | { error: string } {
   const out = join(dir, 'nrs-sandboxer');
   if (from) {
     if (!existsSync(from)) return { error: `--from ${from}: no such file` };
     const cp = spawnSync('cp', ['-f', from, out]);
     return cp.status === 0 ? { path: out, origin: 'file' } : { error: `could not copy ${from}` };
   }
-  const id = runningContainerId();
+  const id = runningContainerId(ctx.installDir);
   if (id) {
     const cp = spawnSync('docker', ['cp', `${id}:${SANDBOXER_CONTAINER_PATH}`, out], { encoding: 'utf-8', timeout: 30_000 });
     if (!cp.error && cp.status === 0 && existsSync(out)) return { path: out, origin: 'image' };
   }
-  const source = join(NEURALIS_ROOT, 'docker', 'landlock-sandboxer.c');
+  const source = join(ctx.packageDir, 'docker', 'landlock-sandboxer.c');
   if (existsSync(source)) {
     const gcc = spawnSync('gcc', ['-static', '-O2', '-Wall', '-Wextra', '-o', out, source], { encoding: 'utf-8', timeout: 120_000 });
     if (!gcc.error && gcc.status === 0 && existsSync(out)) return { path: out, origin: 'gcc' };
@@ -498,7 +489,7 @@ function obtainCandidate(dir: string, from: string | undefined): Candidate | { e
   }
   return {
     error:
-      'no running app container to copy the helper from (start the stack, or `pnpm neuralis:rebuild`), ' +
+      `no running app container to copy the helper from (start the stack, or \`${spell('rebuild')}\`), ` +
       'no `gcc` to compile it, and no --from <file> given',
   };
 }
@@ -514,8 +505,7 @@ function obtainCandidate(dir: string, from: string | undefined): Candidate | { e
  * happens — no rename, no restart, exit ≠ 0. The old helper stays in place,
  * which the broker already reports as unusable if it is stale.
  */
-async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
-  const args = process.argv.slice(3);
+async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade', args: string[], ctx: CliContext): Promise<void> {
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(`--${name}`);
     return i >= 0 ? args[i + 1] : undefined;
@@ -536,22 +526,15 @@ async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
   const work = await mkdtemp(join(tmpdir(), 'nrs-sandboxer-'));
   let keepWork = false;
   try {
-    const candidate = obtainCandidate(work, flag('from'));
-    if ('error' in candidate) {
-      console.error(`  ${c.red}✗${c.reset} ${candidate.error}`);
-      process.exit(2);
-    }
+    const candidate = obtainCandidate(work, flag('from'), ctx);
+    if ('error' in candidate) throw new CliExit(2, candidate.error);
     await chmod(candidate.path, 0o755);
     console.log(`  ${c.green}✓${c.reset} helper obtained ${c.dim}(${candidate.origin === 'image' ? 'copied from the running image' : candidate.origin === 'gcc' ? 'compiled from docker/landlock-sandboxer.c' : `from ${flag('from')}`})${c.reset}`);
 
     // The gate. Same probe the broker's readiness uses — a helper that passes
     // here is one the broker will accept, and vice versa.
-    const proof = await probeSandbox(candidate.path);
-    if (!proof.helper) {
-      console.error(`  ${c.red}✗${c.reset} candidate REJECTED: ${proof.describe}`);
-      console.error(`    nothing was installed and the broker was not restarted.`);
-      process.exit(2);
-    }
+    const proof = await probeSandbox(candidate.path, ctx.packageDir);
+    if (!proof.helper) throw new CliExit(2, `candidate REJECTED: ${proof.describe}`, ['nothing was installed and the broker was not restarted.']);
     console.log(`  ${c.green}✓${c.reset} --selftest proves Landlock (ABI ${proof.abi}) AND the seccomp AF_UNIX/alt-ABI filter`);
 
     const candidateSha = sha256File(candidate.path);
@@ -569,9 +552,9 @@ async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
         console.log(`      ${candidate.path}`);
         console.log(`    Install it with:\n`);
         console.log(`      ${c.cyan}sudo install -m 0755 ${candidate.path} ${target.path}${c.reset}\n`);
-        console.log(`    then re-run ${c.cyan}pnpm neuralis:host-broker ${mode}${c.reset} to refresh the unit${mode === 'upgrade' ? ' and restart the broker' : ''}.`);
+        console.log(`    then re-run ${c.cyan}${spell(`host-broker ${mode}`)}${c.reset} to refresh the unit${mode === 'upgrade' ? ' and restart the broker' : ''}.`);
         console.log(`    ${c.dim}(A per-user copy instead: --user-local, which targets ~/.local/bin — note that a write ceiling covering your home then covers the helper too.)${c.reset}`);
-        process.exit(3);
+        throw new CliExit(3, `${dir} is not writable by this account — the verified helper is waiting at ${candidate.path}`);
       }
       await mkdir(dir, { recursive: true });
       const staged = `${target.path}.new`;
@@ -581,14 +564,15 @@ async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
       console.log(`  ${c.green}✓${c.reset} installed ${target.path} ${c.dim}(sha256 ${candidateSha.slice(0, 12)}…${installedSha ? `, was ${installedSha.slice(0, 12)}…` : ''})${c.reset}`);
     }
     if (target.source === 'system' && !unit) {
-      console.log(`  ${c.dim}no unit yet — \`pnpm neuralis:host-broker init\` prints one naming this path.${c.reset}`);
+      console.log(`  ${c.dim}no unit yet — \`${spell('host-broker init')}\` prints one naming this path.${c.reset}`);
     }
 
-    // Unit refresh (upgrade only): the sandboxer line, the entry path and the
-    // node binary may all have moved since the unit was written.
+    // Unit refresh (upgrade only): the sandboxer line, the bin path (it moves
+    // once, when a folder is converted to the npm layout) and the node binary
+    // may all have moved since the unit was written.
     let unitChanged = false;
     if (mode === 'upgrade' && unit && unit.includes('Description=Neuralis host broker')) {
-      const fresh = unitText(target.path);
+      const fresh = unitText(target.path, ctx.packageDir);
       if (fresh !== unit) {
         await writeFile(unitFilePath(), fresh, 'utf-8');
         spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
@@ -606,7 +590,7 @@ async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
     if (!decision.restart) {
       switch (decision.reason) {
         case 'install_mode':
-          if (unitActive()) console.log(`\n  ${c.yellow}!${c.reset} the broker unit is running the OLD helper until restarted: ${c.cyan}pnpm neuralis:host-broker upgrade${c.reset}`);
+          if (unitActive()) console.log(`\n  ${c.yellow}!${c.reset} the broker unit is running the OLD helper until restarted: ${c.cyan}${spell('host-broker upgrade')}${c.reset}`);
           break;
         case 'no_restart_flag':
           console.log(`\n  ${c.dim}--no-restart: the running broker keeps its current helper${unitChanged ? ' and unit' : ''} until you restart it.${c.reset}`);
@@ -615,31 +599,23 @@ async function cmdInstallOrUpgrade(mode: 'install' | 'upgrade'): Promise<void> {
           console.log(`\n  ${c.dim}no active ${UNIT_NAME} unit — if you run the broker in the foreground, restart that process now.${c.reset}`);
           break;
         case 'detached_running':
-          console.error(`\n  ${c.red}✗${c.reset} restart REFUSED: ${before?.detached?.running} detached host shell(s) still running — a restart kills them`);
-          console.error(`    (and a rebuild running as one would die mid-way). Wait, or re-run with ${c.cyan}--force${c.reset}.`);
-          process.exit(4);
+          throw new CliExit(4, `restart REFUSED: ${before?.detached?.running} detached host shell(s) still running — a restart kills them`, ['(and a rebuild running as one would die mid-way). Wait, or re-run with --force.']);
       }
       return;
     }
 
     console.log(`\n  ${c.yellow}!${c.reset} restarting ${UNIT_NAME} — every host terminal tab and detached host shell it owns ends now.`);
     const rs = spawnSync('systemctl', ['--user', 'restart', UNIT_NAME], { encoding: 'utf-8' });
-    if (rs.error || rs.status !== 0) {
-      console.error(`  ${c.red}✗${c.reset} systemctl restart failed: ${rs.stderr?.trim() || rs.error?.message}`);
-      process.exit(5);
-    }
+    if (rs.error || rs.status !== 0) throw new CliExit(5, `systemctl restart failed: ${rs.stderr?.trim() || rs.error?.message}`);
     let after: BrokerHealth | null = null;
     for (let i = 0; i < 20 && !after; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
       after = await readyz();
     }
-    if (!after) {
-      console.error(`  ${c.red}✗${c.reset} broker did not answer /readyz within 10 s after the restart — check \`journalctl --user -u ${UNIT_NAME}\``);
-      process.exit(5);
-    }
+    if (!after) throw new CliExit(5, `broker did not answer /readyz within 10 s after the restart — check \`journalctl --user -u ${UNIT_NAME}\``);
     const ok = after.ready === true && after.sandbox?.helper === true;
     console.log(`  ${ok ? `${c.green}✓` : `${c.red}✗`}${c.reset} broker restarted: protocol v${after.version ?? '?'}, ready=${after.ready}, helper=${after.sandbox?.helper}${after.reasons?.length ? ` (${after.reasons.join(', ')})` : ''}`);
-    if (!ok) process.exit(5);
+    if (!ok) throw new CliExit(5, 'the restarted broker is not ready');
   } finally {
     if (!keepWork) await rm(work, { recursive: true, force: true });
   }
@@ -655,14 +631,14 @@ type RequestsModule = {
 };
 
 /** The broker's own request module — ONE reader/writer for `requests.jsonl`. */
-async function requestsModule(): Promise<RequestsModule | null> {
-  const entry = brokerEntry();
+async function requestsModule(packageDir: string): Promise<RequestsModule | null> {
+  const entry = brokerEntry(packageDir);
   if (!entry) return null;
   return (await import(new URL('requests.mjs', pathToFileURL(entry)).href)) as RequestsModule;
 }
 
-async function pendingRequests(): Promise<ReturnType<RequestsModule['readCeilingRequests']>> {
-  const mod = await requestsModule();
+async function pendingRequests(packageDir: string): Promise<ReturnType<RequestsModule['readCeilingRequests']>> {
+  const mod = await requestsModule(packageDir);
   if (!mod) return [];
   return mod.readCeilingRequests(mod.requestsFileFor(paths().secret));
 }
@@ -687,50 +663,37 @@ async function ceilingExec(): Promise<string[]> {
  * restart, then drop the requests the grant satisfied. The ONLY writer of the
  * ceiling besides the operator's editor; the agent's side is the request.
  */
-async function cmdGrant(): Promise<void> {
-  const args = process.argv.slice(3);
+async function cmdGrant(args: string[], ctx: CliContext): Promise<void> {
   const grants: Array<{ list: CeilingList; dir: string }> = [];
   for (let i = 0; i < args.length; i += 1) {
     const m = /^--(exec|read|write)$/.exec(args[i] ?? '');
     if (!m) continue;
     const dir = args[i + 1];
-    if (!dir || dir.startsWith('--')) {
-      console.error(`${c.red}✗${c.reset} --${m[1]} needs a directory`);
-      process.exit(1);
-    }
-    grants.push({ list: m[1] as CeilingList, dir: resolve(dir) });
+    if (!dir || dir.startsWith('--')) throw new CliExit(1, `--${m[1]} needs a directory`);
+    grants.push({ list: m[1] as CeilingList, dir: resolve(ctx.cwd, dir) });
     i += 1;
   }
   if (grants.length === 0) {
-    console.error(
-      `usage: pnpm neuralis:host-broker grant --exec <dir> | --read <dir> | --write <dir>  (repeatable)\n` +
-      `  exec  : toolchain/runtime roots folded read-only into EVERY host spawn (e.g. ~/.nvm)\n` +
-      `  read  : a directory the caller may READ when it asks for it (the clamp)\n` +
-      `  write : a directory the caller may WRITE when it asks for it (also readable)\n` +
-      `  Pending requests: \`pnpm neuralis:host-broker status\`. This never grants by itself.`,
-    );
-    process.exit(1);
+    throw new CliExit(1, `usage: ${spell('host-broker grant --exec <dir> | --read <dir> | --write <dir>')}  (repeatable)`, [
+      'exec  : toolchain/runtime roots folded read-only into EVERY host spawn (e.g. ~/.nvm)',
+      'read  : a directory the caller may READ when it asks for it (the clamp)',
+      'write : a directory the caller may WRITE when it asks for it (also readable)',
+      `Pending requests: \`${spell('host-broker status')}\`. This never grants by itself.`,
+    ]);
   }
   for (const g of grants) {
-    if (!existsSync(g.dir)) {
-      console.error(`${c.red}✗${c.reset} ${g.dir} does not exist on this host`);
-      process.exit(2);
-    }
+    if (!existsSync(g.dir)) throw new CliExit(2, `${g.dir} does not exist on this host`);
   }
   const p = paths();
   let text: string;
   try {
     text = await readFile(p.ceiling, 'utf-8');
   } catch {
-    console.error(`${c.red}✗${c.reset} no ceiling at ${p.ceiling} — run \`pnpm neuralis:host-broker init\` first`);
-    process.exit(2);
+    throw new CliExit(2, `no ceiling at ${p.ceiling} — run \`${spell('host-broker init')}\` first`);
   }
   for (const g of grants) {
     const res = applyGrant(text, g.list, [g.dir]);
-    if (!res.ok) {
-      console.error(`${c.red}✗${c.reset} ${res.reason}`);
-      process.exit(2);
-    }
+    if (!res.ok) throw new CliExit(2, res.reason);
     text = res.text;
     console.log(res.added.length
       ? `  ${c.green}✓${c.reset} ${g.list.padEnd(5)} + ${g.dir}`
@@ -754,17 +717,17 @@ async function cmdGrant(): Promise<void> {
   } else {
     console.log(`  ${c.dim}· broker not reachable — the new ceiling loads at its next start (or SIGHUP)${c.reset}`);
   }
-  const mod = await requestsModule();
+  const mod = await requestsModule(ctx.packageDir);
   if (mod) {
     const pruned = mod.pruneSatisfiedRequests(mod.requestsFileFor(p.secret), await ceilingLists());
     if (pruned) console.log(`  ${c.dim}· ${pruned} pending request(s) satisfied and cleared${c.reset}`);
   }
 }
 
-async function cmdStatus(): Promise<void> {
+async function cmdStatus(_args: string[], ctx: CliContext): Promise<void> {
   const p = paths();
   const helper = resolveSandboxer();
-  const sandbox = await probeSandbox(helper.path);
+  const sandbox = await probeSandbox(helper.path, ctx.packageDir);
   const mark = (ok: boolean) => (ok ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`);
 
   let ceilingRoots = 0;
@@ -785,13 +748,13 @@ async function cmdStatus(): Promise<void> {
 
   // Drift: the image rebuilds the helper on every build; the host copy is
   // whatever `install`/`upgrade` last placed. Different bytes = run `upgrade`.
-  const imageSha = imageHelperSha();
+  const imageSha = imageHelperSha(ctx.installDir);
   const installedSha = existsSync(helper.path) ? sha256File(helper.path) : null;
   if (imageSha && installedSha) {
     if (imageSha === installedSha) {
       console.log(`  ${c.dim}· helper drift    none — host copy matches the running image (sha256 ${imageSha.slice(0, 12)}…)${c.reset}`);
     } else {
-      console.log(`  ${c.yellow}!${c.reset} helper drift    ${c.yellow}host copy differs from the running image — run \`pnpm neuralis:host-broker upgrade\`${c.reset}`);
+      console.log(`  ${c.yellow}!${c.reset} helper drift    ${c.yellow}host copy differs from the running image — run \`${spell('host-broker upgrade')}\`${c.reset}`);
     }
   } else {
     console.log(`  ${c.dim}· helper drift    unknown (${imageSha ? 'no host copy' : 'no running app container to compare with'})${c.reset}`);
@@ -837,9 +800,9 @@ async function cmdStatus(): Promise<void> {
       : `  ${c.dim}· detached shells DENIED — set "maxDetachedLifetimeMs" in the ceiling to allow background host shells${c.reset}`);
   }
   // Pending ceiling-widening requests — the agent's asks, waiting for `grant`.
-  const pending = await pendingRequests();
+  const pending = await pendingRequests(ctx.packageDir);
   if (pending.length) {
-    console.log(`  ${c.yellow}!${c.reset} requests        ${c.yellow}${pending.length} pending widening request(s) — answer with \`pnpm neuralis:host-broker grant --exec|--read|--write <dir>\`${c.reset}`);
+    console.log(`  ${c.yellow}!${c.reset} requests        ${c.yellow}${pending.length} pending widening request(s) — answer with \`${spell('host-broker grant --exec|--read|--write <dir>')}\`${c.reset}`);
     for (const r of pending.slice(0, 8)) {
       const roots = [...new Set([r.cwd, ...r.requestedRoots.read, ...r.requestedRoots.write])];
       console.log(`      ${c.dim}${r.list.padEnd(5)} ${roots.join(', ')}  ×${r.count}${r.reason ? `  — "${r.reason}"` : ''}${r.agentId ? `  [${r.projectId ?? '?'}/${r.agentId}]` : ''}${c.reset}`);
@@ -852,10 +815,11 @@ async function cmdStatus(): Promise<void> {
       console.log(`  ${c.dim}· suggested exec  toolchain roots not in the ceiling's exec (a host node/pnpm/cargo/CLI cannot start without them): ${missing.join(', ')}${c.reset}`);
     }
   }
-  console.log(`  ${mark(brokerEntry() !== null)} broker entry    ${c.dim}${brokerEntry() ?? 'not found'}${c.reset}`);
+  const entry = brokerEntry(ctx.packageDir);
+  console.log(`  ${mark(entry !== null)} broker entry    ${c.dim}${entry ?? 'not found'}${c.reset}`);
   console.log(
     `\n  ${c.dim}All seven ✓ rows must be green AND the compose binds must be present\n` +
-    `  (\`pnpm neuralis:setup --compose-only\`) before the host plane serves.\n` +
+    `  (\`${spell('setup --compose-only')}\`) before the host plane serves.\n` +
     `  An app/image rebuild does not restart this host-resident process — and it\n` +
     `  rebuilds the helper, so after a rebuild check the drift line and run \`upgrade\`.\n` +
     `  A ceiling with 0 roots denies every command by design.${c.reset}\n`,
@@ -890,8 +854,7 @@ async function cmdStatus(): Promise<void> {
  * host-root discovery suggestion, which is user-scoped for exactly this
  * blast radius.
  */
-async function cmdAttach(): Promise<void> {
-  const args = process.argv.slice(3);
+async function cmdAttach(args: string[]): Promise<void> {
   const arg = (name: string): string | undefined => {
     const i = args.indexOf(`--${name}`);
     return i >= 0 ? args[i + 1] : undefined;
@@ -904,21 +867,16 @@ async function cmdAttach(): Promise<void> {
   const projectScope = args.includes('--project-scope');
 
   if (!projectId || !root || (!user && !projectScope)) {
-    console.error(
-      `usage: pnpm neuralis:host-broker attach --project <id> --root <host-path> --user <your-user-id>\n` +
-      `                                        [--slug <name>] [--writable <sub-path>] [--project-scope]\n` +
-      `  --root           absolute HOST path the source is anchored at\n` +
-      `  --user           the user this source belongs to (DEFAULT scope — only they see it)\n` +
-      `  --slug           source name (default "hostfs"); the agent addresses it as "<slug>://"\n` +
-      `  --writable       repo-relative sub-path to grant write on (default: read+exec only)\n` +
-      `  --project-scope  share with the WHOLE project instead — see the warning it prints`,
-    );
-    process.exit(1);
+    throw new CliExit(1, `usage: ${spell('host-broker attach --project <id> --root <host-path> --user <your-user-id>')}`, [
+      '                                        [--slug <name>] [--writable <sub-path>] [--project-scope]',
+      '--root           absolute HOST path the source is anchored at',
+      '--user           the user this source belongs to (DEFAULT scope — only they see it)',
+      '--slug           source name (default "hostfs"); the agent addresses it as "<slug>://"',
+      '--writable       repo-relative sub-path to grant write on (default: read+exec only)',
+      '--project-scope  share with the WHOLE project instead — see the warning it prints',
+    ]);
   }
-  if (!root.startsWith('/')) {
-    console.error(`${c.red}✗${c.reset} --root must be an absolute host path.`);
-    process.exit(2);
-  }
+  if (!root.startsWith('/')) throw new CliExit(2, '--root must be an absolute host path.');
 
   const dir = join(neuralisHome(), 'app', 'config', 'sources', projectId);
   await mkdir(dir, { recursive: true });
@@ -961,23 +919,24 @@ async function cmdAttach(): Promise<void> {
   );
 }
 
-const cmd = process.argv[2] ?? 'status';
-const handlers: Record<string, () => Promise<void>> = {
+const handlers: Record<string, (args: string[], ctx: CliContext) => Promise<number | void>> = {
   init: cmdInit,
-  install: () => cmdInstallOrUpgrade('install'),
-  upgrade: () => cmdInstallOrUpgrade('upgrade'),
+  install: (args, ctx) => cmdInstallOrUpgrade('install', args, ctx),
+  upgrade: (args, ctx) => cmdInstallOrUpgrade('upgrade', args, ctx),
   run: cmdRun,
   status: cmdStatus,
   grant: cmdGrant,
-  attach: cmdAttach,
+  attach: (args) => cmdAttach(args),
 };
-const handler = handlers[cmd];
-if (!handler) {
-  console.error(
-    `usage: pnpm neuralis:host-broker <init|install|upgrade|run|status|grant|attach>\n` +
-    `  install|upgrade [--from <file>] [--target <path>|--user-local] [--no-restart] [--force]\n` +
-    `  grant --exec <dir> | --read <dir> | --write <dir>   (repeatable; atomic write + SIGHUP)`,
-  );
-  process.exit(1);
+
+export async function run(argv: string[], ctx: CliContext): Promise<number> {
+  const [cmd = 'status', ...args] = argv;
+  const handler = handlers[cmd];
+  if (!handler) {
+    throw new CliExit(1, `usage: ${spell('host-broker <init|install|upgrade|run|status|grant|attach>')}`, [
+      'install|upgrade [--from <file>] [--target <path>|--user-local] [--no-restart] [--force]',
+      'grant --exec <dir> | --read <dir> | --write <dir>   (repeatable; atomic write + SIGHUP)',
+    ]);
+  }
+  return (await handler(args, ctx)) ?? 0;
 }
-await handler();

@@ -8,7 +8,7 @@
 
 import * as fss from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { resolvePackageDefinitionFromRoot } from '@neuralis/agent-core';
 import { getFsWatchHub, type FsWatchHandle } from '@neuralis/package-system/data';
 import type { PackageDefinition } from '@neuralis/package-system/contracts';
@@ -36,10 +36,23 @@ export class ProjectPackageScanner {
   readonly #cache = new Map<string, ProjectPackageRecord>();
   readonly #logger: Logger;
 
+  #present: Set<string> | null = null;
+  #complete = false;
+  #missingWithReachableParent = false;
+
+  get scanComplete(): boolean { return this.#complete; }
+  get missingWithReachableParent(): boolean { return this.#missingWithReachableParent; }
+
+  /** Only a successfully listed source root can prove a child absent. */
+  isConfirmedDeleted(packageRoot: string): boolean {
+    return this.#present !== null && !this.#present.has(packageRoot);
+  }
+
   #watcher: FsWatchHandle | null = null;
   #rescanTimer: NodeJS.Timeout | null = null;
   #rescanPending: Promise<number> | null = null;
-  #onChangeCallback: (() => void) | null = null;
+  /** One change listener per project that scans this directory; a re-registration replaces. */
+  readonly #listeners = new Map<string, () => void>();
 
   /**
    * @param packagesDir Absolute root scanned for packages. The default
@@ -59,11 +72,18 @@ export class ProjectPackageScanner {
   // ---- Scan ---------------------------------------------------------------
 
   async scan(): Promise<number> {
+    this.#present = null;
+    this.#complete = false;
+    this.#missingWithReachableParent = false;
     let dirExists: boolean;
     try {
       const stat = await fs.stat(this.#packagesDir);
       dirExists = stat.isDirectory();
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        try { this.#missingWithReachableParent = (await fs.stat(dirname(this.#packagesDir))).isDirectory(); }
+        catch { this.#missingWithReachableParent = false; }
+      }
       dirExists = false;
     }
 
@@ -80,6 +100,8 @@ export class ProjectPackageScanner {
       return 0;
     }
 
+    if (hasPackageManifest(this.#packagesDir)) entries.unshift('');
+    this.#present = new Set([this.#packagesDir, ...entries.map((slug) => join(this.#packagesDir, slug))]);
     const seen = new Set<string>();
 
     // Resolve all packages in parallel
@@ -90,8 +112,8 @@ export class ProjectPackageScanner {
         let isDir: boolean;
         try {
           isDir = (await fs.stat(packageRoot)).isDirectory();
-        } catch {
-          isDir = false;
+        } catch (error) {
+          throw error;
         }
         if (!isDir) return null;
         if (!hasPackageManifest(packageRoot)) return null;
@@ -101,6 +123,7 @@ export class ProjectPackageScanner {
       }),
     );
 
+    this.#complete = results.every((result) => result.status === 'fulfilled');
     let count = 0;
     for (const result of results) {
       if (result.status !== 'fulfilled' || !result.value) continue;
@@ -157,19 +180,18 @@ export class ProjectPackageScanner {
 
   // ---- Watch --------------------------------------------------------------
 
-  startWatching(onChange?: () => void): void {
+  /**
+   * Register `projectId`'s change listener and hold ONE hub watcher for the
+   * directory however many projects scan it (a shared dir notifies each).
+   */
+  startWatching(projectId: string, onChange: () => void, options: { createRoot?: boolean } = {}): void {
+    this.#listeners.set(projectId, onChange);
     if (this.#watcher) return;
-    this.#onChangeCallback = onChange ?? null;
 
-    // Best-effort: a stale `recognizesPackages` source whose mount went away
-    // (dir absent AND its parent unwritable, e.g. `/mounts/x` after a `-V`
-    // rebuild dropped the override mounts) must NOT take down every
-    // package-snapshot route. The uncaught `mkdirSync` previously threw EACCES
-    // up through activation, 500-ing /api/packages/{runtime,widgets,dock,commands}
-    // + the agent-core overview. Degrade: log + skip this source's watcher;
-    // `scan()` already tolerates a missing dir (stat → return 0).
+    // Only the host-owned drop zone may be created. A missing source mount
+    // must remain unknown rather than becoming an empty, reachable directory.
     try {
-      if (!fss.existsSync(this.#packagesDir)) {
+      if (options.createRoot && !fss.existsSync(this.#packagesDir)) {
         fss.mkdirSync(this.#packagesDir, { recursive: true });
       }
     } catch (err) {
@@ -190,7 +212,7 @@ export class ProjectPackageScanner {
         this.#packagesDir,
         () => {
           this.rescan().then(() => {
-            this.#onChangeCallback?.();
+            for (const notify of this.#listeners.values()) notify();
           }).catch((err) => {
             this.#logger.warn('Watch-triggered rescan failed', { error: String(err) });
           });
@@ -215,6 +237,16 @@ export class ProjectPackageScanner {
     );
   }
 
+  /** Drop `projectId`'s listener; the last one out releases the hub watcher. */
+  async removeListener(projectId: string): Promise<void> {
+    this.#listeners.delete(projectId);
+    if (this.#listeners.size === 0) await this.stopWatching();
+  }
+
+  get listenerCount(): number {
+    return this.#listeners.size;
+  }
+
   async stopWatching(): Promise<void> {
     if (this.#watcher) {
       await this.#watcher.release();
@@ -224,7 +256,7 @@ export class ProjectPackageScanner {
       clearTimeout(this.#rescanTimer);
       this.#rescanTimer = null;
     }
-    this.#onChangeCallback = null;
+    this.#listeners.clear();
   }
 
   // ---- Accessors ----------------------------------------------------------

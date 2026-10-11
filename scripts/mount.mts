@@ -35,9 +35,10 @@
  */
 
 import { readFile, writeFile, access, readdir, unlink } from 'node:fs/promises';
+import { CliExit, type CliContext } from './cli/registry.mts';
+import { spell } from './cli/spelling.mts';
 import {
   insertVolumeLines,
-  migrateLegacyPackageLinks,
   packageBindHostPath,
   packageBindLines,
   packageBindTarget,
@@ -88,8 +89,8 @@ function sourceConfigDir(projectId: string): string {
   return join(resolveNeuralisHome(), 'app', 'config', 'sources', projectId);
 }
 
-function dockerComposePath(): string {
-  return join(import.meta.dirname, '..', 'docker-compose.yml');
+function dockerComposePath(installDir: string): string {
+  return join(installDir, 'docker-compose.yml');
 }
 
 // ── docker-compose.override.yml (machine-local, script-owned) ──────
@@ -104,15 +105,15 @@ function dockerComposePath(): string {
 // the indentation matches the base (volumes/environment at 4 spaces, list
 // items at 6) so the existing emit lines drop in unchanged.
 
-function dockerComposeOverridePath(): string {
-  return join(import.meta.dirname, '..', 'docker-compose.override.yml');
+function dockerComposeOverridePath(installDir: string): string {
+  return join(installDir, 'docker-compose.override.yml');
 }
 
 const OVERRIDE_TEMPLATE =
   `# ─────────────────────────────────────────────────────────────────────────\n` +
   `# GENERATED — docker-compose.override.yml — DO NOT HAND-EDIT, DO NOT COMMIT.\n` +
   `#\n` +
-  `# Machine-local filesystem mounts written by \`pnpm neuralis:mount\`. This file\n` +
+  `# Machine-local filesystem mounts written by \`neuralis mount\`. This file\n` +
   `# is gitignored AND dockerignored; Docker Compose auto-merges it onto the\n` +
   `# setup-generated docker-compose.yml, which stays mount-immutable and clean.\n` +
   `# Delete this file to remove ALL machine-local mounts at once.\n` +
@@ -120,46 +121,22 @@ const OVERRIDE_TEMPLATE =
   `services:\n` +
   `  neuralis:\n` +
   `    volumes:\n` +
-  `      # neuralis-mount-marker: \`pnpm neuralis:mount add\` inserts bind mounts below.\n` +
+  `      # neuralis-mount-marker: \`neuralis mount add\` inserts bind mounts below.\n` +
   `    environment:\n` +
-  `      # neuralis-env-mount-marker: \`pnpm neuralis:mount add\` appends NEURALIS_MOUNT_* below.\n`;
+  `      # neuralis-env-mount-marker: \`neuralis mount add\` appends NEURALIS_MOUNT_* below.\n`;
 
-/**
- * Read the override if present, otherwise return the empty skeleton template.
- * A pre-bind override (`NEURALIS_PKG_LINKS` + `NODE_PATH`) is migrated to package
- * binds on read and written back at once, so ANY mount command — `list`
- * included — upgrades it, with the change printed.
- */
-async function loadOverride(): Promise<string> {
-  let content: string;
+/** Read the override if present, otherwise return the empty skeleton template. */
+async function loadOverride(installDir: string): Promise<string> {
   try {
-    content = await readFile(dockerComposeOverridePath(), 'utf-8');
+    return await readFile(dockerComposeOverridePath(installDir), 'utf-8');
   } catch {
     return OVERRIDE_TEMPLATE;
   }
-  const { content: migrated, migrated: names, dropped } = migrateLegacyPackageLinks(content);
-  if (migrated !== content) {
-    for (const name of names) {
-      const hostPath = packageBindHostPath(migrated, name);
-      if (hostPath) ensureMaskMountpoint(hostPath);
-    }
-    await persistOverride(migrated);
-    const hostDeps = await hostDependencyNames();
-    for (const name of names) {
-      console.log(`${ok} Migrated the --pkg mount of ${name}: bound onto ${packageBindTarget(name)} (its own node_modules masked); NEURALIS_PKG_LINKS + NODE_PATH removed`);
-      if (!hostDeps.has(name)) {
-        console.log(`  ${c.dim}${name} is not a dependency of the host — the bind is inert until pnpm neuralis:pkg add ${name}${c.reset}`);
-      }
-    }
-    for (const entry of dropped) console.log(`${warn} Dropped NEURALIS_PKG_LINKS entry "${entry}" — no bind supplies its host folder`);
-    console.log(`  ${c.dim}Apply with: docker compose up -d neuralis${c.reset}`);
-  }
-  return migrated;
 }
 
 /** The host manifest's dependency names — a package bind only loads a package the host depends on. */
-async function hostDependencyNames(): Promise<Set<string>> {
-  const manifest = JSON.parse(await readFile(join(import.meta.dirname, '..', 'package.json'), 'utf-8')) as {
+async function hostDependencyNames(installDir: string): Promise<Set<string>> {
+  const manifest = JSON.parse(await readFile(join(installDir, 'package.json'), 'utf-8')) as {
     dependencies?: Record<string, string>;
   };
   return new Set(Object.keys(manifest.dependencies ?? {}));
@@ -176,8 +153,8 @@ function countOverrideEntries(content: string): number {
  * whose only child is a comment serialises to YAML `null`, which
  * `docker compose config` rejects.
  */
-async function persistOverride(content: string): Promise<void> {
-  const overridePath = dockerComposeOverridePath();
+async function persistOverride(installDir: string, content: string): Promise<void> {
+  const overridePath = dockerComposeOverridePath(installDir);
   if (countOverrideEntries(content) === 0) {
     try {
       await unlink(overridePath);
@@ -190,11 +167,11 @@ async function persistOverride(content: string): Promise<void> {
   await writeFile(overridePath, content);
 }
 
-function isDockerMode(): boolean {
+function isDockerMode(installDir: string): boolean {
   return (
     process.env.NEURALIS_DOCKER === 'true' ||
     existsSync('/.dockerenv') ||
-    existsSync(dockerComposePath())
+    existsSync(dockerComposePath(installDir))
   );
 }
 
@@ -257,8 +234,8 @@ async function listSourceConfigs(projectId: string): Promise<SourceConfig[]> {
 
 // ── Docker Compose Manipulation ───────────────────────────────────
 
-async function addDockerMount(hostPath: string, slug: string): Promise<void> {
-  let content = await loadOverride();
+async function addDockerMount(installDir: string, hostPath: string, slug: string): Promise<void> {
+  let content = await loadOverride(installDir);
 
   const volumeLine = `      - ${hostPath}:/mounts/${slug}`;
   // NEURALIS_MOUNT_<slug> = container path; NEURALIS_MOUNT_HOST_<SLUG> = host
@@ -318,12 +295,12 @@ async function addDockerMount(hostPath: string, slug: string): Promise<void> {
     }
   }
 
-  await persistOverride(content);
+  await persistOverride(installDir, content);
   console.log(`${ok} Updated docker-compose.override.yml`);
 }
 
-async function removeDockerMount(slug: string): Promise<void> {
-  let content = await loadOverride();
+async function removeDockerMount(installDir: string, slug: string): Promise<void> {
+  let content = await loadOverride(installDir);
 
   // Remove volume line
   const volumePattern = new RegExp(`^\\s*- .+:/mounts/${slug}.*\\n`, 'm');
@@ -343,7 +320,7 @@ async function removeDockerMount(slug: string): Promise<void> {
   const envRoPattern = new RegExp(`^\\s*- NEURALIS_MOUNT_RO_${slugUpper}=.*\\n`, 'm');
   content = content.replace(envRoPattern, '');
 
-  await persistOverride(content);
+  await persistOverride(installDir, content);
   console.log(`${ok} Removed mount "${slug}" from docker-compose.override.yml`);
 }
 
@@ -377,8 +354,8 @@ async function removeDockerMount(slug: string): Promise<void> {
 
 const NEURALIS_OVERLAY_MARKER = '# neuralis-overlay-marker:';
 
-async function addNeuralisOverlay(hostPath: string, withDocker: boolean): Promise<void> {
-  let content = await loadOverride();
+async function addNeuralisOverlay(installDir: string, hostPath: string, withDocker: boolean): Promise<void> {
+  let content = await loadOverride(installDir);
 
   if (content.includes(NEURALIS_OVERLAY_MARKER)) {
     console.log(`${warn} /neuralis overlay already configured. Remove with:`);
@@ -391,7 +368,7 @@ async function addNeuralisOverlay(hostPath: string, withDocker: boolean): Promis
   //   - /neuralis/_runtime        anon vol protects server.js + .next + public
   //   - /neuralis/node_modules    anon vol protects @neuralis/* tarballs
   const overlayVolumes =
-    `      ${NEURALIS_OVERLAY_MARKER} live host source overlay (pnpm neuralis:mount add … --neuralis)\n` +
+    `      ${NEURALIS_OVERLAY_MARKER} live host source overlay (neuralis mount add … --neuralis)\n` +
     `      - ${hostPath}:/neuralis\n` +
     `      - /neuralis/_runtime\n` +
     `      - /neuralis/node_modules\n`;
@@ -426,7 +403,7 @@ async function addNeuralisOverlay(hostPath: string, withDocker: boolean): Promis
     console.log(`  Add manually:\n${envLines}`);
   }
 
-  await persistOverride(content);
+  await persistOverride(installDir, content);
   console.log(`${ok} /neuralis overlay configured`);
   console.log('');
   console.log(`  Host source:  ${c.cyan}${hostPath}${c.reset}`);
@@ -442,8 +419,8 @@ async function addNeuralisOverlay(hostPath: string, withDocker: boolean): Promis
   console.log(`     (needs drive.mount.privileged; configure permissions there before attaching)`);
 }
 
-async function removeNeuralisOverlay(): Promise<void> {
-  let content = await loadOverride();
+async function removeNeuralisOverlay(installDir: string): Promise<void> {
+  let content = await loadOverride(installDir);
 
   if (!content.includes(NEURALIS_OVERLAY_MARKER)) {
     console.log(`${warn} No /neuralis overlay configured.`);
@@ -464,7 +441,7 @@ async function removeNeuralisOverlay(): Promise<void> {
   ];
   for (const p of patterns) content = content.replace(p, '');
 
-  await persistOverride(content);
+  await persistOverride(installDir, content);
   console.log(`${ok} /neuralis overlay removed from docker-compose.override.yml`);
 }
 
@@ -475,8 +452,7 @@ async function removeNeuralisOverlay(): Promise<void> {
 // `node_modules/` with an anonymous volume, so the running process finds the
 // folder exactly as it found the installed copy: one discovery path, ONE
 // kernel and ONE React by the normal parent walk (CJS and ESM alike). The
-// mechanism and the migration of the older `NEURALIS_PKG_LINKS` form live in
-// `scripts/mount/packageBind.mts`. Discovery still requires the package in the
+// mechanism lives in `scripts/mount/packageBind.mts`. Discovery still requires the package in the
 // host deps: `pnpm neuralis:pkg add` is the separate, explicit trust act.
 //
 // It ALSO writes a `/mounts/<slug>` bind of the same folder with the
@@ -488,8 +464,8 @@ async function removeNeuralisOverlay(): Promise<void> {
 // it). `--pkg` says "this folder IS that package", the pair says "this container
 // path came from that host path", and a dev-mounted package wants both.
 
-async function addUserPackageMount(hostPath: string, packageName: string): Promise<void> {
-  let content = await loadOverride();
+async function addUserPackageMount(installDir: string, hostPath: string, packageName: string): Promise<void> {
+  let content = await loadOverride(installDir);
 
   const slug = slugify(packageName.replace(/^@/, '').replace(/\//g, '-'));
   if (content.includes(`:/mounts/${slug}`) || packageBindHostPath(content, packageName) !== null) {
@@ -525,35 +501,35 @@ async function addUserPackageMount(hostPath: string, packageName: string): Promi
     }
   }
 
-  await persistOverride(content);
+  await persistOverride(installDir, content);
   console.log(`${ok} Package folder mount configured`);
   console.log('');
   console.log(`  Host path:    ${c.cyan}${hostPath}${c.reset}`);
   console.log(`  Package at:   ${c.cyan}${packageBindTarget(packageName)}${c.reset} ${c.dim}(its own node_modules masked — the image's kernel and React serve it)${c.reset}`);
   console.log(`  Source mount: ${c.cyan}/mounts/${slug}${c.reset} ${c.dim}+ NEURALIS_MOUNT_${slug} / NEURALIS_MOUNT_HOST_${slugUpper} — a source rooted here derives its hostRoot${c.reset}`);
   console.log('');
-  if ((await hostDependencyNames()).has(packageName)) {
+  if ((await hostDependencyNames(installDir)).has(packageName)) {
     console.log(`${ok} ${packageName} is a host dependency — the restart loads it from this folder.`);
   } else {
     console.log(`${warn} This is container plumbing only — the package is NOT discovered until it`);
     console.log(`  is registered in the host dependencies (the admin trust act):`);
-    console.log(`  ${c.bold}pnpm neuralis:pkg add ${packageName} --path ${hostPath}${c.reset}`);
+    console.log(`  ${c.bold}${spell(`pkg add ${packageName} --path ${hostPath}`)}${c.reset}`);
   }
   console.log('');
   console.log(`${c.cyan}Restart the container to apply:${c.reset}`);
   console.log(`  ${c.bold}docker compose up -d neuralis${c.reset}`);
 }
 
-async function removeUserPackageMount(packageName: string): Promise<void> {
-  const content = await loadOverride();
+async function removeUserPackageMount(installDir: string, packageName: string): Promise<void> {
+  const content = await loadOverride(installDir);
   const next = removeUserPackageMountLines(content, packageName);
   if (next === content) {
     console.log(`${warn} No package mount for "${packageName}" in docker-compose.override.yml.`);
     return;
   }
-  await persistOverride(next);
+  await persistOverride(installDir, next);
   console.log(`${ok} Removed the package mount of "${packageName}" from docker-compose.override.yml`);
-  console.log(`  ${c.dim}If the package is registered in dependencies, also run:${c.reset} ${c.bold}pnpm neuralis:pkg remove ${packageName}${c.reset}`);
+  console.log(`  ${c.dim}If the package is registered in dependencies, also run:${c.reset} ${c.bold}${spell(`pkg remove ${packageName}`)}${c.reset}`);
 }
 
 /** The operator-owned `node_modules/` the mask mounts over (never left for Docker to create as root). */
@@ -801,28 +777,15 @@ async function promptMode(): Promise<'data' | 'neuralis' | 'pkg' | null> {
 
 // ── Commands ──────────────────────────────────────────────────────
 
-async function cmdAdd(hostPath: string, slug: string): Promise<void> {
-  const absPath = resolve(hostPath);
-
-  // Verify path exists
-  try {
-    const st = statSync(absPath);
-    if (!st.isDirectory()) {
-      console.log(`${fail} "${absPath}" is not a directory.`);
-      process.exit(1);
-    }
-  } catch {
-    console.log(`${fail} Path "${absPath}" does not exist.`);
-    process.exit(1);
-  }
-
-  const docker = isDockerMode();
+async function cmdAdd(installDir: string, absPath: string, slug: string): Promise<void> {
+  assertDirectory(absPath);
+  const docker = isDockerMode(installDir);
 
   // INFRA-ONLY. We register the host↔container plumbing; we do NOT write a
   // source-config JSON. The user attaches the source from the Files UI with a
   // chosen scope; the connector derives its hostRoot from the env pair below.
   if (docker) {
-    await addDockerMount(absPath, slug);
+    await addDockerMount(installDir, absPath, slug);
     console.log('');
     console.log(`  Host path:    ${c.dim}${absPath}${c.reset}`);
     console.log(`  Container at: ${c.cyan}/mounts/${slug}${c.reset}`);
@@ -851,17 +814,16 @@ function parseOverrideMounts(content: string): Array<{ hostPath: string; contain
   return out;
 }
 
-async function cmdList(projectId: string | undefined): Promise<void> {
-  if (!isDockerMode()) {
+async function cmdList(installDir: string, projectId: string | undefined): Promise<void> {
+  if (!isDockerMode(installDir)) {
     console.log(`${c.dim}Native mode — no compose mounts. Manage sources in the Files UI.${c.reset}`);
     return;
   }
 
-  // Through loadOverride, so `list` also migrates a pre-bind override.
   let overrideContent: string | null = null;
   try {
-    await access(dockerComposeOverridePath());
-    overrideContent = await loadOverride();
+    await access(dockerComposeOverridePath(installDir));
+    overrideContent = await loadOverride(installDir);
   } catch {
     overrideContent = null;
   }
@@ -869,7 +831,7 @@ async function cmdList(projectId: string | undefined): Promise<void> {
   const mounts = overrideContent ? parseOverrideMounts(overrideContent) : [];
   if (mounts.length === 0) {
     console.log(`${c.dim}No machine-local mounts in docker-compose.override.yml.${c.reset}`);
-    console.log(`${c.dim}Add one with: ${c.reset}${c.bold}pnpm neuralis:mount add <path> --slug <name>${c.reset}`);
+    console.log(`${c.dim}Add one with: ${c.reset}${c.bold}${spell('mount add <path> --slug <name>')}${c.reset}`);
     return;
   }
 
@@ -896,8 +858,8 @@ async function cmdList(projectId: string | undefined): Promise<void> {
   }
 }
 
-async function cmdRemove(slug: string, projectId: string | undefined): Promise<void> {
-  if (!isDockerMode()) {
+async function cmdRemove(installDir: string, slug: string, projectId: string | undefined): Promise<void> {
+  if (!isDockerMode(installDir)) {
     console.log(`${c.dim}Native mode — no compose mount to remove. Delete the source in the Files UI.${c.reset}`);
     return;
   }
@@ -913,7 +875,7 @@ async function cmdRemove(slug: string, projectId: string | undefined): Promise<v
     return root === containerPath || root.startsWith(`${containerPath}/`);
   });
 
-  await removeDockerMount(slug);
+  await removeDockerMount(installDir, slug);
   console.log('');
   console.log(`${c.cyan}Restart the container to apply:${c.reset}`);
   console.log(`  ${c.bold}docker compose up -d neuralis${c.reset}`);
@@ -931,8 +893,19 @@ async function cmdRemove(slug: string, projectId: string | undefined): Promise<v
 
 // ── CLI Entry ─────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+/** A directory the operator named, or the refusal. */
+function assertDirectory(absPath: string): void {
+  let st;
+  try {
+    st = statSync(absPath);
+  } catch {
+    throw new CliExit(1, `Path "${absPath}" does not exist.`);
+  }
+  if (!st.isDirectory()) throw new CliExit(1, `"${absPath}" is not a directory.`);
+}
+
+export async function run(args: string[], ctx: CliContext): Promise<number> {
+  const installDir = ctx.installDir;
   const command = args[0];
 
   if (!command || command === '--help' || command === '-h') {
@@ -945,14 +918,14 @@ All mutations go to the gitignored docker-compose.override.yml; the tracked
 docker-compose.yml stays clean.${c.reset}
 
 ${c.bold}Usage:${c.reset}
-  pnpm neuralis:mount add                                  interactive mode picker
-  pnpm neuralis:mount add [<host-path>] [--slug <name>]    data folder mount
-  pnpm neuralis:mount add <host-path> --neuralis [--with-docker]
-  pnpm neuralis:mount add <host-path> --pkg <package-name>
-  pnpm neuralis:mount list [--project <id>]
-  pnpm neuralis:mount remove <slug> [--project <id>]
-  pnpm neuralis:mount remove --neuralis
-  pnpm neuralis:mount remove --pkg <package-name>
+  ${spell('mount add')}                                  interactive mode picker
+  ${spell('mount add [<host-path>] [--slug <name>]')}    data folder mount
+  pnpm neuralis:mount add <host-path> --neuralis [--with-docker] ${c.dim}(development checkout)${c.reset}
+  ${spell('mount add <host-path> --pkg <package-name>')}
+  ${spell('mount list [--project <id>]')}
+  ${spell('mount remove <slug> [--project <id>]')}
+  pnpm neuralis:mount remove --neuralis ${c.dim}(development checkout)${c.reset}
+  ${spell('mount remove --pkg <package-name>')}
 
 ${c.bold}Options:${c.reset}
   --slug <name>     Mount slug for the standard data-source flow
@@ -976,15 +949,15 @@ ${c.bold}Options:${c.reset}
 ${c.bold}Examples:${c.reset}
   pnpm neuralis:mount add /home/user/projects/Neuralis/neuralis --neuralis
   pnpm neuralis:mount add /home/user/projects/Neuralis/neuralis --neuralis --with-docker
-  pnpm neuralis:mount add /home/user/my-package --pkg @acme/widgets
-  pnpm neuralis:mount add /home/user/my-app --slug myapp
-  pnpm neuralis:mount add /home/user/docs --slug docs
-  pnpm neuralis:mount list
-  pnpm neuralis:mount remove myapp
+  ${spell('mount add /home/user/my-package --pkg @acme/widgets')}
+  ${spell('mount add /home/user/my-app --slug myapp')}
+  ${spell('mount add /home/user/docs --slug docs')}
+  ${spell('mount list')}
+  ${spell('mount remove myapp')}
   pnpm neuralis:mount remove --neuralis
-  pnpm neuralis:mount remove --pkg @acme/widgets
+  ${spell('mount remove --pkg @acme/widgets')}
 `);
-    return;
+    return 0;
   }
 
   const restArgs = args.slice(1);
@@ -1003,10 +976,7 @@ ${c.bold}Examples:${c.reset}
         allowPositionals: true,
       });
 
-      if (values.neuralis && (values.pkg || values.slug)) {
-        console.log(`${fail} --neuralis cannot be combined with --pkg or --slug.`);
-        process.exit(1);
-      }
+      if (values.neuralis && (values.pkg || values.slug)) throw new CliExit(1, '--neuralis cannot be combined with --pkg or --slug.');
 
       // Resolve the mount kind. Explicit flags win; a truly bare `add`
       // (no positional, no mode flag) opens the interactive mode picker.
@@ -1016,58 +986,38 @@ ${c.bold}Examples:${c.reset}
       else if (positionals[0]) mode = 'data';
       else {
         const picked = await promptMode();
-        if (!picked) process.exit(0);
+        if (!picked) return 0;
         mode = picked;
       }
 
       if (mode === 'neuralis') {
         let hostPath = positionals[0];
         if (!hostPath) {
-          // Default to this script's neuralis/ folder (the overlay target).
-          const defaultGuess = resolve(join(import.meta.dirname, '..'));
-          hostPath = await promptInput('Neuralis host path', defaultGuess);
+          // Default to the host package (the overlay target).
+          hostPath = await promptInput('Neuralis host path', ctx.packageDir);
         }
-        const absPath = resolve(hostPath);
-        try {
-          if (!statSync(absPath).isDirectory()) {
-            console.log(`${fail} "${absPath}" is not a directory.`);
-            process.exit(1);
-          }
-        } catch {
-          console.log(`${fail} Path "${absPath}" does not exist.`);
-          process.exit(1);
-        }
-        await addNeuralisOverlay(absPath, !!values['with-docker']);
+        const absPath = resolve(ctx.cwd, hostPath);
+        assertDirectory(absPath);
+        await addNeuralisOverlay(installDir, absPath, !!values['with-docker']);
         break;
       }
 
       if (mode === 'pkg') {
         const packageName = values.pkg || (await promptInput('Package name (e.g. @acme/widgets)', ''));
-        if (!packageName) {
-          console.log(`${fail} A package name is required for a user-package mount.`);
-          process.exit(1);
-        }
+        if (!packageName) throw new CliExit(1, 'A package name is required for a user-package mount.');
         let hostPath = positionals[0];
         if (!hostPath) {
           const selected = await interactiveBrowse('/');
           if (!selected) {
             console.log(`${warn} Cancelled.`);
-            process.exit(0);
+            return 0;
           }
           hostPath = selected;
           console.log(`${ok} Selected: ${c.cyan}${hostPath}${c.reset}`);
         }
-        const absPath = resolve(hostPath);
-        try {
-          if (!statSync(absPath).isDirectory()) {
-            console.log(`${fail} "${absPath}" is not a directory.`);
-            process.exit(1);
-          }
-        } catch {
-          console.log(`${fail} Path "${absPath}" does not exist.`);
-          process.exit(1);
-        }
-        await addUserPackageMount(absPath, packageName);
+        const absPath = resolve(ctx.cwd, hostPath);
+        assertDirectory(absPath);
+        await addUserPackageMount(installDir, absPath, packageName);
         break;
       }
 
@@ -1077,15 +1027,16 @@ ${c.bold}Examples:${c.reset}
         const selected = await interactiveBrowse('/');
         if (!selected) {
           console.log(`${warn} Cancelled.`);
-          process.exit(0);
+          return 0;
         }
         hostPath = selected;
         console.log(`${ok} Selected: ${c.cyan}${hostPath}${c.reset}`);
       }
 
-      const defaultSlug = slugify(basename(resolve(hostPath)));
+      const absPath = resolve(ctx.cwd, hostPath);
+      const defaultSlug = slugify(basename(absPath));
       const slug = values.slug || (positionals[0] ? defaultSlug : await promptInput('Source key', defaultSlug));
-      await cmdAdd(hostPath, slug);
+      await cmdAdd(installDir, absPath, slug);
       break;
     }
 
@@ -1096,7 +1047,7 @@ ${c.bold}Examples:${c.reset}
         options: { project: { type: 'string', short: 'p' } },
         allowPositionals: true,
       });
-      await cmdList(values.project || undefined);
+      await cmdList(installDir, values.project || undefined);
       break;
     }
 
@@ -1113,30 +1064,22 @@ ${c.bold}Examples:${c.reset}
       });
 
       if (values.neuralis) {
-        await removeNeuralisOverlay();
+        await removeNeuralisOverlay(installDir);
         break;
       }
       if (values.pkg) {
-        await removeUserPackageMount(values.pkg);
+        await removeUserPackageMount(installDir, values.pkg);
         break;
       }
 
       const slug = positionals[0];
-      if (!slug) {
-        console.log(`${fail} Missing slug. Usage: pnpm neuralis:mount remove <slug>`);
-        process.exit(1);
-      }
-      await cmdRemove(slug, values.project || undefined);
+      if (!slug) throw new CliExit(1, `Missing slug. Usage: ${spell('mount remove <slug>')}`);
+      await cmdRemove(installDir, slug, values.project || undefined);
       break;
     }
 
     default:
-      console.log(`${fail} Unknown command: "${command}". Use --help for usage.`);
-      process.exit(1);
+      throw new CliExit(1, `Unknown command: "${command}". Use --help for usage.`);
   }
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`${fail} ${err instanceof Error ? err.message : err}`);
-  process.exit(1);
-});

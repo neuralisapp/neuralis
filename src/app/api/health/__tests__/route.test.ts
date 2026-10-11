@@ -10,7 +10,7 @@ vi.mock('@/server/host/bootstrap', () => ({
   peekRuntime: () => mocks.booted ? { health: mocks.health } : null,
 }));
 import { GET } from '../route';
-const base: BootstrapStatus = { phase: 'starting', error: null, startedAt: Date.now() - 5_000, readyAt: null };
+const base: BootstrapStatus = { phase: 'starting', error: null, errorCode: null, startedAt: Date.now() - 5_000, readyAt: null };
 beforeEach(() => {
   mocks.booted = true;
   mocks.getBootstrapStatus.mockReturnValue(base);
@@ -49,12 +49,16 @@ describe('GET /api/health', () => {
     expect(await response.json()).toEqual({ status: 'initializing', phase });
     expect(mocks.health).not.toHaveBeenCalled();
   });
-  it('a rejected bootstrap returns a classified error without raw detail', async () => {
-    mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'error', error: '/private/token secret' });
-    const response = await GET();
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ status: 'error', error: 'bootstrap_failed' });
-  });
+  it.each(['upgrade_required', 'data_format_newer', 'bootstrap_failed'] as const)(
+    'a rejected bootstrap (%s) answers 503 with its fixed code and no raw detail',
+    async (errorCode) => {
+      const error = 'Data format upgrade required (neuralis/credential): run `neuralis upgrade` — /private/home/checkpoints/cp-1';
+      mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'error', error, errorCode });
+      const response = await GET();
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ status: 'error', error: 'bootstrap_failed', code: errorCode });
+    },
+  );
   it('a health hook failure gives a classified failure', async () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready' });
     mocks.health.mockRejectedValueOnce(new Error('/private/token secret'));

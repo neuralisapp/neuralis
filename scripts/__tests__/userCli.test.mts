@@ -38,7 +38,7 @@ function audit(): Array<Record<string, unknown>> {
 }
 
 function run(args: string[], input = ''): { status: number | null; out: string } {
-  const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/user.mts', ...args], {
+  const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/cli/registry.mts', 'user', ...args], {
     cwd: hostRoot,
     input,
     encoding: 'utf-8',

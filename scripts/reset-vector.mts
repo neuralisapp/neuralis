@@ -2,10 +2,8 @@
 /**
  * neuralis reset:vector — Wipe the vector layer (Qdrant collections + lock).
  *
- * Intended for the one legitimate case where changing the embedding model is
- * required: the collection's vector dimension is immutable, so we must drop,
- * recreate, and resync. The prismatic-weaving-loom plan mandates a loud,
- * owner-authenticated entry point rather than silent fallbacks.
+ * Destructive store recovery with the app stopped. Model changes use the
+ * online shadow rebuild; dense-only clearing preserves indexed content.
  *
  * Steps:
  *   1. Prompt owner email + password, verify against app/users/*.json (bcrypt).
@@ -14,14 +12,17 @@
  *   4. Optionally purge the sync sidecar cache under ~/.neuralis/projects/**.
  */
 
-import { readdir, unlink, rm, stat } from 'node:fs/promises';
+import { readdir, unlink, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { readLock, resetOwnedCollections, StoreResetPartialError } from '@neuralis/brain-core';
+import { appPort, checkOffline, composeProbe, httpProbe, type OfflineProbes } from './checkpoint.mts';
+import type { CliContext } from './cli/registry.mts';
+import { loadHostEnv } from './setup/detect.mts';
 import { askLine, promptOwnerCredentials, verifyOwnerCredentials, type OwnerRecord } from './setup/ownerCheck.mts';
 // EVERY Qdrant call below goes through this helper: `/collections` and
 // `DELETE /collections/<name>` both require the `api-key` header on an
-// authenticated instance, and a bare `fetch` here 401s — which the script
-// swallows as "Qdrant error", so the documented rescue silently drops nothing.
+// authenticated instance. A list/delete error refuses lock/cache cleanup.
 import { qdrantFetch } from '../src/server/config/qdrantFetch';
 
 // ── ANSI ──────────────────────────────────────────────────────────
@@ -99,14 +100,40 @@ function resolveExplicitCollection(): string | null {
 
 // ── Main ──────────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
+/** Owner confirmation belongs to main; this operation additionally requires proven quiescence. */
+export async function resetVectorStore(
+  opts: { home: string; qdrantUrl: string; prefix: string; explicit: string | null; appPort: number; neuralisDir: string },
+  probes: OfflineProbes,
+  transport = { list: qdrantListCollections, drop: qdrantDeleteCollection },
+): Promise<string[]> {
+  const verdict = await checkOffline(opts, { ...probes, composeRunning: async cwd => {
+    const answer = await probes.composeRunning(cwd);
+    if (answer.kind === 'failed') throw new Error('Could not prove the compose application is stopped');
+    return answer;
+  } });
+  if (!verdict.offline) throw new Error(`Stop the application before resetting: ${verdict.reason}`);
+  const lock = await readLock(join(opts.home, 'app'));
+  return resetOwnedCollections({
+    list: () => transport.list(opts.qdrantUrl),
+    drop: name => transport.drop(opts.qdrantUrl, name),
+    cleanup: async () => {
+      try { await unlink(lockPath(opts.home)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    },
+  }, { prefix: opts.prefix, explicit: opts.explicit, lock });
+}
+
+export async function run(_argv: string[], ctx: CliContext): Promise<number> {
+  const neuralisDir = ctx.installDir;
+  await loadHostEnv(neuralisDir);
   console.log();
   console.log(`  ${c.cyan}${c.bold}── neuralis reset:vector ${'─'.repeat(32)}${c.reset}`);
   console.log();
   console.log(`  ${c.yellow}This will delete every Qdrant collection used by Neuralis and`);
   console.log(`  reset the embedding lock. brain:// content and its version history`);
-  console.log(`  live only there and are LOST; connector-backed sources are re-embedded`);
-  console.log(`  (and paid for) on their next sync.${c.reset}`);
+  console.log(`  live only there and are LOST. Review journal files remain, but references`);
+  console.log(`  to deleted content may become unresolved. Connector sources can be synced`);
+  console.log(`  again; optional embedding incurs its configured costs.${c.reset}`);
   console.log();
 
   const home = resolveNeuralisHome();
@@ -126,47 +153,33 @@ async function main(): Promise<void> {
 
   if (!(await askYes('Proceed with vector reset?', false))) {
     console.log(`  ${warn} Aborted.`);
-    return;
+    return 0;
   }
   console.log();
 
   // 2. Qdrant collection wipe.
-  let dropped = 0;
+  let dropped: string[];
   try {
-    const collections = await qdrantListCollections(qdrantUrl);
-    const targets = explicit
-      ? collections.filter((n) => n === explicit)
-      : collections.filter((n) => n.startsWith(`${prefix}_`) || n === prefix);
-
-    if (targets.length === 0) {
-      console.log(`  ${dot} No matching Qdrant collections found.`);
-    }
-    for (const name of targets) {
-      await qdrantDeleteCollection(qdrantUrl, name);
+    dropped = await resetVectorStore({ home, qdrantUrl, prefix, explicit, neuralisDir,
+      appPort: appPort() }, {
+      inContainer: existsSync('/.dockerenv'), http: httpProbe, composeRunning: composeProbe,
+    });
+    for (const name of dropped) {
       console.log(`  ${ok} Dropped Qdrant collection ${c.bold}${name}${c.reset}`);
-      dropped++;
     }
   } catch (err) {
-    console.log(`  ${fail} Qdrant error: ${(err as Error).message}`);
-    console.log(`  ${dot} Continuing with lock/cache cleanup.`);
-  }
-
-  // 3. Delete embedding-lock.json.
-  const lock = lockPath(home);
-  if (existsSync(lock)) {
-    await unlink(lock);
-    console.log(`  ${ok} Removed ${c.bold}${lock}${c.reset}`);
-  } else {
-    console.log(`  ${dot} No lock file at ${lock}`);
+    if (err instanceof StoreResetPartialError) {
+      console.error(`  Dropped: ${err.dropped.join(', ') || '(none)'}. Retry remaining: ${err.remaining.join(', ')}.`);
+    }
+    throw err;
   }
 
   // 4. Optional sidecar cache purge.
   const projects = projectsDir(home);
   if (existsSync(projects) && (await askYes('Also purge per-project sync caches (.brain-store)?', false))) {
     let purged = 0;
-    const projectIds = (await readdir(projects)).filter(async (p) => {
-      try { return (await stat(join(projects, p))).isDirectory(); } catch { return false; }
-    });
+    const entries = await readdir(projects, { withFileTypes: true });
+    const projectIds = entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
     for (const pid of projectIds) {
       const cacheDir = join(projects, pid, 'data', 'brain-core', '.brain-store');
       if (existsSync(cacheDir)) {
@@ -179,12 +192,8 @@ async function main(): Promise<void> {
   }
 
   console.log();
-  console.log(`  ${ok} Reset complete. ${c.dim}Dropped ${dropped} collection(s).${c.reset}`);
-  console.log(`  ${dot} Next boot will write a fresh embedding-lock.json and re-sync.`);
+  console.log(`  ${ok} Reset complete. ${c.dim}Dropped ${dropped.length} collection(s).${c.reset}`);
+  console.log(`  ${dot} Restart the app, then explicitly sync connector sources as needed.`);
   console.log();
+  return 0;
 }
-
-main().catch((err) => {
-  console.error(`\n  ${fail} ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-});

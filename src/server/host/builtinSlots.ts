@@ -148,13 +148,34 @@ function readResolvedDepManifest(name: string): DepManifest | undefined {
   }
 }
 
+/**
+ * The dependency lines discovery reads from the manifest at `HOST_ROOT`.
+ *
+ * The host's own manifest is read as it is. An npm install folder — a manifest
+ * that DEPENDS on the host package `neuralis` — is where an operator command
+ * runs on that channel; its builtins are what the image it runs carries: the
+ * host package's own lines plus the folder's other lines, the union the derived
+ * image's manifest holds (`operatorInstall` in `scripts/build/build-workspace.mjs`).
+ * Without it the operator CLI would see only the folder's lines and no
+ * `@neuralis/*` builtin at all.
+ */
+export function builtinDependencyLines(
+  manifest: HostPackageJson,
+  readHostPackage: () => HostPackageJson,
+): Record<string, string> {
+  const { neuralis: hostSpec, ...lines } = manifest.dependencies ?? {};
+  if (typeof hostSpec !== 'string') return manifest.dependencies ?? {};
+  return { ...(readHostPackage().dependencies ?? {}), ...lines };
+}
+
 function discoverBuiltinPackageIds(): string[] {
   // Read the host's LIVE package.json directly (HOST_ROOT — not
   // `__dirname`-relative: the dist output is bundled into chunked .js files
   // by Next.js, so `__dirname` points somewhere inside .next/server/).
   const hostPkgPath = join(HOST_ROOT, 'package.json');
   const hostPkg = JSON.parse(readFileSync(hostPkgPath, 'utf-8')) as HostPackageJson;
-  return selectBuiltinPackageIds(hostPkg.dependencies ?? {}, readResolvedDepManifest);
+  const lines = builtinDependencyLines(hostPkg, () => JSON.parse(readFileSync(resolveDepPackageJsonPath('neuralis'), 'utf-8')) as HostPackageJson);
+  return selectBuiltinPackageIds(lines, readResolvedDepManifest);
 }
 
 const _envOverride = process.env.NEURALIS_BUILTINS?.split(',').map(s => s.trim()).filter(Boolean);

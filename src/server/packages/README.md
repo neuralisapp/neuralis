@@ -11,9 +11,9 @@ This directory contains the server-side package runtime layer for the Neuralis h
 - Attach source package configuration to brain-core.
 - Support package install, publish, trust, build, reload, and rescan flows.
 
-## Runtime-WASM package sources
+## Runtime package sources
 
-A project loads runtime-WASM packages from TWO kinds of directory, both via the
+A project loads runtime packages (any `runtime.type`) from TWO kinds of directory, both via the
 SAME `ProjectPackageScanner` + `PackageRuntimeManager.syncProjectPackagesToRuntime`
 path (so every package is forced `untrusted`, reserved-id-banned, and held to the
 trust-escalation guard):
@@ -27,17 +27,25 @@ trust-escalation guard):
    scope (project / user / agent). `projectPackages.activateProject` enumerates
    candidates via brain-core `listPackageSourceRoots(projectId)` and selects them
    in `selectFlaggedPackageRoots` (exported, unit-tested), carrying each source's
-   owning `SourceScope`.
+   owning `SourceScope`. The list is not fixed at activation: brain-core notifies
+   the host after every committed source-config write (the `package-source-roots`
+   service's `subscribePackageSourceRoots`, armed at the first activation), and an
+   activated or activating project re-derives its flagged roots and applies only
+   the difference — a new root is scanned and watched, a removed, unflagged or
+   disabled one is dropped, an unchanged set costs one listing and no scan. Rescan
+   re-derives first, too. A directory several projects scan (a source pointed at
+   another project's `_packages/`) holds ONE hub watcher whose change notifies
+   every one of those projects.
 
 This is **additive** and orthogonal to brain-core's markdown source-package
 discovery (the magpie): a flagged source still indexes + injects its markdown
-contributions AND loads its WASM packages. The agent-side dedup
+contributions AND loads its packages. The agent-side dedup
 (`SourcePackageScanner.packageSlugFromUri`) keeps the same package from appearing
 twice.
 
 ### Scope isolation (load globally, advertise per scope)
 
-A user/agent-scoped source's WASM packages **load** for the project but are
+A user/agent-scoped source's packages **load** for the project but are
 **advertised only to the matching caller** — three orthogonal axes govern package
 consumption: **uri-policy** (which paths a package may touch) · **feature** (which
 roles may use a capability) · **scope** (which user/agent a loaded package is
@@ -48,34 +56,43 @@ advertised to). The scope axis is carried, never re-derived:
 (`getPackageOwnerScope(projectId, packageId)`; a package with no recorded scope —
 builtins, default `_packages/` — is treated as project-scope, never hidden).
 
-**Scope also NAMESPACES the loader code slot (distinct from advertise).** The three
-axes above gate VISIBILITY; the global `PackageLoader` slot is a separate floor. A
-project package's loader/registry id is **scope-namespaced** —
-`toResolvedRecord(rec, projectId, ownerScope)` sets `packageId`/`definition.id` to
-`namespaceProjectPackageId(projectId, scope, manifestId)` (kernel `contracts/sourceScope.ts`,
-reuses `scopeKey`) so two projects/agents dropping a same-manifest-id package occupy
-DISTINCT slots (coexist + can't cross-substitute another tenant's code). Builtins are
-never namespaced. The **manifest id** is preserved on `ResolvedPackageRecord.manifestId`
-(the scanner `ProjectPackageRecord` has none — its `.packageId` IS the manifest id) for
-the admin keys + display, and `PackageRuntimeManager` keeps a parallel
-`#packageManifestId` map (`getPackageManifestId(projectId, id)`). The **loader is a
-second manifestId carrier** (whimsical-scott): every host load/reload site with a record
-passes `record.manifestId` as `PackageLoader.load/reload`'s third arg; the loader stores
-it on the slot, **preserves it across `reload()`** (the admin `package.reload` dispatch
-path only has the namespaced id, so preservation must be loader-side — never
-caller-supplied there), and exposes `loadedManifestSlugs()` — the ONE accessor any
-`listLoaded()` consumer doing manifest-slug comparison must use (the source-package
-dedup, `SourcePackageScanner` W3H); comparing `definition.id` against a bare slug never
-matches a namespaced id. Admin `packageTrust`
-is manifest-keyed (the trust route resolves via the scanner → `record.packageId` = manifest
-id). `packageAccessFeature` is stored under **whatever id the writer sends** — the workspace
-Packages panel writes the NAMESPACED snapshot id (`pkg.id`), the admin cross-project surface
-the manifest id — so the **base-access Axis-2 gate is DUAL-PATH AND dual-KEY**: both
-`bootstrap.ts resolveScopeHiddenIds` (stream) AND `snapshot.ts` (client snapshot) match with
-`overrides[getPackageManifestId(projectId, id) ?? id] ?? overrides[id]`, so a namespaced OR a
-manifest-id override both resolve. Do NOT simplify either reader to manifest-only — it would
-break the real UI's namespaced write. `admin/project-packages/route.ts` namespaces its
-`loader.getStatus` lookup, or the admin Packages status would stick at `loading`.
+**The loader code slot is an exact installation identity, separate from advertise.**
+`toResolvedRecord` validates the authored npm manifest before stamping a canonical
+source URI with project and owning scope coordinates. `packages://folder?project=p&scope=project`
+and `source://folder?project=p&scope=project` remain independent even when their
+`manifestId` matches. Platform-installed packages retain their authored npm ids.
+`manifestId` is display/validation metadata; mutable trust, access overrides and
+applied-grant provenance belong to the exact runtime id. Both the stream and
+client snapshot read that instance key, while manifest `requires.accessFeature`
+remains an independent gate.
+
+Every scanner retains its source URI root and scope. The project-scoped installed
+provider and the exact-instance trust/build/reload resolver use those same records;
+a request never supplies a physical path or chooses authority from URI query fields.
+The resolver rejects foreign projects and management routes recheck source scope
+against the real session. Source-root packages retain an empty relative path.
+
+The identity change is never performed by the running host. The project record kind
+`neuralis/project` is at format 2 and declared `upgrade: { mode: 'offline' }`: a boot over
+older data stops in the kernel ledger admission (`upgrade_required`, naming
+`pnpm neuralis:upgrade`) before any read, and the operator runs the offline upgrade on the
+stopped app. Its host module (`neuralis/scripts/upgrades/package-identity-v2.mts`) inventories
+every project through the same scanners the activation path uses (metadata only, no load, no
+watcher; a mounted source's container root translated through the compose override's mount pair
+on the host plane), hands the inventory to agent-core's script algorithm, and the records are
+rewritten raw and durably — the dry run lists every re-key, drop, merge and blocker with file and
+field; the apply refuses while anything blocks, takes one checkpoint first, and clears the
+ledger's `upgrading` mark last. Older binaries refuse the raised kind by name.
+
+A successful source-root listing can prove a child deleted. Missing mounts, I/O
+errors and present-invalid manifests cannot: unhealthy packages unload, but those
+states preserve mutable overrides. Watchers never create a missing flagged mount;
+only the host-owned drop zone may be created. Confirmed deletion clears only the exact
+instance's trust/access/grant markers, even without a loaded definition; a re-add
+starts untrusted. Grant provenance records package-origin claims across sibling
+providers, excluding manual-preexisting grants; an explicit role-feature removal
+clears the corresponding claim, so a later manual re-add survives uninstall.
+Legacy grants without provenance remain conservatively preserved.
 
 Two surfaces enforce it, both reusing the ONE `canAccessScope` predicate
 (`@neuralis/package-system`) — out-of-scope packages are **hidden** (absent),
@@ -133,7 +150,9 @@ through the ONE shared `FsWatchHub` (chokidar, `@neuralis/package-system/data`) 
 Linux and silently never fired on the deploy platform. Every event (incl.
 `overflow`) maps to one debounced full rescan → combined `syncProjectPackagesToRuntime`
 over EVERY scanner of the project (the list is read when the event fires, so a
-source flagged at a later re-activation is never dropped by an older watcher).
+source flagged later is never dropped by an older watcher). A scanner keeps one
+change listener per project, keyed by project id (a re-activation replaces its
+own, never adds a second); the last listener out releases the hub watcher.
 **A sync reloads a package only when its INPUT changed** — the scanner record's
 definition after trust overrides, plus, for a `runtime.type: 'wasm'` package, the
 `mtimeMs:size` stamp of its wasm entry and `dist/routes.json` (`artifactStamp`) — or
@@ -163,7 +182,7 @@ host-side package-runtime mutations, so the deny-by-default floor is enforced
 IDENTICALLY no matter who calls:
 
 - **`rescanProjectPackages(userId, projectId)`** — eager: activate the project,
-  re-scan EVERY scanner of the project (`_packages/` and each `recognizesPackages`
+  re-derive its flagged sources, re-scan EVERY scanner of the project (`_packages/` and each `recognizesPackages`
   source) from disk and re-sync the combined result (`resyncProjectPackages` in
   `projectPackages.ts`, the watcher's own collector) — a rescan of one scanner
   alone would unload every package another scanner owns; returns `{ scanned,
@@ -216,7 +235,6 @@ reach these:
 | `packageInstaller.ts` | Package install workflow (gated by the role's can-manage-roles flag OR `packages.manage` — never a role name) |
 | `packagePublisher.ts` | Local package artifact publishing |
 | `packageRecords.ts` | Persisted per-project package metadata |
-| `migrateLegacyPackages.ts` | One-shot migration of pre-`_packages/` project layouts |
 | `sourceDiscovery.ts` | Converts source configs into package definitions |
 
 ## Internal asset descriptor vs navigable scoped URL

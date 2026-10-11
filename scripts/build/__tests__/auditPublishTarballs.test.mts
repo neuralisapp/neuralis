@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -97,6 +98,25 @@ describe('audit-publish-tarballs --tarballs', () => {
     const r = audit(['--tarballs', dir, '--forbid-text', 'private-owner/monorepo']);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('dist/git.js: contains the private identifier "private-owner/monorepo"');
+  });
+
+  it('refuses a private first-party package name by its hash with no flag at all, and every marker consumer gets it', async () => {
+    // The real name is never spelled in a shipped file: the fixture name's hash is injected the same way.
+    const { privateMarkers, PRIVATE_PACKAGE_NAME_SHA256 } = (await import(script)) as {
+      privateMarkers(input: { roots: string[]; texts?: string[]; nameHashes?: string[] }): Array<{ what: string; pattern: { test(text: string): boolean } }>;
+      PRIVATE_PACKAGE_NAME_SHA256: string[];
+    };
+    expect(PRIVATE_PACKAGE_NAME_SHA256.length).toBeGreaterThan(0);
+    for (const hash of PRIVATE_PACKAGE_NAME_SHA256) expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    const fixtureHash = createHash('sha256').update('@neuralis/zz-private-fixture').digest('hex');
+    const markers = privateMarkers({ roots: [], texts: [], nameHashes: [fixtureHash] });
+    expect(markers.some((m) => m.pattern.test('Notes: shipped with @neuralis/ZZ-Private-Fixture support'))).toBe(true);
+    // Control: a longer or shorter name on the same stem, and the stem in prose, never match.
+    expect(markers.some((m) => m.pattern.test('Notes: @neuralis/zz-private-fixture-kit and @neuralis/zz-private'))).toBe(false);
+    expect(markers.some((m) => m.pattern.test('the zz-private-fixture package'))).toBe(false);
+    // The CLI applies the built-in list with no flag: a built-in hash is reported without its name.
+    const dir = tarballSet({ '@neuralis/brain-core': { 'dist/kinds.js': '// the snapshot kinds of @neuralis/admin\n' } });
+    expect(audit(['--tarballs', dir]).status).toBe(0);
   });
 
   it('refuses a workspace: specifier, a forbidden path and a missing tarball', () => {

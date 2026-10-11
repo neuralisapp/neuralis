@@ -25,12 +25,12 @@ symlinkSync(join(realHost, 'src'), join(host, 'src'), 'dir');
 afterAll(() => rmSync(sandbox, { recursive: true, force: true }));
 
 function mountAddPkg(name: string, dependencies: Record<string, string>): string {
-  writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', dependencies }));
+  writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', bin: { neuralis: 'bin/neuralis.mjs' }, dependencies }));
   rmSync(join(host, 'docker-compose.override.yml'), { force: true });
   const dir = join(sandbox, 'src', name.replace(/[@/]/g, '_'));
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name }));
-  const res = spawnSync(process.execPath, ['--import', 'tsx', join(host, 'scripts', 'mount.mts'), 'add', dir, '--pkg', name], {
+  const res = spawnSync(process.execPath, ['--import', 'tsx', join(host, 'scripts', 'cli', 'registry.mts'), 'mount', 'add', dir, '--pkg', name], {
     cwd: host,
     encoding: 'utf8',
     env: { ...process.env, NEURALIS_HOME: join(sandbox, 'home') },

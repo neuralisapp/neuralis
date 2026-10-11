@@ -15,6 +15,18 @@
  *   then the user's settings: muted ⇒ nothing; addressed + default `on` or
  *   followed ⇒ a row (merged into its unread twin), and the live counts signal.
  *
+ * ORDER: events about one subject (`projectId`, publishing package,
+ * `subjectId`) are materialized one after another, in publish order — a
+ * failure, its recovery and the next failure land in that order whatever the
+ * per-recipient awaits take. Other subjects never wait.
+ *
+ * RESOLUTION (`notify.clears`): an event that clears other types also reaches
+ * every member holding an UNREAD row of those types about the same subject
+ * (found from the project's user directories, one `state.json` read each);
+ * for every candidate the event is VISIBLE to, those rows are marked read —
+ * before, and regardless of, the mute/follow decision about the event's own
+ * row. An undecided verdict clears nothing.
+ *
  * The row carries the declaration's tone and dock, and a title composed from
  * the declaration's title and — when the event data declares one — a string
  * `data.title` (the workflow's name). A `data.nav` of shape
@@ -38,22 +50,35 @@ import { getCommunityPackageRegistry } from '../packages/runtime';
 import { isPackageDefinitionVisible } from '../packages/packageVisibility';
 import type { ProjectRecord } from '../store/projectTypes';
 import { getLogger } from '../logging/setup';
+import { eventWireType } from '@neuralis/package-system/contracts';
+import { listContained } from '@neuralis/package-system/paths';
 import {
   MAX_NOTIFICATION_TITLE_CHARS,
   deliverNotification,
+  hasUnreadOf,
+  notificationsRoot,
+  resolveUnread,
   type NotificationNav,
 } from './notificationStore';
 import { followersOf, readNotificationPrefs } from './notificationPrefs';
 
 type EventsSurface = ReturnType<RuntimeInstance['events']>;
 
-type MaterializerSlot = { stop?: () => void; delivered: number; skipped: number };
+type MaterializerSlot = {
+  stop?: () => void;
+  delivered: number;
+  skipped: number;
+  /** Unread rows marked read by a resolving event. */
+  resolved: number;
+  /** One chain per subject — `(projectId, packageId, subjectId)` → the tail of its queue. */
+  subjects: Map<string, Promise<unknown>>;
+};
 
 const SLOT = Symbol.for('@neuralis/host:notificationMaterializer');
 
 function slot(): MaterializerSlot {
   const g = globalThis as { [SLOT]?: MaterializerSlot };
-  return (g[SLOT] ??= { delivered: 0, skipped: 0 });
+  return (g[SLOT] ??= { delivered: 0, skipped: 0, resolved: 0, subjects: new Map() });
 }
 
 /**
@@ -146,15 +171,56 @@ export function notificationNav(data: Record<string, unknown>): NotificationNav 
   return { widgetType, ...(initialState ? { initialState: initialState as Record<string, unknown> } : {}) };
 }
 
-/** Materialize one event for every recipient that passes every gate. Returns the delivered count. */
-export async function materializeEvent(events: EventsSurface, event: NeuralisEvent): Promise<number> {
+/** Run `fn` behind every earlier event about the same subject; the chain entry goes when empty. */
+function inSubjectOrder<R>(key: string, fn: () => Promise<R>): Promise<R> {
+  const subjects = slot().subjects;
+  const prev = subjects.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  subjects.set(key, next);
+  const release = () => { if (subjects.get(key) === next) subjects.delete(key); };
+  next.then(release, release);
+  return next;
+}
+
+/**
+ * The members holding an unread row of `types` about `subjectId` — the former
+ * recipients a resolution concerns. One directory listing and one `state.json`
+ * read per user, sequentially (O(users in the project)); run only for an event
+ * that clears something.
+ */
+async function holdersOfUnread(projectId: string, types: readonly string[], subjectId: string): Promise<string[]> {
+  const root = notificationsRoot(projectId);
+  if (!root) return [];
+  const listed = await listContained(root);
+  if (!listed.ok) return [];
+  const holders: string[] = [];
+  for (const entry of listed.entries) {
+    if (entry.isDirectory && await hasUnreadOf(projectId, entry.name, types, subjectId)) holders.push(entry.name);
+  }
+  return holders;
+}
+
+/**
+ * Materialize one event for every recipient that passes every gate, in order
+ * with the other events about its subject. Returns the delivered count.
+ */
+export function materializeEvent(events: EventsSurface, event: NeuralisEvent): Promise<number> {
+  const resolved = events.declarationOf(event.type);
+  const packageId = resolved?.packageId ?? event.source;
+  return inSubjectOrder(`${event.projectId}\u0000${packageId}\u0000${event.subjectId}`, () => materializeNow(events, event));
+}
+
+async function materializeNow(events: EventsSurface, event: NeuralisEvent): Promise<number> {
   const resolved = events.declarationOf(event.type);
   if (!resolved) return 0;
   const { declaration, packageId } = resolved;
   const addressed = new Set(event.audience?.userIds ?? []);
-  const recipients = new Set([...addressed, ...(await followersOf(event.projectId, event.type))]);
+  const clears = (declaration.notify?.clears ?? []).map((id) => eventWireType(packageId, id));
+  const holders = clears.length > 0 ? await holdersOfUnread(event.projectId, clears, event.subjectId) : [];
+  const recipients = new Set([...addressed, ...(await followersOf(event.projectId, event.type)), ...holders]);
   const defaultOn = declaration.notify?.default === 'on';
   let delivered = 0;
+  let resolvedRows = 0;
 
   for (const userId of recipients) {
     try {
@@ -162,6 +228,9 @@ export async function materializeEvent(events: EventsSurface, event: NeuralisEve
       const member = await resolveMember(userId, event.projectId);
       if (!member) continue;
       if ((await mayReadEvent(events, event, declaration, packageId, member.session, member.project)) !== 'visible') continue;
+      // A definitive VISIBLE verdict for this reader: the failure this event
+      // resolves is resolved for them, whatever they chose about this type.
+      if (clears.length > 0) resolvedRows += await resolveUnread(event.projectId, userId, clears, event.subjectId);
       const prefs = await readNotificationPrefs(event.projectId, userId);
       if (prefs.mute.includes(event.type)) continue;
       const wanted = (addressed.has(userId) && defaultOn) || prefs.follow.includes(event.type);
@@ -188,6 +257,7 @@ export async function materializeEvent(events: EventsSurface, event: NeuralisEve
   const counters = slot();
   counters.delivered += delivered;
   counters.skipped += recipients.size - delivered;
+  counters.resolved += resolvedRows;
   return delivered;
 }
 
@@ -222,10 +292,12 @@ export function startNotificationMaterializer(runtime: RuntimeInstance): void {
   };
 }
 
-/** Delivered / skipped recipient counts since boot — the measurement the live row reads. */
-export function notificationMaterializerStats(): { delivered: number; skipped: number; running: boolean } {
+/** Delivered / skipped recipient counts, resolved rows and subjects in flight — the measurement the live row reads. */
+export function notificationMaterializerStats(): {
+  delivered: number; skipped: number; resolved: number; subjectsInFlight: number; running: boolean;
+} {
   const s = slot();
-  return { delivered: s.delivered, skipped: s.skipped, running: Boolean(s.stop) };
+  return { delivered: s.delivered, skipped: s.skipped, resolved: s.resolved, subjectsInFlight: s.subjects.size, running: Boolean(s.stop) };
 }
 
 /** Test-only: unsubscribe and reset the counters. */
@@ -234,4 +306,6 @@ export function resetNotificationMaterializerForTests(): void {
   s.stop?.();
   s.delivered = 0;
   s.skipped = 0;
+  s.resolved = 0;
+  s.subjects.clear();
 }

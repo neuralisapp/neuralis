@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseEnvContent } from '../setup/envFile.mts';
 const host = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const roots: string[] = [];
-const image = 'neuralisapp/webtop-ubuntu-xfce:dev';
+/** The bundled derivative is tagged with the release's own version (the host package.json). */
+const image = `neuralisapp/webtop-ubuntu-xfce:${(JSON.parse(readFileSync(join(host, 'package.json'), 'utf8')) as { version: string }).version}`;
 function fixture(docker: boolean): { root: string; env: NodeJS.ProcessEnv; output: string; transcript: string } {
   const root = mkdtempSync(join('/tmp', 'neuralis-machine-setup-')); roots.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin); mkdirSync(join(root, 'out'));
@@ -19,7 +20,7 @@ function fixture(docker: boolean): { root: string; env: NodeJS.ProcessEnv; outpu
 }
 async function run(f: ReturnType<typeof fixture>, args: string[], questions: [string, string][] = []): Promise<string> {
   return await new Promise<string>((resolveRun, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/setup.mts', ...args, '--output', f.output], { cwd: host, env: f.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/cli/registry.mts', 'setup', ...args, '--output', f.output], { cwd: host, env: f.env, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = ''; let cursor = 0; let consumed = 0;
     const timer = setTimeout(() => { child.kill(); reject(new Error(`Timeout at ${questions[cursor]?.[0]}:\n${output}`)); }, 20000);
     child.stdout.on('data', (chunk: Buffer) => {

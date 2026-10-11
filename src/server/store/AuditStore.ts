@@ -67,6 +67,8 @@ export type AuditAction =
   | 'skill.session_ticket_minted'
   | 'skill.session_call'
   | 'skill.session_ticket_rejected'
+  // Which declared credential ids a skill activation projected, at which tier ceiling (ids only).
+  | 'skill.credentials_projected'
   // modular-meerkat Inc 4 — self-scope channel credential writes (F7).
   | 'channels.credential_write'
   | 'channels.credential_delete'
@@ -137,14 +139,13 @@ export type AuditEntry = {
  * queue — so a rotation in one copy could rename the file under another copy's
  * write (a read-modify-write writer lost half the rows this way, measured 20/40
  * in the two-copy test). The PlatformConfigStore precedent; `Symbol.for` so
- * every copy resolves the SAME slot. The file was written newest-first before
- * it became append-only, hence `legacyNewestFirst`.
+ * every copy resolves the SAME slot.
  */
 const APPENDER_SLOT = Symbol.for('@neuralis/host:auditAppender');
 
 function appender(): JsonlAppender<AuditEntry> {
   const g = globalThis as { [APPENDER_SLOT]?: JsonlAppender<AuditEntry> };
-  return (g[APPENDER_SLOT] ??= new JsonlAppender<AuditEntry>({ legacyNewestFirst: true }));
+  return (g[APPENDER_SLOT] ??= new JsonlAppender<AuditEntry>());
 }
 
 /**
