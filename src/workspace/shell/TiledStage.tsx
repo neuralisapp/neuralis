@@ -11,7 +11,7 @@ import type { TransparencyLevel, WidgetInstance } from '../store/types';
 import type { ChatPosition } from './dockPlacement';
 import { readDockLayoutConfig } from './dockPlacement';
 import { resolveWidgetLevel } from './widgetSurface';
-import { useStageOutlet } from './stageOutlet';
+import { useStageEmptyText, useStageOutlet } from './stageOutlet';
 
 function Handle() {
   return (
@@ -36,6 +36,7 @@ export function TiledStage() {
   const setWidgetSplits = useWorkspaceStore((s) => s.setWidgetSplits);
   const setWidgetTransparency = useWorkspaceStore((s) => s.setWidgetTransparency);
   const registerPlaceholder = useStageOutlet();
+  const emptyText = useStageEmptyText('Open a widget from the dock');
 
   // Lazy-init from localStorage so the first render already matches the
   // persisted layout — prevents a mount-then-reshuffle that corrupts
@@ -77,11 +78,22 @@ export function TiledStage() {
     return chatPosition === 'start' ? 1 : -1;
   });
 
+  // v4 sorts its registry only when panels register, not when keyed DOM moves.
+  // Reset layout registration only if RETAINED panels change relative order;
+  // ordinary open/minimize must not detach unrelated widget outlets/iframes.
+  const ids = widgets.map((widget) => widget.id);
+  const [registration, setRegistration] = useState({ ids, epoch: 0 });
+  if (ids.join(',') !== registration.ids.join(',')) {
+    const retained = registration.ids.filter((id) => ids.includes(id));
+    const reordered = retained.join(',') !== ids.filter((id) => retained.includes(id)).join(',');
+    setRegistration({ ids, epoch: registration.epoch + Number(reordered) });
+  }
+
   if (widgets.length === 0) {
     return (
       <div className="h-full w-full flex items-center justify-center">
         <div className="text-sm text-white/50">
-          {hiddenWidgets.length > 0 ? 'Restore a widget from the dock' : 'Open a widget from the dock'}
+          {hiddenWidgets.length > 0 ? 'Restore a widget from the dock' : emptyText}
         </div>
       </div>
     );
@@ -103,7 +115,7 @@ export function TiledStage() {
   };
 
   return (
-    <Group orientation="horizontal" className="h-full w-full" onLayoutChanged={onLayoutChanged}>
+    <Group key={registration.epoch} orientation="horizontal" className="h-full w-full" onLayoutChanged={onLayoutChanged}>
       {widgets.flatMap((w, idx) => {
         const savedSize = widgetSplitsById[w.id];
         const defaultSize = typeof savedSize === 'number' ? savedSize : 100 / widgets.length;
@@ -127,6 +139,7 @@ export function TiledStage() {
             minSize="10%"
           >
             <PanelChrome
+              windowId={w.id}
               title={w.title}
               subtitle={!isChromeless && mode === 'toolbar' ? w.type : undefined}
               onClose={() => { if (agentId) minimizeWidget({ agentId, widgetInstanceId: w.id }); }}

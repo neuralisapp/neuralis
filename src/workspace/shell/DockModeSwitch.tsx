@@ -33,7 +33,6 @@ export function DockModeSwitch({ mode, onChangeMode, pinned = true, orientation 
   const rot = rotationForMode(mode);
   const level = useDockTransparency();
   const surf = dockSurface(level, 'default');
-  const opaqueBg = pinned ? 'bg-white/12 hover:bg-white/20' : 'bg-neutral-700 hover:bg-neutral-600';
 
   return (
     <button
@@ -41,7 +40,7 @@ export function DockModeSwitch({ mode, onChangeMode, pinned = true, orientation 
       onClick={() => onChangeMode(nextDockMode(mode))}
       className={cn(
         'relative h-8 w-8 rounded-full shrink-0 transition-all duration-300',
-        surf ? surf.bg : opaqueBg,
+        surf.bg,
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/15',
         itemsCenter ? 'absolute left-6 top-1/2 -translate-x-1/2 -translate-y-1/2' : '',
         className,

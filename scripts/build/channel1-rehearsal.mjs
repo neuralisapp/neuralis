@@ -348,7 +348,8 @@ async function rehearseFolderUpgrade({ userconfig, candidate }) {
   const localEnv = { ...process.env, npm_config_registry: REGISTRY };
 
   step(`upgrade branch: a real ${FROM} folder from the public registry (read-only)`);
-  sh('npm', ['create', `neuralis@${FROM}`, 'previous', '--yes', '--registry', PUBLIC_REGISTRY, '--cache', coldCache], { cwd: room, stdio: 'inherit', env: publicEnv });
+  // The published scaffolders default to `latest`: name the old line explicitly.
+  sh('npm', ['create', `neuralis@${FROM}`, 'previous', '--yes', '--registry', PUBLIC_REGISTRY, '--cache', coldCache, '--', '--version', FROM], { cwd: room, stdio: 'inherit', env: publicEnv });
   const packed = JSON.parse(sh('npm', ['pack', `neuralis@${FROM}`, '--registry', PUBLIC_REGISTRY, '--cache', coldCache, '--pack-destination', workdir, '--json'], { cwd: workdir, env: publicEnv }));
   sh('npm', ['publish', join(workdir, packed[0].filename), '--registry', REGISTRY, '--userconfig', userconfig, '--tag', 'previous'], { cwd: workdir, env: localEnv });
   ok(`neuralis@${FROM} scaffolded; its host tarball mirrored locally under the "previous" tag`);

@@ -141,7 +141,7 @@ describe('persist', () => {
     seed({ p1: { lastAgentId: 'a', dock: DOCK } }, { projectId: 'p1', agentId: 'a' });
     s().setDockEditing('both', true);
     const persisted = options.partialize?.(s()) as Record<string, unknown>;
-    expect(Object.keys(persisted).sort()).toEqual(['projectStateById', 'runtimeByAgentId', 'session']);
+    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
     expect((persisted.projectStateById as Record<string, ProjectWorkspaceState>).p1?.dock).toEqual(DOCK);
   });
 

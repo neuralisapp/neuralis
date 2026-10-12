@@ -11,11 +11,26 @@ import type {
   PackageTrust,
 } from '@neuralis/package-system/contracts';
 
+/**
+ * A dock entry's declared package picture, as PRIMITIVES only: the dock
+ * coordinate the icon scope is minted for, and the declared path as the
+ * declaration key (a changed declaration is a new coordinate). Frozen, and
+ * never a url — the bytes are reached only through `PackageAppIcon`, which
+ * mints an identity-free scope for a VISIBLE consumer.
+ */
+export type PackageAppImage = Readonly<{
+  packageId: string;
+  dockId: string;
+  declaration: string;
+}>;
+
 /** Dock item for the workspace UI. */
 export type PackageDockItem = {
   id: string;
   label: string;
   icon: string;
+  /** The optional package picture; `icon` stays the glyph fallback. */
+  image?: PackageAppImage;
   color?: string;
   position: number;
   section?: 'top' | 'bottom';
@@ -52,6 +67,9 @@ export function buildPackageDockItems(
     id: dock.id,
     label: dock.label,
     icon: dock.icon ?? 'Square',
+    image: typeof dock.image === 'string'
+      ? Object.freeze({ packageId: dock.packageId, dockId: dock.id, declaration: dock.image })
+      : undefined,
     color: dock.color,
     position: dock.position ?? 50,
     section: dock.section,

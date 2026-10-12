@@ -575,6 +575,59 @@ describe('feature-filtered snapshots', () => {
   });
 });
 
+describe('dock entries — the ONE dock rule, its missing-target semantics and the declared picture', () => {
+  beforeEach(() => {
+    delete (globalThis as any).__neuralis_snapshot_service__;
+    const surfaces = [
+      {
+        kind: 'dock' as const,
+        id: 'orphan-dock',
+        label: 'Orphan',
+        image: 'app/shared/icon.png',
+        packageId: 'dock-pkg',
+        action: { type: 'open-widget' as const, widget: 'no.such.widget' },
+      },
+      {
+        kind: 'dock' as const,
+        id: 'gated-dock',
+        label: 'Gated',
+        image: 'app/shared/icon.png',
+        packageId: 'dock-pkg',
+        requires: { features: ['dock.secret'] },
+        action: { type: 'action' as const, id: 'go' },
+      },
+    ];
+    const def = { id: 'dock-pkg', name: 'dock-pkg', version: '1.0.0', meta: {}, source: { kind: 'local-dir' } };
+    (getCommunityPackageRegistry as ReturnType<typeof vi.fn>).mockReturnValue({ listPackages: () => [def] });
+    (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
+      getProjectPackageIds: () => new Set(['dock-pkg']),
+      getPackageOwnerScope: () => undefined,
+      getLoader: () => ({ getStatus: () => undefined }),
+    });
+    vi.mocked(PackageSnapshotService).mockImplementation(function () { return ({
+      getFullSnapshot: () => ({
+        revision: 'test-rev', packages: [{ id: 'dock-pkg' }], tools: [], surfaces,
+        commands: [], files: [], resources: [], connectors: [],
+      }),
+      getRevision: () => 'test-rev',
+      isUpToDate: () => false,
+    }); } as any);
+  });
+
+  it('an open-widget entry whose target no visible package declares STAYS (existing semantics, pinned as-is)', () => {
+    const docks = getDockSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, []);
+    expect(docks.map((dock) => dock.id)).toEqual(['orphan-dock']);
+  });
+
+  it("the entry's own features still gate it, and the declared picture path passes through unchanged", () => {
+    const docks = getDockSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, ['dock.secret']);
+    expect(docks.map((dock) => [dock.id, dock.image])).toEqual([
+      ['orphan-dock', 'app/shared/icon.png'],
+      ['gated-dock', 'app/shared/icon.png'],
+    ]);
+  });
+});
+
 describe('R2b — scope-isolated snapshots (scope-guarding-magpie)', () => {
   const builtinDef = makeDef('@neuralis/agent-core');
   const userScopedDef = makeDef('pkg-alice'); // owned by a user-scoped source

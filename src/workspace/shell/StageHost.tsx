@@ -2,12 +2,14 @@
 
 import { useCallback, useLayoutEffect, useReducer, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { useStageShell } from '../store/selectors';
+import { useAgentsState, useRetainedWindows, useStageShell } from '../store/selectors';
+import { boundAgentOf, isGroupRuntimeKey } from '../store/workspaceStore';
 import { renderWidget } from '../widgets/registry';
 import type { WidgetInstance } from '../store/types';
 import { StageOutletProvider, type RegisterPlaceholder } from './stageOutlet';
 import { TiledStage } from './TiledStage';
 import { CanvasStage } from './CanvasStage';
+import { PhoneStage } from './PhoneStage';
 
 /**
  * The always-mounted stage owner. It holds the keep-alive machinery — one
@@ -37,6 +39,10 @@ import { CanvasStage } from './CanvasStage';
  */
 export function StageHost() {
   const { agentId, runtimeKey, openOrder, byId, stageMode } = useStageShell();
+  // Runtimes left by a presentation/Group switch stay MOUNTED in the stash, so
+  // switching back re-shows the same live windows (no remount, no new stream).
+  const retained = useRetainedWindows();
+  const { byId: agentsById, status: agentsStatus } = useAgentsState();
 
   const stashRef = useRef<HTMLDivElement | null>(null);
   const outletsRef = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -66,7 +72,26 @@ export function StageHost() {
     if (node && node.parentElement !== el) el.appendChild(node);
   }, []);
 
-  const allWidgets = openOrder.map((id) => byId[id]).filter(Boolean) as WidgetInstance[];
+  // Every mounted window with the agent it runs as: the active layout's
+  // windows (placed), then the retained ones (always stashed). A retained
+  // window stays mounted only under the active layout's rule
+  // (`authorizedWindowOrder`): the agent list is loaded and its agent is in it —
+  // a per-agent runtime of a revoked agent stops polling too.
+  const mounted: Array<{ w: WidgetInstance; agentId: string; active: boolean }> = [];
+  for (const w of openOrder.map((id) => byId[id])) {
+    const bound = w && runtimeKey ? boundAgentOf(runtimeKey, w) ?? agentId : null;
+    if (w && bound) mounted.push({ w, agentId: bound, active: true });
+  }
+  for (let i = 0; i < retained.length; i += 2) {
+    const key = retained[i] as string;
+    const retainedById = retained[i + 1] as Record<string, WidgetInstance>;
+    for (const w of Object.values(retainedById)) {
+      const bound = boundAgentOf(key, w);
+      if (!bound || agentsStatus !== 'success' || !agentsById[bound]) continue;
+      mounted.push({ w, agentId: bound, active: false });
+    }
+  }
+  const allWidgets = mounted.map((m) => m.w);
 
   // Ensure an outlet exists per live instance, GC dead ones, then place each
   // outlet into the active stage's placeholder (or the off-screen stash when
@@ -90,16 +115,16 @@ export function StageHost() {
         outletsRef.current.delete(id);
       }
     }
-    for (const w of allWidgets) {
+    for (const { w, active } of mounted) {
       const node = outletsRef.current.get(w.id);
       if (!node) continue;
-      const dest = (!w.hidden ? placeholdersRef.current[w.id] : null) ?? stashRef.current;
+      const dest = (active && !w.hidden ? placeholdersRef.current[w.id] : null) ?? stashRef.current;
       if (dest && node.parentElement !== dest) dest.appendChild(node);
     }
     if (created) bumpOutlets();
   });
 
-  if (!agentId) {
+  if (!agentId && !(runtimeKey && isGroupRuntimeKey(runtimeKey))) {
     return (
       <div className="h-full w-full flex items-center justify-center">
         <div className="text-sm text-white/50">Select an agent to start</div>
@@ -111,9 +136,9 @@ export function StageHost() {
     <>
       {/* Off-screen stash keeps minimized widgets mounted. */}
       <div ref={stashRef} className="hidden" aria-hidden="true" />
-      {allWidgets.map((w) => {
+      {mounted.map(({ w, agentId: bound }) => {
         const node = outletsRef.current.get(w.id);
-        return node ? createPortal(renderWidget({ agentId, instance: w }), node, w.id) : null;
+        return node ? createPortal(renderWidget({ agentId: bound, instance: w }), node, w.id) : null;
       })}
     </>
   );
@@ -121,7 +146,7 @@ export function StageHost() {
   return (
     <StageOutletProvider value={registerPlaceholder}>
       <div className="h-full w-full relative">
-        {stageMode === 'tiled' ? (
+        {stageMode === 'phone' ? <PhoneStage /> : stageMode === 'tiled' ? (
           <TiledStage />
         ) : (
           // Keyed on the COMPOSITE runtime key (project:agent), never the bare

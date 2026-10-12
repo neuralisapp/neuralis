@@ -120,6 +120,17 @@ describe('bootstrap — an install without a state file', () => {
     expect((await readQdrantState(path))?.version).toBe(QDRANT_TARGET_VERSION);
   });
 
+  it('fresh setup creates a missing data home, while dry runs leave it absent', async () => {
+    const home = join(tempDir('neuralis-qdrant-state-'), 'new', 'home');
+    const path = join(home, 'qdrant-version.json');
+    await resolveQdrantState({ statePath: path, probe: probe({ storage: false }), persist: false });
+    expect(existsSync(home)).toBe(false);
+    const res = await resolveQdrantState({ statePath: path, probe: probe({ storage: false }) });
+    expect(res).toMatchObject({ kind: 'state', created: true, state: { source: 'fresh', version: QDRANT_TARGET_VERSION } });
+    expect((await readQdrantState(path))?.version).toBe(QDRANT_TARGET_VERSION);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
   it('existing storage records the version the running server reports — never the target', async () => {
     const path = tempState();
     const res = await resolveQdrantState({ statePath: path, probe: probe({ storage: true, running: '1.13.6' }) });

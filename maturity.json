@@ -281,9 +281,9 @@
       "label": "beta",
       "score": 70,
       "gates": [],
-      "summary": "The Neuralis 0.2.0 beta is publicly available through npm create neuralis, the neuralisapp/neuralis Docker image and a validated history-free public host snapshot.",
+      "summary": "The Neuralis beta is publicly available through npm create neuralis, the neuralisapp/neuralis Docker image and a validated history-free public host snapshot.",
       "limits": [
-        "The 0.2.0 beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded.",
+        "The beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded.",
         "Native installs on Linux compile the terminal module and need python3, make and a C++ compiler."
       ]
     },

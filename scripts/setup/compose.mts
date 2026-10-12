@@ -515,7 +515,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
   // qdrantMode 'skip' → no QDRANT_URL (BRAIN_INFRA_MODE=inmemory covers it).
 
   lines.push(
-    `      - MCP_HTTP_PORT=${input.mcpPort}`,
+    '      - MCP_HTTP_PORT=3101',
     '      # MCP Apps isolated-origin sandbox port (browser-visible published',
     '      # port). Read by the host proxy (sandbox-origin fence) and the',
     '      # mcp-apps/template route; unset ⇒ the card fails closed (no srcdoc).',

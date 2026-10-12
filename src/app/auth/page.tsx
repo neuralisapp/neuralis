@@ -157,7 +157,7 @@ export default function AuthPage() {
 
             <p className="text-center text-sm leading-relaxed text-white/70">
               Neuralis needs initial setup before you can sign in.
-              Run one of these commands in your terminal:
+              Run this command in your terminal:
             </p>
 
             <div className="w-full space-y-2">

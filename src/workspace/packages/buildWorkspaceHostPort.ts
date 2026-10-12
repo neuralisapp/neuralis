@@ -16,7 +16,7 @@ import type {
 import { useSyncExternalStore } from 'react';
 import { useSession } from 'next-auth/react';
 import { rolePriority } from '@neuralis/package-system/access';
-import { useWorkspaceStore, agentRuntimeKey, getDefaultChatWidgetType } from '../store/workspaceStore';
+import { useWorkspaceStore, agentRuntimeKey, getDefaultChatWidgetType, activeGroup, activeRuntimeKeyOf, boundAgentOf } from '../store/workspaceStore';
 import { UserAvatar, UserAvatarStack } from '../shell/UserAvatar';
 import { getHubConnected, subscribeHub } from '../realtime/eventHub';
 import { subscribeClientStateReset } from '../store/clientResetBus';
@@ -44,7 +44,7 @@ const visibleSkillsBySnapshot = new WeakMap<PackageRuntimeSnapshot, readonly Vis
  * PURE PROJECTION — zero policy of its own.
  *
  * `snapshot.skills` is ALREADY the authoritative per-caller answer:
- * `snapshot.ts:320` builds it through `buildContributions`, which applies S2 via
+ * `snapshot.ts` `buildScopedSnapshot` builds it through `buildContributions`, which applies S2 via
  * `hasRequiredFeatures` → the ONE shared `meetsRequires`, over
  * `visibleDefinitions` (host targeting → project install membership → R2b
  * source-owner scope → base-access feature). Re-deciding ANY of that here would
@@ -145,19 +145,29 @@ export const workspaceHostPort: WorkspaceHostPort = {
 
   useChatCollapsed: (agentId) =>
     useWorkspaceStore((s) => {
-      // The port contract stays bare-agent; the composite key is composed HERE
+      // The port contract stays bare-agent; the key is composed HERE: the
+      // shared Group layout while it is shown, else the (project, agent) one
       // (agent ids repeat across projects — the map is (project, agent)-keyed).
-      const rk = s.session.projectId ? agentRuntimeKey(s.session.projectId, agentId) : null;
+      const rk = activeGroup(s) ? activeRuntimeKeyOf(s) : s.session.projectId ? agentRuntimeKey(s.session.projectId, agentId) : null;
       const rt = rk ? s.runtimeByAgentId[rk] : undefined;
-      if (!rt) return false;
+      if (!rk || !rt) return false;
       // The slot is the manifest's `defaultOpen` widget — the type `setChatCollapsed` closes and reopens.
       const slotType = getDefaultChatWidgetType();
-      return slotType !== null && !rt.widgets.openOrder.some((id) => rt.widgets.byId[id]?.type === slotType);
+      return slotType !== null && !rt.widgets.openOrder.some((id) => rt.widgets.byId[id]?.type === slotType && boundAgentOf(rk, rt.widgets.byId[id]) === agentId);
     }),
   setChatCollapsed: (agentId, collapsed) =>
     useWorkspaceStore.getState().setChatCollapsed({ agentId, collapsed }),
 
-  openWidget: (params) => useWorkspaceStore.getState().openWidget(params),
+  // A package opening a window for ANOTHER agent of the project: per agent,
+  // that window lives in that agent's layout, so the view follows it (never
+  // opened out of sight); a Group holds every member's windows in one layout.
+  openWidget: (params) => {
+    const store = useWorkspaceStore.getState();
+    if (!activeGroup(store) && store.session.agentId && params.agentId !== store.session.agentId && store.agents.byId[params.agentId]) {
+      store.selectAgent(params.agentId);
+    }
+    return useWorkspaceStore.getState().openWidget(params);
+  },
   updateWidgetState: (params) => useWorkspaceStore.getState().updateWidgetState(params),
 
   selectAgent: (agentId) => useWorkspaceStore.getState().selectAgent(agentId),

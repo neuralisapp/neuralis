@@ -6,6 +6,7 @@ import { cn } from '@/lib/cn';
 import { ensureProjectCounts, useDockArrival, useDockUnread, useProjectUnread } from '../notifications/notificationsClient';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import type { DockEdge } from './dockPlacement';
+import type { PackageAppImage } from '../packages/dockRuntime';
 import { NotificationPopover } from './NotificationPopover';
 
 /**
@@ -78,6 +79,8 @@ export type DockBadgeTarget = {
   badgeKey: string;
   title: string;
   icon: ComponentType<{ className?: string; style?: CSSProperties }>;
+  /** The package's declared picture (the glyph stays the fallback). */
+  image?: PackageAppImage;
   color?: string;
 };
 

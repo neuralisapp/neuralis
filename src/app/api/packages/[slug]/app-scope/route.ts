@@ -10,6 +10,14 @@
  *   `component.url` / `render.url` — an arbitrary app path can never be
  *   minted. The client-supplied `rendererFingerprint` is a refcount
  *   coordinate only; it carries NO authority (the server computes its own).
+ *   With `{ purpose: 'icon', surfaceKind: 'dock', surfaceId: <dock id> }` it
+ *   mints a scope for that dock entry's DECLARED picture instead — the server
+ *   derives the one file from the declaration (`resolveVisiblePackageDockImage`,
+ *   the snapshot's own dock rule), the caller never sends a path, and the url is
+ *   `/api/package-app/_scope/{handle}/shared/{picture}`. An absent `purpose` is a
+ *   document mint, exactly as before. At the per-user cap an icon may displace
+ *   only an icon: otherwise ONE fixed 429 `{ code: 'icon_capacity' }` with no
+ *   count and no record identity, and nothing is revoked.
  * - PATCH  `{ handle }` → heartbeat. Re-runs the FRESH canonical session +
  *   the FULL shared visibility gate + fingerprint/generation/trust compare;
  *   any loss revokes the handle (410).
@@ -44,8 +52,12 @@ import {
 } from '@/server/auth/resolveSessionContext';
 import { getSessionUser } from '@/server/auth/session';
 import { resolveVerifiedAgentScope } from '@/server/auth/resolveVerifiedAgentScope';
-import { resolveVisiblePackageSurface } from '@/server/packages/packageVisibility';
+import {
+  resolveVisiblePackageDockImage,
+  resolveVisiblePackageSurface,
+} from '@/server/packages/packageVisibility';
 import { getPackageAssetScopeAuthority } from '@/server/packages/PackageAssetScopeAuthority';
+import { resolveCurrentScopeDeclaration } from '@/server/packages/packageAppAssetGet';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
 import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
 
@@ -61,6 +73,17 @@ function notVisible(): NextResponse {
 function gone(): NextResponse {
   return NextResponse.json({ error: 'Gone' }, { status: 410 });
 }
+
+/**
+ * The icon-only capacity refusal: fixed bytes, no count, no record identity.
+ * The client settles to the declared glyph and never retries on a timer.
+ */
+function iconCapacity(): NextResponse {
+  return NextResponse.json({ error: 'Icon unavailable', code: 'icon_capacity' }, { status: 429 });
+}
+
+/** Longest dock id the icon mint looks up (ids are matched, never used as a path). */
+const DOCK_ID_MAX_CHARS = 128;
 
 async function readBody(req: NextRequest): Promise<Record<string, unknown>> {
   try {
@@ -100,6 +123,14 @@ export async function POST(req: NextRequest, { params }: Params): Promise<Respon
 
   const surfaceKind = body.surfaceKind;
   const surfaceId = body.surfaceId;
+  if (body.purpose === 'icon') {
+    if (surfaceKind !== 'dock') return notVisible();
+    if (typeof surfaceId !== 'string' || surfaceId.length === 0 || surfaceId.length > DOCK_ID_MAX_CHARS) {
+      return notVisible();
+    }
+    return mintIcon(session, slug, surfaceId);
+  }
+  if (body.purpose !== undefined && body.purpose !== 'document') return notVisible();
   if (surfaceKind !== 'widget' && surfaceKind !== 'card') return notVisible();
   if (typeof surfaceId !== 'string' || !isSafeSurfaceIdSegment(surfaceId)) return notVisible();
 
@@ -143,6 +174,7 @@ export async function POST(req: NextRequest, { params }: Params): Promise<Respon
     projectId: session.projectId,
     agentId: verifiedAgentId,
     packageId: surface.packageId,
+    purpose: 'document',
     surfaceKind: surfaceKind as SurfaceAssetKind,
     surfaceId,
     renderer: surface.renderer,
@@ -161,6 +193,48 @@ export async function POST(req: NextRequest, { params }: Params): Promise<Respon
   return NextResponse.json({
     handle: minted.handle,
     url: `/api/package-app/_scope/${minted.handle}/surface/${entry.entryRel}`,
+  });
+}
+
+/** The icon arm of POST: the declared picture of ONE caller-visible dock entry. */
+async function mintIcon(session: SessionContext, slug: string, dockId: string): Promise<Response> {
+  await ensureProjectPackagesLoaded(session.projectId);
+  const image = await resolveVisiblePackageDockImage(session, slug, dockId);
+  if (!image) return notVisible();
+
+  // The root comes from the exact visible instance this project loaded, as for
+  // a document — never from a caller path.
+  const runtime = getPackageRuntimeManager();
+  const packageRoot = runtime.getProjectPackageIds(session.projectId).has(image.packageId)
+    ? runtime.getLoader().getStatus(image.packageId)?.packageRoot
+    : undefined;
+  if (!packageRoot) return notVisible();
+  const sharedRoot = resolve(packageRoot, SHARED_ASSET_DIR);
+  const file = resolve(sharedRoot, image.sharedRel);
+  if (!file.startsWith(sharedRoot + sep)) return notVisible();
+
+  const minted = getPackageAssetScopeAuthority().mint({
+    userId: session.userId,
+    projectId: session.projectId,
+    agentId: session.agentId,
+    packageId: image.packageId,
+    purpose: 'icon',
+    surfaceKind: 'dock',
+    surfaceId: dockId,
+    // No renderer: a picture is never rendered as a document.
+    renderer: 'image',
+    trust: image.trust,
+    fingerprint: image.fingerprint,
+    generation: image.generation,
+    surfaceRoot: sharedRoot,
+    sharedRoot,
+    entryRelPath: image.sharedRel,
+  });
+  if ('refused' in minted) return iconCapacity();
+
+  return NextResponse.json({
+    handle: minted.handle,
+    url: `/api/package-app/_scope/${minted.handle}/shared/${image.sharedRel}`,
   });
 }
 
@@ -196,12 +270,7 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     }
   }
 
-  const surface = await resolveVisiblePackageSurface(
-    { ...session, agentId: record.agentId },
-    record.packageId,
-    record.surfaceKind,
-    record.surfaceId,
-  );
+  const surface = await resolveCurrentScopeDeclaration({ ...session, agentId: record.agentId }, record);
   if (
     !surface ||
     surface.fingerprint !== record.fingerprint ||

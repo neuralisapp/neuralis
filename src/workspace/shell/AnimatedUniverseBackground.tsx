@@ -54,8 +54,13 @@ function createNodePool(width: number, height: number): Node[] {
   return pool;
 }
 
-export function AnimatedUniverseBackground() {
+/** `starColor` is the background theme's `canvasStar` — an OPAQUE colour (any alpha would darken every star). */
+export function AnimatedUniverseBackground({ starColor = '#ffffff' }: { starColor?: string }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Read by `paint()` every frame, so a theme switch recolours the running
+  // loop without tearing it down (one fillStyle per frame, as before).
+  const star = useRef(starColor);
+  star.current = starColor;
   // Defaults to 'animate' so the common path is unchanged; the media query is
   // read in an effect, never in a render-time initializer (SSR hydration).
   const [motion, setMotion] = useState<Motion>('animate');
@@ -141,12 +146,12 @@ export function AnimatedUniverseBackground() {
       const cy = height / 2;
 
       context!.clearRect(0, 0, width, height);
-      // ONE fillStyle per frame instead of one `rgba(255,255,255,${alpha})`
-      // template literal + CSS colour parse per star per frame (~6000/s). Must
-      // be fully OPAQUE white: any alpha here would multiply with globalAlpha
-      // and darken every star. Set per FRAME, not per effect — `applySize()`
-      // resets the context state (see above).
-      context!.fillStyle = 'rgb(255,255,255)';
+      // ONE fillStyle per frame instead of one `rgba(…,${alpha})` template
+      // literal + CSS colour parse per star per frame (~6000/s). Must be fully
+      // OPAQUE (the theme's `canvasStar`): any alpha here would multiply with
+      // globalAlpha and darken every star. Set per FRAME, not per effect —
+      // `applySize()` resets the context state (see above).
+      context!.fillStyle = star.current;
 
       for (let i = 0; i < NODE_COUNT; i++) {
         const node = nodes[i];
@@ -263,7 +268,8 @@ export function AnimatedUniverseBackground() {
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [motion]);
+    // The static frame repaints for a new star colour; the running loop reads `star` itself.
+  }, [motion, motion === 'static' ? starColor : null]);
 
   return (
     <canvas

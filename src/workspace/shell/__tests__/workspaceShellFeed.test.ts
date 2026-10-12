@@ -2,7 +2,7 @@
  * The notification badges' feed costs ONE counts read per page load:
  *  - everything below the package provider wrap REMOUNTS when a provider
  *    attaches at runtime (`wrapInWorkspaceProviders` puts a new element on
- *    top), and a persisted same-edge dock layout remounts both docks again
+ *    top), and a persisted dock layout remounts a dock whose lane it moves
  *    after the first paint — so the ONE holder sits in `WorkspaceRoot`, above
  *    the wrap;
  *  - the last release unsubscribes one macrotask later, so a holder that does
@@ -16,6 +16,8 @@ import type { ReactNode } from 'react';
 import { installFakeDom } from './fakeDom';
 
 const dom = installFakeDom();
+Object.defineProperty(window, 'screen', { configurable: true, value: { width: 1280, height: 800 } });
+Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
 
 const probe = vi.hoisted(() => ({ log: [] as string[] }));
 
@@ -30,11 +32,12 @@ vi.mock('../Dock', async () => {
     }, [dockId]);
     return null;
   }
-  return { Dock, triggerZoneClass: () => 'trigger' };
+  function DockCluster({ children }: { children: (open: boolean) => unknown }) { return children(false); }
+  return { Dock, DockCluster };
 });
 vi.mock('../useDockItems', () => ({ usePrimaryDockItems: () => [], useSecondaryDockItems: () => [] }));
 vi.mock('../AnimatedUniverseBackground', () => ({ AnimatedUniverseBackground: () => null }));
-vi.mock('../../theme/useTheme', () => ({ useTheme: () => ({ theme: { useUniverseBackground: false } }) }));
+vi.mock('../../theme/useTheme', () => ({ useTheme: () => ({ backgroundTheme: { useUniverseBackground: false }, dockTheme: { id: 'dark', colors: {} } }) }));
 
 type HubSub = { channel: string };
 const hub = vi.hoisted(() => ({ subs: [] as HubSub[], subscribed: 0 }));
@@ -53,9 +56,9 @@ const { WorkspaceShell } = await import('../WorkspaceShell');
 const { wrapInWorkspaceProviders } = await import('../../NeuralisHostProvider');
 const { _resetNotificationsClient, useNotificationsFeed } = await import('../../notifications/notificationsClient');
 
-const SAME_EDGE = JSON.stringify({
-  primary: { dockId: 'primary', edge: 'left', align: 'start' },
-  secondary: { dockId: 'secondary', edge: 'left', align: 'start' },
+const SAME_ANCHOR = JSON.stringify({
+  primary: { dockId: 'primary', anchor: 'left', orientation: 'vertical' },
+  secondary: { dockId: 'secondary', anchor: 'left', orientation: 'vertical' },
 });
 
 let countReads = 0;
@@ -144,13 +147,12 @@ describe('everything below the provider wrap remounts — the feed is held above
     expect(hub.subscribed).toBe(1);
   });
 
-  it('a persisted same-edge layout remounts BOTH docks after the first paint (a second remount class below the wrap)', async () => {
-    window.localStorage.setItem('neuralis:workspace:dockLayout', SAME_EDGE);
+  it('a persisted layout remounts the dock whose lane it moves after the first paint (a second remount class below the wrap)', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', SAME_ANCHOR);
     await renderTree(createElement(WorkspaceShell, { snapshotReady: true, children: null }));
     expect(probe.log).toEqual([
       'mount primary', 'mount secondary',
-      'unmount primary', 'unmount secondary',
-      'mount primary', 'mount secondary',
+      'unmount primary', 'mount primary',
     ]);
   });
 

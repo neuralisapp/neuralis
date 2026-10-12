@@ -19,6 +19,7 @@ import { getPackageRuntimeManager } from './PackageRuntimeManager';
 // helpers). This file only composes the ladder over the snapshot arrays.
 import {
   hasRequiredFeatures,
+  isDockEntryGranted,
   matchesHost,
   passesBaseAccessFeature,
   passesProjectAndOwnerScope,
@@ -192,7 +193,10 @@ function normalizeSurfaceAssetUrl(params: {
  * Run the shared asset-url rule across any UI entry.
  *
  * `widget` writes back to `component.url`, `card` to `render.url`; every other
- * kind (dock) carries no asset url and passes through.
+ * kind (dock) carries no navigable asset url and passes through. A dock's
+ * optional `image` stays the declared package-relative path: the client never
+ * fetches it, it mints an icon scope for the dock id and the server derives the
+ * file from the declaration.
  */
 function normalizeUiEntry(
   entry: PackageRuntimeSnapshot['surfaces'][number],
@@ -380,10 +384,9 @@ function isUiEntryGranted(
   grantedFeatures: string[] | undefined,
   widgetsByType: Map<string, WidgetRuntimeDefinition>,
 ): boolean {
-  if (!hasRequiredFeatures(entry as FeatureFiltered, grantedFeatures)) return false;
-  if (entry.kind !== 'dock' || entry.action.type !== 'open-widget') return true;
-  const targetWidget = widgetsByType.get(entry.action.widget);
-  return targetWidget ? hasRequiredFeatures(targetWidget, grantedFeatures) : true;
+  if (entry.kind !== 'dock') return hasRequiredFeatures(entry as FeatureFiltered, grantedFeatures);
+  // The ONE dock rule — shared with the dock-picture mint and its rechecks.
+  return isDockEntryGranted(entry, grantedFeatures, (widgetType) => widgetsByType.get(widgetType));
 }
 
 function sanitizePackageDiagnostic(message: string): string {

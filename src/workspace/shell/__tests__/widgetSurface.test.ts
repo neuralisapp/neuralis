@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { surfaceBlurClass, surfaceStyle } from '../widgetSurface';
+import { DIM_BLUR_CLASS, DIM_GLASS, surfaceBlurClass, surfaceStyle } from '../widgetSurface';
+import { dockCapsuleStyle, dockSurface } from '../dockSurface';
 import type { TransparencyLevel } from '../../store/types';
 
 const LEVELS: readonly TransparencyLevel[] = ['opaque', 'dim', 'transparent'];
@@ -17,7 +18,37 @@ describe('surfaceBlurClass — the filter is kept wherever there is a surface', 
   });
 
   it('KEEPS the backdrop blur at `dim`, where it is also genuinely visible', () => {
-    expect(surfaceBlurClass('dim')).toBe('backdrop-blur-md');
+    expect(surfaceBlurClass('dim')).toBe('backdrop-blur-[6px]');
+  });
+
+  it('Dim is ONE record: 72 % over a 6 px blur for surfaces, a lighter tile alpha for classic icon tiles', () => {
+    expect(DIM_GLASS).toEqual({ alpha: 0.72, tileAlpha: 0.42, blurPx: 6 });
+    // A classic tile must read as glass: visibly lighter than the surface alpha.
+    expect(DIM_GLASS.tileAlpha).toBeLessThan(DIM_GLASS.alpha - 0.2);
+    // The utility class is the constant's literal twin (Tailwind reads source literals).
+    expect(DIM_BLUR_CLASS).toBe(`backdrop-blur-[${DIM_GLASS.blurPx}px]`);
+    expect(surfaceStyle('dim').backgroundColor).toBe(`rgba(var(--w-bg-rgb), ${DIM_GLASS.alpha})`);
+    // Classic: the tiles are the surface — the capsule hands them the tile alpha.
+    expect(dockCapsuleStyle('dim', 'classic', false)).toEqual({ backdropFilter: `blur(${DIM_GLASS.blurPx}px)`, '--dock-dim-alpha': String(DIM_GLASS.tileAlpha) });
+    for (const state of ['default', 'minimized'] as const) expect(dockSurface('dim', state).bg.split(' ')[0]).toBe('bg-[rgba(var(--w-bg-rgb),var(--dock-dim-alpha))]');
+    expect(dockSurface('dim', 'active').bg).toContain('var(--dock-dim-alpha)');
+    expect(dockCapsuleStyle('dim', 'toolbar', true)).toMatchObject({ backgroundColor: `rgba(var(--w-bg-rgb), ${DIM_GLASS.alpha})`, backdropFilter: `blur(${DIM_GLASS.blurPx}px)` });
+    expect(dockCapsuleStyle('opaque', 'classic', true)).toEqual({});
+  });
+
+  it('a joined pair is ONE contour in toolbar (shared corners square, no shared border) and flush tiles in classic — both orientations', () => {
+    for (const horizontal of [true, false]) {
+      const start = dockCapsuleStyle('opaque', 'toolbar', horizontal, 'start');
+      const end = dockCapsuleStyle('opaque', 'toolbar', horizontal, 'end');
+      const [sharedStart, sharedEnd] = horizontal
+        ? [['borderTopRightRadius', 'borderBottomRightRadius', 'borderRightWidth'], ['borderTopLeftRadius', 'borderBottomLeftRadius', 'borderLeftWidth']]
+        : [['borderBottomLeftRadius', 'borderBottomRightRadius', 'borderBottomWidth'], ['borderTopLeftRadius', 'borderTopRightRadius', 'borderTopWidth']];
+      for (const key of sharedStart) expect(start[key as keyof typeof start]).toBe(0);
+      for (const key of sharedEnd) expect(end[key as keyof typeof end]).toBe(0);
+      // The outer corners stay round, so the pair reads as one capsule.
+      for (const key of sharedEnd) if (key.endsWith('Radius')) expect(start[key as keyof typeof start]).toBe('24px');
+      expect(dockCapsuleStyle('opaque', 'classic', horizontal, 'start')).toEqual({});
+    }
   });
 
   it('emits no backdrop blur at `transparent` — there is no surface to blur behind', () => {
@@ -48,19 +79,19 @@ describe('surfaceStyle — stable identity per level', () => {
     expect(surfaceStyle('dim')).not.toBe(surfaceStyle('transparent'));
   });
 
-  it('keeps the surface values byte-identical across the hoist', () => {
+  it('projects scoped borders while preserving alpha, material and fade values', () => {
     expect(surfaceStyle('transparent')).toEqual({
       backgroundColor: 'transparent',
       backgroundImage: 'none',
-      border: '1px solid rgba(255,255,255,0.06)',
+      border: '1px solid var(--w-clear-border)',
       boxShadow: 'none',
       color: 'var(--w-text)',
       '--w-fade-rgba': 'rgba(var(--w-bg-rgb), 0)',
     });
     expect(surfaceStyle('dim')).toEqual({
-      backgroundColor: 'rgba(var(--w-bg-rgb), 0.55)',
+      backgroundColor: 'rgba(var(--w-bg-rgb), 0.72)',
       backgroundImage: 'var(--w-surface-image)',
-      border: '1px solid rgba(255,255,255,0.04)',
+      border: '1px solid var(--w-dim-border)',
       boxShadow: 'var(--w-shadow)',
       color: 'var(--w-text)',
       '--w-fade-rgba': 'rgba(var(--w-bg-rgb), 0)',
@@ -68,7 +99,7 @@ describe('surfaceStyle — stable identity per level', () => {
     expect(surfaceStyle('opaque')).toEqual({
       backgroundColor: 'rgb(var(--w-bg-rgb))',
       backgroundImage: 'var(--w-surface-image)',
-      border: '1px solid transparent',
+      border: '1px solid var(--w-opaque-border)',
       boxShadow: 'var(--w-shadow)',
       color: 'var(--w-text)',
       '--w-fade-rgba': 'rgb(var(--w-bg-rgb))',

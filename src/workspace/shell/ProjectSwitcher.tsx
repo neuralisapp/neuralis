@@ -1,19 +1,21 @@
 'use client';
 
 import { FolderOpen, ChevronDown, Check, BrushCleaning, Pencil } from 'lucide-react';
-import { useCallback, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useContext, useCallback, useMemo, useRef, useState, type ComponentType } from 'react';
 import { createPortal } from 'react-dom';
 import { useSession } from 'next-auth/react';
 import { cn } from '@/lib/cn';
 import { useWorkspaceStore } from '../store/workspaceStore';
-import { useProjectsState, useProjectsWithStore, useWorkspaceSession } from '../store/selectors';
+import { usePresentation, useProjectGroups, useProjectsState, useProjectsWithStore, useWorkspaceSession } from '../store/selectors';
 import { dockSurface, useDockTransparency } from './dockSurface';
 import { ProjectUnreadCount, UnreadDot } from './DockBadge';
 import { useOtherProjectsUnread } from '../notifications/notificationsClient';
 import { ProjectAvatar, ProjectEditPopup, canEditProjectIdentity } from './ProjectEditPopup';
 import { HOST_SLOTS, useHostSlot, type ProjectSettingsSlotProps } from '../packages/hostRegistryInstance';
 
-type DockEdge = 'left' | 'right' | 'top' | 'bottom';
+import type { DockEdge } from './dockPlacement';
+import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
+import { DEFAULT_THEME } from '../theme/themes';
 
 type Props = {
   expanded?: boolean;
@@ -24,12 +26,17 @@ type Props = {
 };
 
 export function ProjectSwitcher({ expanded = false, align = 'right', disabled = false, pinned = true, edge = 'right' }: Props) {
+  const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
   const { projectId } = useWorkspaceSession();
   const elsewhereUnread = useOtherProjectsUnread(projectId);
   const { byId, ids } = useProjectsState();
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const cleanProjectStore = useWorkspaceStore((s) => s.cleanProjectStore);
   const refreshProjects = useWorkspaceStore((s) => s.refreshProjects);
+  const setPresentation = useWorkspaceStore((s) => s.setPresentation);
+  const selectGroup = useWorkspaceStore((s) => s.selectGroup);
+  const { presentation, groupId, groupName, available: groupsAvailable } = usePresentation();
+  const groups = useProjectGroups();
   // "Project settings" is a slot: the package that owns the settings surface
   // fills it and opens its own widget. Empty slot ⇒ no row.
   const ProjectSettings = useHostSlot(HOST_SLOTS.projectSettings) as ComponentType<ProjectSettingsSlotProps> | null;
@@ -55,6 +62,9 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
   const dockSurf = dockSurface(dockLevel, 'default');
 
   const close = useCallback(() => { setIsOpen(false); }, []);
+  // In a Group the same trigger names `project · Group` (the full text in the
+  // accessible name); the Group's line never widens its box.
+  const triggerName = `${activeProject?.name ?? 'Projects'}${groupName ? ` · ${groupName}` : ''}`;
 
   const toggle = useCallback(() => {
     if (disabled) return;
@@ -74,8 +84,10 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
     <>
       <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={close} />
       <div
-        className="fixed bg-black/90 backdrop-blur-xl rounded-xl overflow-hidden min-w-[11rem]"
+        data-theme-id={dockTheme.id}
+        className="fixed backdrop-blur-xl rounded-xl overflow-hidden min-w-[11rem]"
         style={{
+          ...themeScopeStyle(dockTheme), backgroundColor: 'rgba(var(--w-bg-rgb), 0.96)',
           zIndex: 9999,
           ...(edge === 'bottom'
             ? { bottom: window.innerHeight - pos.top, left: pos.left }
@@ -141,6 +153,62 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
           })}
         </div>
 
+        {projectId && groupsAvailable ? (
+          <div className="border-t border-white/10 px-2 pt-2 pb-1">
+            <div className="px-1 pb-1 text-[10px] font-semibold text-white/40 uppercase tracking-wider">View</div>
+            <div role="radiogroup" aria-label="Workspace view" className="grid grid-cols-2 gap-1">
+              {([['agent', 'Per agent'], ['group', 'Group']] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={presentation === value}
+                  onClick={() => setPresentation(value)}
+                  className={cn(
+                    'rounded-lg px-2 py-1 text-xs font-medium transition',
+                    presentation === value ? 'bg-white/15 text-white' : 'text-white/60 hover:bg-white/5 hover:text-white',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {presentation === 'group' && groups.length > 0 ? (
+              <div className="mt-1 max-h-40 overflow-y-auto" role="radiogroup" aria-label="Groups">
+                {groups.map((g) => (
+                  <button
+                    key={g.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={g.id === groupId}
+                    onClick={() => selectGroup(g.id)}
+                    title={g.name}
+                    className={cn(
+                      'w-full text-left px-3 py-1 text-sm transition-colors flex items-center gap-2 rounded-lg',
+                      g.id === groupId ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/5 hover:text-white',
+                    )}
+                  >
+                    <Check className={cn('w-3 h-3 shrink-0', g.id === groupId ? 'opacity-100' : 'opacity-0')} />
+                    <span className="truncate min-w-0 flex-1">{g.name}</span>
+                    <span className="text-[10px] text-white/35">{g.memberIds.length}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {presentation === 'group' ? (
+              // The Groups are edited in the agent dock's edit draft (names, members, new, delete).
+              <button
+                type="button"
+                onClick={() => { useWorkspaceStore.getState().setDockEditing('secondary', true); setIsOpen(false); }}
+                className="mt-1 w-full text-left px-3 py-1 text-xs flex items-center gap-2 text-white/55 hover:text-white hover:bg-white/5 rounded-lg transition"
+              >
+                <Pencil className="w-3 h-3 shrink-0" />
+                Edit groups…
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="border-t border-white/10 p-2 space-y-1">
           {projectId && ProjectSettings ? <ProjectSettings onActivated={close} /> : null}
           {activeProject && canEditProject ? (
@@ -172,19 +240,20 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
         disabled={disabled}
         className={cn(
           'rounded-xl transition flex items-center shrink-0 overflow-hidden w-full',
-          dockSurf ? dockSurf.bg : (pinned ? 'bg-white/12 hover:bg-white/20' : 'bg-neutral-700 hover:bg-neutral-600'),
+          dockSurf.bg,
           expanded ? 'h-11 px-0' : 'w-12 h-11 justify-center',
           align === 'right' ? 'flex-row-reverse' : 'flex-row',
           'disabled:opacity-40 disabled:cursor-not-allowed',
         )}
-        title={elsewhereUnread ? `${activeProject?.name ?? 'Projects'} — unread in another project` : activeProject?.name ?? 'Projects'}
+        title={elsewhereUnread ? `${triggerName} — unread in another project` : triggerName}
+        aria-label={triggerName}
       >
         <div className="relative w-12 h-full flex items-center justify-center shrink-0">
           {elsewhereUnread ? <UnreadDot className="absolute top-2 right-2.5" /> : null}
           {activeProject?.appearance ? (
-            <ProjectAvatar project={activeProject} size={22} />
+            <ProjectAvatar project={activeProject} size={30} />
           ) : (
-            <FolderOpen className="w-5 h-5" style={{ color: 'var(--dock-icon-project, #34d399)' }} />
+            <FolderOpen className="w-7 h-7" style={{ color: 'var(--dock-icon-project, #34d399)' }} />
           )}
         </div>
         {expanded ? (
@@ -194,9 +263,18 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
               align === 'right' ? 'pl-3 justify-center' : 'pr-3 justify-center',
             )}
           >
-            <span className="min-w-0 line-clamp-2 leading-tight break-words text-center text-xs font-medium mr-1">
-              {activeProject?.name ?? 'No project'}
-            </span>
+            {groupName ? (
+              // The Group rides a second line whose width is borrowed (`w-0 min-w-full`):
+              // it contributes nothing to the box, so the trigger keeps its per-agent size.
+              <span className="min-w-0 flex flex-col items-center leading-tight text-center text-xs font-medium mr-1">
+                <span className="max-w-full truncate">{activeProject?.name ?? 'No project'}</span>
+                <span className="block w-0 min-w-full truncate text-white/45">{groupName}</span>
+              </span>
+            ) : (
+              <span className="min-w-0 line-clamp-2 leading-tight break-words text-center text-xs font-medium mr-1">
+                {activeProject?.name ?? 'No project'}
+              </span>
+            )}
             <ChevronDown className="w-3 h-3 opacity-50 shrink-0" />
           </div>
         ) : null}

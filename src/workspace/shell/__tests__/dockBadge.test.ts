@@ -29,18 +29,21 @@ const ws = vi.hoisted(() => ({
     dockEditing: { primary: false, secondary: false },
     projects: { ids: [] as string[], byId: {} as Record<string, unknown>, status: 'success', error: null },
     runtimeByAgentId: {} as Record<string, unknown>,
+    liveUserId: 'u1' as string | null,
+    groupStateByScope: {} as Record<string, unknown>,
     openWidget: (() => null) as (params: unknown) => string | null,
     selectAgent: (() => undefined) as (id: string) => void,
   },
 }));
-vi.mock('../../store/workspaceStore', async () => {
+vi.mock('../../store/workspaceStore', async (importOriginal) => {
   const { useSyncExternalStore } = await import('react');
   const useWorkspaceStore = Object.assign(
     <T,>(select: (s: typeof ws.state) => T): T =>
       useSyncExternalStore(() => () => undefined, () => select(ws.state), () => select(ws.state)),
     { getState: () => ws.state },
   );
-  return { useWorkspaceStore, agentRuntimeKey: (p: string, a: string) => `${p}:${a}` };
+  // The pure derivations (Group view, runtime keys) stay the real ones.
+  return { ...(await importOriginal<typeof import('../../store/workspaceStore')>()), useWorkspaceStore };
 });
 
 vi.mock('next-auth/react', () => ({ useSession: () => ({ data: { user: { id: 'u1', name: 'Ada' } }, status: 'authenticated' }) }));

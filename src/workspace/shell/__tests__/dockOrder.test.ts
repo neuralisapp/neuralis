@@ -7,7 +7,7 @@
  *    and a stored key with no live item never renders;
  *  - the editor's drag/keyboard/hide handlers touch only local state — the
  *    one store write is Save;
- *  - the side cells of the position grid select the shipped default (`start`).
+ *  - the position map offers the eight anchors (never the centre) and lights the stored one.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -28,8 +28,8 @@ import {
   stepDockKey,
   type ArrangeableItem,
 } from '../dockOrder';
-import { DockEditor, type DockItem } from '../Dock';
-import { PositionGrid } from '../LayoutSettingsPanel';
+import { DockEditor, DockPositionPicker, type DockItem } from '../Dock';
+import { dockKey } from '../../../server/notifications/notificationStore';
 
 const Glyph: ComponentType<{ className?: string }> = () => null;
 
@@ -53,7 +53,6 @@ function primaryItems(): DockItem[] {
     { id: '__sep-trust-trusted', position: 1099, title: '', icon: Glyph, kind: 'separator', onClick: () => undefined },
     pkg('shop', 1100, 'trust:trusted'),
     pkg('crm', 1101, 'trust:trusted'),
-    { id: '__sep-layout', position: 9998, title: '', icon: Glyph, kind: 'separator', onClick: () => undefined },
     { id: '__layout-settings', position: 9999, title: 'Layout', icon: Glyph, onClick: () => undefined },
   ];
 }
@@ -64,14 +63,14 @@ const key = (id: string): string => packageDockKey('@neuralis/x', id);
 describe('applyDockPrefs', () => {
   it('without prefs: the default order', () => {
     expect(ids(applyDockPrefs(primaryItems(), undefined))).toEqual([
-      '__user-info', 'calendar', 'files', 'admin', '__sep-trust-trusted', 'shop', 'crm', '__sep-layout', '__layout-settings',
+      '__user-info', 'calendar', 'files', 'admin', '__sep-trust-trusted', 'shop', 'crm', '__layout-settings',
     ]);
   });
 
   it('reorders INSIDE each group; separators and fixed items keep their place', () => {
     const out = applyDockPrefs(primaryItems(), { order: [key('crm'), key('admin'), key('shop'), key('calendar'), key('files')], hidden: [] });
     expect(ids(out)).toEqual([
-      '__user-info', 'admin', 'calendar', 'files', '__sep-trust-trusted', 'crm', 'shop', '__sep-layout', '__layout-settings',
+      '__user-info', 'admin', 'calendar', 'files', '__sep-trust-trusted', 'crm', 'shop', '__layout-settings',
     ]);
     // The group keeps its own position slots — the separator still sits between the tiers.
     expect(out.find((i) => i.id === 'admin')?.position).toBe(100);
@@ -163,7 +162,6 @@ describe('the editor', () => {
         hasLabels,
         pinned: true,
         cornerReverse: false,
-        align: 'start',
         modeSwitch: null,
       }),
     );
@@ -180,7 +178,7 @@ describe('the editor', () => {
     expect(html).toContain('aria-label="Save dock order"');
     expect(html).toContain('aria-label="Cancel dock editing"');
     // The trust separator is still drawn while editing.
-    expect(html.match(/h-px w-8 bg-white\/10/g)?.length).toBe(2);
+    expect(html.match(/h-px w-8 bg-white\/10/g)?.length).toBe(1);
   });
 
   it('a hidden item leaves the dock and is counted on the "+ hidden" tile', () => {
@@ -214,34 +212,35 @@ describe('edit mode writes nothing until Save (source scan)', () => {
     expect(handlers).toMatch(/setDraft/);
   });
 
-  it('the editor reaches the store in exactly two places: Save (setDockPrefs) and leaving edit mode', () => {
+  it('the editor reaches the store only on Save (ONE write: setDockPrefs, or saveGroups with the dock draft in Group view) and on leaving edit mode', () => {
     const src = dockSource();
     const editor = src.slice(src.indexOf('export function DockEditor('), src.indexOf('function EditableDockItem('));
-    expect(editor.match(/useWorkspaceStore\.getState\(\)/g)?.length).toBe(2);
+    expect(editor.match(/useWorkspaceStore\.getState\(\)/g)?.length).toBe(3);
     expect(editor.match(/setDockPrefs\(/g)?.length).toBe(1);
+    expect(editor.match(/saveGroups\(\{ \.\.\.groupDraft, dock: \{ dockId, prefs: live \} \}\)/g)?.length).toBe(1);
   });
 });
 
-describe('Layout → the side cells select the shipped default', () => {
-  const grid = (value: { edge: 'left' | 'right' | 'top' | 'bottom'; align: 'start' | 'center' | 'end' }): string =>
-    renderToStaticMarkup(createElement(PositionGrid, { value, onChange: () => undefined, label: 'Primary', color: '#60a5fa' }));
+describe('Layout → the dock position map', () => {
+  const map = (anchor: 'left' | 'bottom-right', orientation: 'horizontal' | 'vertical'): string =>
+    renderToStaticMarkup(createElement(DockPositionPicker, { value: { anchor, orientation }, onChange: () => undefined, label: 'Primary dock position' }));
 
-  it('left/start (the default) shows the left cell active, and the cell carries start', () => {
-    const html = grid({ edge: 'left', align: 'start' });
-    expect(html).toContain('title="left / start"');
-    expect(html).not.toContain('title="left / center"');
-    expect(html).toMatch(/background-color:#60a5fa[^>]*title="left \/ start"/);
+  it('offers exactly the eight anchors — no centre — and lights the stored one', () => {
+    const html = map('left', 'vertical');
+    expect(html.match(/aria-label="Anchor /g)).toHaveLength(8);
+    expect(html).not.toContain('Anchor center');
+    expect(html).toMatch(/aria-label="Anchor left" aria-pressed="true"/);
+    expect(html.match(/aria-pressed="true"/g)).toHaveLength(2);
+    expect(html).toMatch(/aria-label="Vertical" aria-pressed="true"/);
   });
 
-  it('a stored left/center still lights the same cell', () => {
-    expect(grid({ edge: 'left', align: 'center' })).toMatch(/background-color:#60a5fa[^>]*title="left \/ start"/);
+  it('the orientation is its own choice at every anchor', () => {
+    expect(map('bottom-right', 'horizontal')).toMatch(/aria-label="Horizontal" aria-pressed="true"/);
   });
 });
 
 describe('badge key parity', () => {
-  it('the client dock key is the server dockKey for the same manifest id + dock id', async () => {
-    const { packageDockKey } = await import('../dockOrder');
-    const { dockKey } = await import('../../../server/notifications/notificationStore');
+  it('the client dock key is the server dockKey for the same manifest id + dock id', () => {
     for (const [pkg, dock] of [['@neuralis/agent-core', 'agent-core.calendar'], ['@neuralis/brain-core', 'brain-core.filesystem']] as const) {
       expect(packageDockKey(pkg, dock)).toBe(dockKey(pkg, dock));
     }

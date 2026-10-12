@@ -1,12 +1,14 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState, type CSSProperties, type ComponentType } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties, type ComponentType } from 'react';
 import { Package, LayoutDashboard, Plus, BrushCleaning } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 import { resolveAgentColor, resolveAgentIcon } from '@neuralis/package-system/client';
-import { useWorkspaceStore } from '../store/workspaceStore';
-import { useAgentHasStore, useAgentsState, useDockPrefs, useDockWidgetItems, useWorkspaceSession } from '../store/selectors';
-import { getCachedSnapshot, onSnapshotChange } from '../packages/runtimeClient';
+import { agentTapOpenOrder, boundAgentOf, getDefaultChatWidgetType, isGroupRuntimeKey, useWorkspaceStore, type WorkspaceStore } from '../store/workspaceStore';
+import type { WidgetInstance } from '../store/types';
+import { useAgentHasStore, useAgentsState, useDockPrefs, useDockWidgetItems, useNewWindowAgent, usePhoneForegroundId, useProjectGroups, usePresentation, useWorkspaceSession } from '../store/selectors';
+import { getWidgetDefinition, isRepeatableWidget } from '../widgets/registry';
+import { getScopedSnapshot, onSnapshotChange } from '../packages/runtimeClient';
 import { buildPackageDockItems, type PackageDockItem } from '../packages/dockRuntime';
 import {
   HOST_SLOTS,
@@ -15,10 +17,9 @@ import {
   type AgentActivity,
   type AgentActivitySlotProps,
 } from '../packages/hostRegistryInstance';
-import { listDefaultOpenWidgets } from '../widgets/registry';
-import type { PackageRuntimeSnapshot, PackageTrust } from '@neuralis/package-system/contracts';
+import type { PackageTrust } from '@neuralis/package-system/contracts';
 import { cn } from '@/lib/cn';
-import type { DockItem } from './Dock';
+import { DockWindowChooser, opensWindowChooser, type DockItem, type DockWindowChoice } from './Dock';
 import type { DockEdge } from './dockPlacement';
 import { resolveDockIcon } from './dockIcons';
 import { UserInfo } from './UserInfo';
@@ -27,36 +28,74 @@ import { ProjectSwitcher } from './ProjectSwitcher';
 import { dockSurface, useDockTransparency } from './dockSurface';
 import { agentDockKey, applyDockPrefs, packageDockKey } from './dockOrder';
 
+// ─── Window choices (shared by the app items and the agent tiles) ──────────
+
+/**
+ * One chooser row per window of a type: it brings that window forward (with
+ * its bound agent) or cleans that ONE window's view. In a Group a row names
+ * the window's agent; elsewhere several windows are numbered.
+ */
+function windowChoices(params: {
+  ids: string[];
+  byId: Record<string, WidgetInstance>;
+  runtimeKey: string | null;
+  type: string;
+  title: string;
+  inGroup: boolean;
+  agentName: (agentId: string) => string;
+  openWidget: WorkspaceStore['openWidget'];
+  cleanWindow: WorkspaceStore['cleanWindow'];
+}): DockWindowChoice[] {
+  const { ids, byId, runtimeKey, type, title, inGroup, agentName, openWidget, cleanWindow } = params;
+  return ids.map((id, index) => {
+    const w = byId[id];
+    const bound = w && runtimeKey ? boundAgentOf(runtimeKey, w) : null;
+    return {
+      id,
+      label: inGroup ? `${title} · ${bound ? agentName(bound) : ''}` : ids.length > 1 ? `${title} ${index + 1}` : title,
+      minimized: w?.hidden === true,
+      onSelect: () => { if (bound) openWidget({ agentId: bound, type, title, target: { instanceId: id } }); },
+      onClean: () => cleanWindow({ widgetInstanceId: id }),
+    };
+  });
+}
+
 // ─── Primary dock items (package-contributed + UserInfo + layout) ──────────
 
 export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean): DockItem[] {
   const { agentId, projectId } = useWorkspaceSession();
-  const { ids } = useAgentsState();
+  const { ids, byId: agentsById } = useAgentsState();
   const openWidget = useWorkspaceStore((s) => s.openWidget);
   const exclusiveOpenWidget = useWorkspaceStore((s) => s.exclusiveOpenWidget);
-  const restoreWidget = useWorkspaceStore((s) => s.restoreWidget);
   const closeWidget = useWorkspaceStore((s) => s.closeWidget);
+  const cleanWindow = useWorkspaceStore((s) => s.cleanWindow);
   const setWorkspaceView = useWorkspaceStore((s) => s.setWorkspaceView);
   // NARROW on purpose: the dock needs widget IDENTITY (type/hidden/id), never
   // geometry. `useOpenWidgets` also carries `mainSplit`/`widgetSplitsById`/
   // `freeformById`/`gridById`, and this hook runs inside `WorkspaceShell` — so
   // taking it here made every divider-drag and canvas-pan frame re-render the
   // shell and both docks. See `store/selectors.ts` for the full loop.
-  const { byId: openWidgetsById } = useDockWidgetItems();
+  const { byId: openWidgetsById, openOrder, runtimeKey } = useDockWidgetItems();
+  // The agent a NEW window binds to: the selected agent, or in a Group the
+  // selected member (null in an empty Group — nothing is opened then).
+  const newAgent = useNewWindowAgent();
   const packageItems = usePackageDockItems(projectId, agentId);
   const prefs = useDockPrefs('primary');
 
-  const canOpen = Boolean(agentId) && ids.length > 0;
+  const canOpen = Boolean(newAgent) && ids.length > 0;
+  const inGroup = Boolean(runtimeKey && isGroupRuntimeKey(runtimeKey));
 
-  // Per-widget-type state for the selected agent. Drives the three dock-item
+  // Per-widget-type state of the layout on screen. Drives the three dock-item
   // states: filled highlight when a VISIBLE instance exists (`active`), the
   // coloured "minimized" ring when only HIDDEN instances exist, and the
-  // always-visible broom (clean) when any instance exists.
+  // always-visible broom (clean) when any instance exists. Only the windows the
+  // stage may show count (a Group window of a withheld agent never does).
   const widgetTypeState = useMemo(() => {
     const visible = new Set<string>();
     const hidden = new Set<string>();
     const idsByType = new Map<string, string[]>();
-    for (const w of Object.values(openWidgetsById)) {
+    for (const id of openOrder) {
+      const w = openWidgetsById[id];
       if (!w?.type) continue;
       (w.hidden ? hidden : visible).add(w.type);
       const arr = idsByType.get(w.type) ?? [];
@@ -64,32 +103,39 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       idsByType.set(w.type, arr);
     }
     return { visible, hidden, idsByType };
-  }, [openWidgetsById]);
+  }, [openWidgetsById, openOrder]);
 
   return useMemo<DockItem[]>(() => {
-    // Shared open/restore/clean behaviour for a widget TYPE. Clicking a
-    // minimized type RESTORES it (unhide, instant — the widget stayed
-    // mounted); otherwise it opens normally. The broom destroys every
-    // instance of the type — a client-store clean, server data untouched.
+    // The window's bound agent (its own in a Group, the layout's otherwise).
+    const boundOf = (id: string): string | null => {
+      const w = openWidgetsById[id];
+      return w && runtimeKey ? boundAgentOf(runtimeKey, w) : null;
+    };
+    // Shared open/restore/clean behaviour for a widget TYPE: zero windows →
+    // open the first, one → bring it forward (restoring it when minimized —
+    // instant, it stayed mounted), several → the item's window chooser. "New
+    // window" is a separate action. The broom destroys every window of the
+    // type — a client-store clean, server data untouched.
     const buildTypeBehavior = (widgetType: string, title: string) => {
       const hasVisible = widgetTypeState.visible.has(widgetType);
       const hasHidden = widgetTypeState.hidden.has(widgetType);
       const idsOfType = widgetTypeState.idsByType.get(widgetType) ?? [];
+      const windows = windowChoices({
+        ids: idsOfType, byId: openWidgetsById, runtimeKey, type: widgetType, title, inGroup,
+        agentName: (id) => agentsById[id]?.name || id, openWidget, cleanWindow,
+      });
+      const repeatable = isRepeatableWidget(widgetType);
       return {
         active: hasVisible,
         minimized: !hasVisible && hasHidden,
+        windows,
+        onNewWindow: repeatable && newAgent ? () => { openWidget({ agentId: newAgent, type: widgetType, title, target: 'new' }); } : undefined,
         onClick: () => {
-          if (!agentId) return;
-          if (!hasVisible && hasHidden) {
-            for (const id of idsOfType) {
-              if (openWidgetsById[id]?.hidden) restoreWidget({ agentId, widgetInstanceId: id });
-            }
-          } else {
-            openWidget({ agentId, type: widgetType, title });
-          }
+          if (windows.length === 1) { windows[0].onSelect(); return; }
+          if (newAgent) openWidget({ agentId: newAgent, type: widgetType, title });
         },
         onClean: idsOfType.length > 0
-          ? () => { if (!agentId) return; for (const id of idsOfType) closeWidget({ agentId, widgetInstanceId: id }); }
+          ? () => { for (const id of idsOfType) { const bound = boundOf(id); if (bound) closeWidget({ agentId: bound, widgetInstanceId: id }); } }
           : undefined,
       };
     };
@@ -125,12 +171,15 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
         group: `trust:${item.trust ?? 'untrusted'}`,
         badgeKey: key,
         icon: resolveDockIcon(item.icon),
+        image: item.image,
         color: item.color,
         disabled: !canOpen,
         active: behavior?.active ?? false,
         minimized: behavior?.minimized ?? false,
+        windows: behavior?.windows,
+        onNewWindow: canOpen ? behavior?.onNewWindow : undefined,
         onClick: () => {
-          if (!agentId || !canOpen) return;
+          if (!canOpen) return;
           if (behavior) {
             behavior.onClick();
           } else if (item.onClick.kind === 'action' && item.onClick.actionId === 'workspace.agent-create') {
@@ -142,8 +191,8 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
           if (item.onClick.kind !== 'openWidget') return undefined;
           const { widgetType: wt, widgetTitle: wTitle } = item.onClick;
           return () => {
-            if (!agentId || !canOpen) return;
-            exclusiveOpenWidget({ agentId, type: wt, title: wTitle || item.label });
+            if (!newAgent || !canOpen) return;
+            exclusiveOpenWidget({ agentId: newAgent, type: wt, title: wTitle || item.label });
           };
         })(),
       };
@@ -194,38 +243,21 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       seenTrust = tier;
     });
 
-    // Separator before the Layout item, so the layout control is visually
-    // detached from the widget dock items.
-    const layoutSeparator: DockItem = {
-      id: '__sep-layout',
-      position: 9998,
-      title: '',
-      icon: Package,
-      onClick: () => {},
-      kind: 'separator',
-    };
-
-    // Layout settings item at the bottom — same minimize/restore/clean
-    // behaviour as package widgets (it is a host widget type).
-    const layoutBehavior = buildTypeBehavior('host:layout-settings', 'Layout');
+    // The Apps item opens the Apps launcher (a dialog, never a widget instance —
+    // so it has no highlight and no broom). A footer: always reachable, after
+    // the scroller's end arrow, in every dock mode.
     const layoutSettingsItem: DockItem = {
       id: '__layout-settings',
       position: 9999,
-      title: 'Layout',
+      title: 'Apps',
       icon: LayoutDashboard,
-      active: layoutBehavior.active,
-      minimized: layoutBehavior.minimized,
-      onClick: layoutBehavior.onClick,
-      onClean: layoutBehavior.onClean,
-      disabled: !agentId,
+      section: 'footer',
+      onClick: () => window.dispatchEvent(new Event('neuralis:apps-open')),
+      disabled: false,
     };
 
-    const tail: DockItem[] = pkgItemsWithSeparators.length > 0
-      ? [...pkgItemsWithSeparators, layoutSeparator, layoutSettingsItem]
-      : [layoutSettingsItem];
-
-    return applyDockPrefs([userInfoItem, ...tail], prefs);
-  }, [agentId, canOpen, openWidget, exclusiveOpenWidget, restoreWidget, closeWidget, openWidgetsById, packageItems, widgetTypeState, setWorkspaceView, edge, hasLabels, pinned, disabled, prefs]);
+    return applyDockPrefs([userInfoItem, ...pkgItemsWithSeparators, layoutSettingsItem], prefs);
+  }, [canOpen, newAgent, inGroup, runtimeKey, agentsById, openWidget, exclusiveOpenWidget, closeWidget, cleanWindow, openWidgetsById, packageItems, widgetTypeState, setWorkspaceView, edge, hasLabels, pinned, disabled, prefs]);
 }
 
 /**
@@ -234,20 +266,10 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
  * the same list.
  */
 export function usePackageDockItems(projectId: string | null, agentId: string | null): PackageDockItem[] {
-  const [packageItems, setPackageItems] = useState<PackageDockItem[]>([]);
-  useEffect(() => {
-    let mounted = true;
-    const scope = { projectId, agentId };
-    const applySnapshot = (snapshot: PackageRuntimeSnapshot) => {
-      if (!mounted) return;
-      setPackageItems(buildPackageDockItems(snapshot));
-    };
-    const cached = getCachedSnapshot(scope);
-    if (cached) applySnapshot(cached);
-    const unsubscribe = onSnapshotChange(applySnapshot);
-    return () => { mounted = false; unsubscribe(); };
-  }, [projectId, agentId]);
-  return packageItems;
+  const subscribe = useCallback((notify: () => void) => onSnapshotChange(() => notify()), []);
+  const read = useCallback(() => getScopedSnapshot({ projectId, agentId }), [projectId, agentId]);
+  const snapshot = useSyncExternalStore(subscribe, read, () => null);
+  return useMemo(() => snapshot ? buildPackageDockItems(snapshot) : [], [snapshot]);
 }
 
 // ─── Agent activity (the `dock.agentActivity` slot) ────────────────────────
@@ -264,6 +286,13 @@ type AgentDockButtonProps = {
   onSelect: (id: string) => void;
   currentUserId: string | null;
   currentUserName: string | null;
+  /**
+   * Set when a click on this tile asks which of the agent's chat windows (the
+   * selected agent): its rows and "New window", in the app chooser's language.
+   */
+  choice?: Pick<DockItem, 'title' | 'windows' | 'onNewWindow'> | null;
+  /** The dock's edge — the chooser opens away from it. */
+  edge?: DockEdge;
 };
 
 /**
@@ -285,9 +314,10 @@ function AgentDockButton(props: AgentDockButtonProps) {
 // ─── Agent button (custom render for secondary dock) ───────────────────────
 
 function AgentDockTile({
-  id, agent, idx, selected, chatCollapsed, hasLabels, pinned, disabled, onSelect, currentUserId, currentUserName, activity,
+  id, agent, idx, selected, chatCollapsed, hasLabels, pinned, disabled, onSelect, currentUserId, currentUserName, activity, choice, edge = 'left',
 }: AgentDockButtonProps & { activity: AgentActivity }) {
   const cleanAgentStore = useWorkspaceStore((s) => s.cleanAgentStore);
+  const [chooser, setChooser] = useState<DOMRect | null>(null);
   // Boolean-returning selector on purpose: geometry writes replace the runtime
   // OBJECT every frame, but key existence is stable, so this tile re-renders
   // only when the agent's store appears/disappears.
@@ -336,9 +366,6 @@ function AgentDockTile({
   // `currentColor` drop-shadow on the thin-stroke icon. Opaque/dim keep their
   // fill (a visible active state already), matching the package dock items.
   const iconGlow = dockLevel === 'transparent' && selected ? color : null;
-  const opaqueBg = selected
-    ? (pinned ? 'bg-white/20' : 'bg-neutral-700')
-    : (pinned ? 'bg-white/12 hover:bg-white/20' : 'bg-neutral-800 hover:bg-neutral-700');
 
   return (
     <div
@@ -352,12 +379,14 @@ function AgentDockTile({
       {streaming ? <span className="streaming-ring__frame" aria-hidden="true" /> : null}
       <button
         type="button"
-        onClick={() => onSelect(id)}
+        data-dock-tile-act=""
+        aria-haspopup={choice ? 'dialog' : undefined}
+        onClick={(event) => { if (choice) setChooser(event.currentTarget.getBoundingClientRect()); else onSelect(id); }}
         disabled={disabled}
         className={cn(
           'w-full h-10 rounded-xl flex flex-row-reverse items-center transition shrink-0',
           hasLabels ? 'px-0' : 'justify-center',
-          dockSurf ? dockSurf.bg : opaqueBg,
+          dockSurf.bg,
           selected ? 'text-white' : 'text-white/70',
           showCollapsedHint && 'ring-2 ring-white/30 animate-pulse',
           'disabled:opacity-40 disabled:cursor-not-allowed',
@@ -413,6 +442,7 @@ function AgentDockTile({
           <BrushCleaning className="w-3 h-3" />
         </button>
       ) : null}
+      {chooser && choice ? <DockWindowChooser item={choice} anchor={chooser} edge={edge} onClose={() => setChooser(null)} /> : null}
     </div>
   );
 }
@@ -420,23 +450,46 @@ function AgentDockTile({
 // ─── Secondary dock items (ProjectSwitcher + agents + create) ──────────────
 
 export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean): DockItem[] {
-  const { agentId } = useWorkspaceSession();
-  const { byId, ids } = useAgentsState();
+  const { byId, ids: allIds } = useAgentsState();
   const prefs = useDockPrefs('secondary');
+  // In a Group the SAME agent dock shows the Group's authorized members, and
+  // its selection is only the agent for NEW windows (never an open window's).
+  const { presentation, groupId } = usePresentation();
+  const groups = useProjectGroups();
+  const agentId = useNewWindowAgent();
+  const memberKey = presentation === 'group' ? (groups.find((g) => g.id === groupId)?.memberIds ?? []).join('|') : null;
+  const ids = useMemo(
+    () => (memberKey === null ? allIds : allIds.filter((id) => memberKey.split('|').includes(id))),
+    [allIds, memberKey],
+  );
   const selectAgent = useWorkspaceStore((s) => s.selectAgent);
   const setWorkspaceView = useWorkspaceStore((s) => s.setWorkspaceView);
   const openWidget = useWorkspaceStore((s) => s.openWidget);
+  const cleanWindow = useWorkspaceStore((s) => s.cleanWindow);
+  const { byId: windowsById, openOrder, runtimeKey } = useDockWidgetItems();
+  const phoneForeground = usePhoneForegroundId();
   const { data: nextAuthSession } = useSession();
   const currentUserId = (nextAuthSession?.user as { id?: string } | undefined)?.id ?? null;
   const currentUserName = (nextAuthSession?.user as { name?: string | null } | undefined)?.name ?? null;
 
   const handleAgentSelect = useCallback((id: string) => {
     selectAgent(id);
-    // Open every package-declared default widget for the newly selected agent.
-    for (const def of listDefaultOpenWidgets()) {
-      openWidget({ agentId: id, type: def.type, title: def.title });
-    }
+    // Open every package-declared default widget for the newly selected agent, the chat last.
+    for (const def of agentTapOpenOrder()) openWidget({ agentId: id, type: def.type, title: def.title });
   }, [selectAgent, openWidget]);
+
+  // The chat windows of each agent in the layout on screen (the agent tile's chooser).
+  const chatWindowsByAgent = useMemo(() => {
+    const chatType = getDefaultChatWidgetType();
+    const out = new Map<string, string[]>();
+    if (!chatType || !runtimeKey) return out;
+    for (const wid of openOrder) {
+      const w = windowsById[wid];
+      const bound = w?.type === chatType ? boundAgentOf(runtimeKey, w) : null;
+      if (bound) out.set(bound, [...(out.get(bound) ?? []), wid]);
+    }
+    return out;
+  }, [openOrder, windowsById, runtimeKey]);
 
   return useMemo<DockItem[]>(() => {
     // ProjectSwitcher as header item (before mode switch separator)
@@ -460,7 +513,9 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
     type AgentEntry = { id: string; ownedByMe: boolean; idx: number };
     const ownEntries: AgentEntry[] = [];
     const otherEntries: AgentEntry[] = [];
-    ids.forEach((id, idx) => {
+    ids.forEach((id) => {
+      // The colour index stays the project-wide one, so a Group never recolours an agent.
+      const idx = allIds.indexOf(id);
       const ownerId = byId[id]?.userId ?? null;
       const ownedByMe = currentUserId === null
         // No session id resolved → fall back to "everything is mine" so
@@ -475,33 +530,61 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
 
     const appearanceOf = (id: string) =>
       (byId[id] as { config?: { appearance?: { icon?: string; color?: string } } } | undefined)?.config?.appearance;
-    const renderAgent = (entry: AgentEntry, position: number): DockItem => ({
-      id: entry.id,
-      position,
-      title: byId[entry.id]?.name || 'Agent',
-      prefKey: agentDockKey(entry.id),
-      group: entry.ownedByMe ? 'agents:own' : 'agents:other',
-      // The tile renders itself; icon + colour are what the edit-mode tray shows.
-      icon: resolveAgentIcon(appearanceOf(entry.id)?.icon),
-      color: resolveAgentColor(appearanceOf(entry.id)?.color, entry.idx),
-      onClick: () => handleAgentSelect(entry.id),
-      renderCustom: () => (
-        <AgentDockButton
-          key={entry.id}
-          id={entry.id}
-          agent={byId[entry.id]}
-          idx={entry.idx}
-          selected={entry.id === agentId}
-          chatCollapsed={false}
-          hasLabels={hasLabels}
-          pinned={pinned}
-          disabled={disabled}
-          onSelect={handleAgentSelect}
-          currentUserId={currentUserId}
-          currentUserName={currentUserName}
-        />
-      ),
-    });
+    const chatType = getDefaultChatWidgetType();
+    const chatTitle = (chatType ? getWidgetDefinition(chatType)?.title : undefined) ?? 'Chat';
+    const inGroup = Boolean(runtimeKey && isGroupRuntimeKey(runtimeKey));
+    const renderAgent = (entry: AgentEntry, position: number): DockItem => {
+      const selected = entry.id === agentId;
+      const chatIds = chatWindowsByAgent.get(entry.id) ?? [];
+      // The selected agent's tile asks which of its chat windows, or opens a
+      // NEW one (a repeatable chat) — the app chooser's rows and language. On
+      // Phone it asks only once its chat is in front: a tap first brings the chat.
+      const asks = phoneForeground === null || chatIds.includes(phoneForeground);
+      const windows = chatType && asks ? windowChoices({
+        ids: chatIds, byId: windowsById, runtimeKey, type: chatType, title: chatTitle, inGroup,
+        agentName: (id) => byId[id]?.name || id, openWidget, cleanWindow,
+      }) : [];
+      const onNewWindow = chatType && asks && isRepeatableWidget(chatType) && !disabled
+        ? () => { openWidget({ agentId: entry.id, type: chatType, title: chatTitle, target: 'new' }); }
+        : undefined;
+      const item: DockItem = {
+        id: entry.id,
+        position,
+        title: byId[entry.id]?.name || 'Agent',
+        prefKey: agentDockKey(entry.id),
+        group: entry.ownedByMe ? 'agents:own' : 'agents:other',
+        // The tile renders itself; icon + colour are what the edit-mode tray shows.
+        icon: resolveAgentIcon(appearanceOf(entry.id)?.icon),
+        color: resolveAgentColor(appearanceOf(entry.id)?.color, entry.idx),
+        active: selected,
+        windows,
+        onNewWindow,
+        chooserWhenActive: true,
+        onClick: () => handleAgentSelect(entry.id),
+      };
+      const choice = opensWindowChooser(item) ? { title: `${item.title} · ${chatTitle}`, windows, onNewWindow } : null;
+      return {
+        ...item,
+        renderCustom: () => (
+          <AgentDockButton
+            key={entry.id}
+            id={entry.id}
+            agent={byId[entry.id]}
+            idx={entry.idx}
+            selected={selected}
+            chatCollapsed={false}
+            hasLabels={hasLabels}
+            pinned={pinned}
+            disabled={disabled}
+            onSelect={handleAgentSelect}
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            choice={choice}
+            edge={edge}
+          />
+        ),
+      };
+    };
 
     const agentDockItems: DockItem[] = [];
     ownEntries.forEach((e, i) => agentDockItems.push(renderAgent(e, (i + 1) * 10)));
@@ -534,5 +617,5 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
     };
 
     return applyDockPrefs([projectItem, ...agentDockItems, createItem], prefs);
-  }, [agentId, byId, currentUserId, currentUserName, disabled, edge, handleAgentSelect, hasLabels, ids, pinned, setWorkspaceView, prefs]);
+  }, [agentId, allIds, byId, currentUserId, currentUserName, disabled, edge, handleAgentSelect, hasLabels, ids, pinned, setWorkspaceView, prefs, chatWindowsByAgent, phoneForeground, windowsById, runtimeKey, openWidget, cleanWindow]);
 }

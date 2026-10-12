@@ -3,7 +3,7 @@
  * Checks: Docker, Qdrant, Ollama, platform, existing config, install mode.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { access, readFile, stat } from 'node:fs/promises';
 import { platform as osPlatform } from 'node:os';
@@ -85,12 +85,21 @@ function detectPlatform(): Platform {
   return 'linux';
 }
 
-function detectDocker(): { available: boolean; version: string | null } {
+/** Runs a program without a shell and returns its stdout; throws on a non-zero exit. */
+export type ProgramRunner = (file: string, args: string[]) => string;
+
+const runProgram: ProgramRunner = (file, args) =>
+  execFileSync(file, args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+
+/**
+ * Docker CLI present AND its daemon answering. No shell: a `2>/dev/null`
+ * redirect meant cmd.exe looked for a `\dev\null` path and failed, so Windows
+ * never detected Docker — stderr is discarded through `stdio` instead.
+ */
+export function detectDocker(run: ProgramRunner = runProgram): { available: boolean; version: string | null } {
   try {
-    const out = execSync('docker --version 2>/dev/null', { encoding: 'utf-8', timeout: 5000 });
-    const match = out.match(/Docker version ([\d.]+)/);
-    // Also check if Docker daemon is running
-    execSync('docker info 2>/dev/null', { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
+    const match = run('docker', ['--version']).match(/Docker version ([\d.]+)/);
+    run('docker', ['info']);
     return { available: true, version: match?.[1] ?? null };
   } catch {
     return { available: false, version: null };

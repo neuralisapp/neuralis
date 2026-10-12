@@ -29,7 +29,7 @@ import {
   writeSourceConfigsPreserving,
 } from '../setup/records.mts';
 import { projectIdFromName } from '../../src/lib/utils';
-import { resolveConfigDir } from '../setup/detect.mts';
+import { detectDocker, resolveConfigDir } from '../setup/detect.mts';
 import {
   buildOriginLines,
   carryOverEnv,
@@ -74,6 +74,35 @@ describe('deployment config placement', () => {
   it('honors an explicit export directory in both environments', () => {
     expect(resolveConfigDir(env, '/export', false)).toBe('/export');
     expect(resolveConfigDir(env, '/export', true)).toBe('/export');
+  });
+});
+
+describe('Docker detection runs the CLI without a shell', () => {
+  it('asks `docker --version` then `docker info` as plain argv — no redirect a cmd.exe would misread', () => {
+    const calls: Array<[string, string[]]> = [];
+    const found = detectDocker((file, args) => { calls.push([file, args]); return args[0] === '--version' ? 'Docker version 29.7.2, build abc\n' : ''; });
+    expect(found).toEqual({ available: true, version: '29.7.2' });
+    expect(calls).toEqual([['docker', ['--version']], ['docker', ['info']]]);
+  });
+
+  it('a CLI without a running daemon is not Docker', () => {
+    expect(detectDocker((_file, args) => { if (args[0] === 'info') throw new Error('Cannot connect to the Docker daemon'); return 'Docker version 29.7.2'; }))
+      .toEqual({ available: false, version: null });
+  });
+
+  it.skipIf(process.platform === 'win32')('finds a real `docker` program on PATH; a failing daemon check is a paired control', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'neuralis-fake-docker-'));
+    const path = process.env.PATH;
+    const fake = (infoExit: number) => writeFileSync(join(bin, 'docker'), `#!/bin/sh\n[ "$1" = --version ] && echo 'Docker version 29.7.2, build fake' && exit 0\necho noise >&2\nexit ${infoExit}\n`, { mode: 0o755 });
+    try {
+      process.env.PATH = `${bin}:${path}`;
+      fake(0);
+      expect(detectDocker()).toEqual({ available: true, version: '29.7.2' });
+      fake(1);
+      expect(detectDocker()).toEqual({ available: false, version: null });
+    } finally {
+      process.env.PATH = path;
+    }
   });
 });
 

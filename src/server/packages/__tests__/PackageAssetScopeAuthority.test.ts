@@ -16,11 +16,14 @@ import {
   type PackageAssetScopeInit,
 } from '../PackageAssetScopeAuthority';
 
-function makeInit(overrides: Partial<PackageAssetScopeInit> = {}): PackageAssetScopeInit {
+function makeInit(
+  overrides: Partial<Omit<PackageAssetScopeInit, 'purpose'>> = {},
+): PackageAssetScopeInit & { purpose: 'document' } {
   return {
     userId: 'user-1',
     projectId: 'proj-1',
     agentId: undefined,
+    purpose: 'document',
     packageId: 'example-package',
     surfaceKind: 'widget',
     surfaceId: 'example_workspace',
@@ -375,5 +378,97 @@ describe('PackageAssetScopeAuthority — the bounded touch', () => {
   it('an UNKNOWN handle is still false, option or not', () => {
     const { authority } = makeAuthority();
     expect(authority.touch('nope', { maxAgeSinceCreationMs: MAX_AGE })).toBe(false);
+  });
+});
+
+describe('icon scopes share the ONE per-user cap with purpose-aware victims', () => {
+  function makeIconInit(dockId: string): PackageAssetScopeInit {
+    return {
+      ...makeInit(),
+      purpose: 'icon',
+      surfaceKind: 'dock',
+      surfaceId: dockId,
+      renderer: 'image',
+      surfaceRoot: '/data/projects/proj-1/_packages/example-package/app/shared',
+      entryRelPath: 'icon.png',
+    };
+  }
+
+  function isRecord<T extends object>(value: T | { refused: 'icon_capacity' }): value is T {
+    return !('refused' in value);
+  }
+
+  it('128 documents + an icon → ONE typed refusal; all 128 documents still resolve', () => {
+    const { authority, advance } = makeAuthority();
+    const documents = Array.from({ length: 128 }, (_, i) => {
+      advance(1);
+      return authority.mint(makeInit({ surfaceId: `w${i}` }));
+    });
+    const refused = authority.mint(makeIconInit('d1'));
+    // Fixed shape: no count, no record identity.
+    expect(refused).toEqual({ refused: 'icon_capacity' });
+    expect(authority.size()).toBe(128);
+    for (const document of documents) {
+      expect(authority.get(document.handle)).not.toBeNull();
+      expect(authority.getByPubToken(document.pubToken)).not.toBeNull();
+    }
+  });
+
+  it('127 documents + 1 icon + another icon → the older icon is replaced, documents untouched', () => {
+    const { authority, advance } = makeAuthority();
+    const documents = Array.from({ length: 127 }, (_, i) => {
+      advance(1);
+      return authority.mint(makeInit({ surfaceId: `w${i}` }));
+    });
+    advance(1);
+    const first = authority.mint(makeIconInit('d1'));
+    advance(1);
+    const second = authority.mint(makeIconInit('d2'));
+    expect(isRecord(first) && isRecord(second)).toBe(true);
+    if (!isRecord(first) || !isRecord(second)) return;
+    expect(authority.get(first.handle)).toBeNull();
+    // Both indexes went through the one removal path.
+    expect(authority.getByPubToken(first.pubToken)).toBeNull();
+    expect(authority.get(second.handle)?.purpose).toBe('icon');
+    expect(documents.every((document) => authority.get(document.handle) !== null)).toBe(true);
+    expect(authority.size()).toBe(128);
+  });
+
+  it('a DOCUMENT mint at the cap displaces an icon before its own least-recent document', () => {
+    const { authority, advance } = makeAuthority({ maxPerUser: 3 });
+    const oldestDocument = authority.mint(makeInit({ surfaceId: 'w0' }));
+    advance(10);
+    const icon = authority.mint(makeIconInit('d1'));
+    advance(10);
+    const document = authority.mint(makeInit({ surfaceId: 'w1' }));
+    advance(10);
+    const fresh = authority.mint(makeInit({ surfaceId: 'w2' }));
+    if (!isRecord(icon)) throw new Error('icon refused under the cap');
+    expect(authority.get(icon.handle)).toBeNull();
+    expect(authority.get(oldestDocument.handle)).not.toBeNull();
+    expect(authority.get(document.handle)).not.toBeNull();
+    expect(authority.get(fresh.handle)).not.toBeNull();
+  });
+
+  it('with no icon left, a document mint keeps the old least-recent-document eviction', () => {
+    const { authority, advance } = makeAuthority({ maxPerUser: 2 });
+    const a = authority.mint(makeInit({ surfaceId: 'w0' }));
+    advance(10);
+    const b = authority.mint(makeInit({ surfaceId: 'w1' }));
+    advance(10);
+    authority.mint(makeInit({ surfaceId: 'w2' }));
+    expect(authority.get(a.handle)).toBeNull();
+    expect(authority.get(b.handle)).not.toBeNull();
+  });
+
+  it("another user's icons are never a victim, and owner close forgets both keys", () => {
+    const { authority } = makeAuthority({ maxPerUser: 1 });
+    const foreign = authority.mint({ ...makeIconInit('d1'), userId: 'user-2' });
+    authority.mint(makeInit({ surfaceId: 'w0' }));
+    expect(authority.mint(makeIconInit('d2'))).toEqual({ refused: 'icon_capacity' });
+    if (!isRecord(foreign)) throw new Error('foreign icon refused');
+    expect(authority.get(foreign.handle)).not.toBeNull();
+    expect(authority.close(foreign.handle, 'user-2')).toBe(true);
+    expect(authority.getByPubToken(foreign.pubToken)).toBeNull();
   });
 });

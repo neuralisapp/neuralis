@@ -13,12 +13,25 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { click, findByText, installFakeDom, type FakeNode } from './fakeDom';
+import { click, findByText, installFakeDom, FakeNode } from './fakeDom';
 
 const dom = installFakeDom();
 
 vi.mock('next-auth/react', () => ({ useSession: () => ({ data: { user: { id: 'u1', name: 'Ada' } }, status: 'authenticated' }) }));
-vi.mock('../useDockItems', () => ({ usePackageDockItems: () => [] }));
+const dockFixture = vi.hoisted(() => ({
+  items: (dockId: string) => [1, 2, 3].map((n) => ({ id: `${dockId}-${n}`, position: n, title: `${dockId} ${n}`, icon: () => null, onClick: () => undefined })),
+}));
+vi.mock('../useDockItems', () => ({
+  usePackageDockItems: () => [],
+  usePrimaryDockItems: () => dockFixture.items('primary'),
+  useSecondaryDockItems: () => dockFixture.items('secondary'),
+}));
+vi.mock('../AnimatedUniverseBackground', () => ({ AnimatedUniverseBackground: () => null }));
+vi.mock('../../theme/useTheme', async () => {
+  const { DEFAULT_THEME } = await import('../../theme/themes');
+  return { useTheme: () => ({ theme: DEFAULT_THEME, backgroundTheme: DEFAULT_THEME, dockTheme: DEFAULT_THEME }) };
+});
+Object.assign(window, { innerWidth: 1280, innerHeight: 800, screen: { width: 1280, height: 800 } });
 vi.mock('../UserAvatar', () => ({ UserAvatar: () => null }));
 vi.mock('../UserProfilePopup', () => ({ UserProfilePopup: () => null }));
 vi.mock('../../realtime/eventHub', () => ({ subscribeHub: () => () => undefined, getHubConnected: () => true }));
@@ -27,6 +40,8 @@ const { createElement, act } = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useWorkspaceStore } = await import('../../store/workspaceStore');
 const { Dock } = await import('../Dock');
+const { WorkspaceShell } = await import('../WorkspaceShell');
+const { DockScrollContainer } = await import('../DockScrollContainer');
 const { EditDocksToggle, DISCARD_CONFIRM_MS } = await import('../LayoutSettingsPanel');
 const { InboxPanel, CLEAR_CONFIRM_MS } = await import('../InboxPanel');
 const { UserInfo } = await import('../UserInfo');
@@ -97,7 +112,7 @@ describe('Edit docks', () => {
     { 'data-test-dock': dockId },
     createElement(Dock, {
       dockId,
-      placement: { dockId, edge: dockId === 'primary' ? 'left' : 'right', align: 'start' },
+      placement: { dockId, anchor: dockId === 'primary' ? 'top-left' : 'top-right', orientation: 'vertical' },
       mode: 'iconPinned',
       onChangeMode: () => undefined,
       items: items(dockId),
@@ -343,5 +358,236 @@ describe('"Open in Inbox"', () => {
     await settle();
     expect(byAttr('aria-selected', 'true')[0]?.textContent).toBe('All');
     expect(listCalls().map((c) => c.url)).toEqual(['/api/notifications?groups=4']);
+  });
+});
+
+
+describe('bounded native dock scrolling', () => {
+  it('coalesces wheel bursts, preserves native pinch/boundaries, and shares one observer root', async () => {
+    const frames = new Map<number, FrameRequestCallback>(); let next = 0;
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(fn => { frames.set(++next, fn); return next; });
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id); });
+    let wheel: ((event: unknown) => void) | undefined; let scroll: (() => void) | undefined;
+    const attach = vi.spyOn(FakeNode.prototype, 'addEventListener').mockImplementation(function (name, fn) {
+      if (name === 'wheel') wheel = fn;
+      if (name === 'scroll') scroll = () => fn({});
+    });
+    const detach = vi.spyOn(FakeNode.prototype, 'removeEventListener');
+    const disconnect = vi.fn(); const observe = vi.fn();
+    vi.stubGlobal('ResizeObserver', class { observe = observe; disconnect = disconnect; });
+    let at = 0; const move = vi.fn((options: { left: number }) => { at += options.left; });
+    Object.defineProperties(FakeNode.prototype, {
+      clientWidth: { configurable: true, get: () => 100 }, scrollWidth: { configurable: true, get: () => 500 },
+      scrollLeft: { configurable: true, get: () => at }, scrollBy: { configurable: true, value: move },
+    });
+    try {
+      await render(createElement(DockScrollContainer, { children: createElement('span', null, 'First / Last') }));
+      expect(observe).toHaveBeenCalledTimes(1);
+      const preventDefault = vi.fn();
+      const event = { deltaX: 0, deltaY: 400, deltaMode: 0, ctrlKey: false, preventDefault };
+      await act(async () => { wheel?.(event); wheel?.(event); });
+      expect(frames.size).toBe(1); expect(move).not.toHaveBeenCalled();
+      await act(async () => { const [id, fn] = [...frames][0]; frames.delete(id); fn(0); });
+      expect(move).toHaveBeenCalledExactlyOnceWith({ left: 100 });
+      // The arrows overlay the scroller's ends; they never take a place in the item flow.
+      expect(byAttr('aria-label', 'Scroll dock backward')[0]?.getAttribute('class')).toContain('absolute left-0');
+      preventDefault.mockClear(); wheel?.({ ...event, ctrlKey: true }); expect(preventDefault).not.toHaveBeenCalled();
+      at = 400;
+      await act(async () => { scroll?.(); const [id, fn] = [...frames][0]; frames.delete(id); fn(0); });
+      expect(byAttr('aria-label', 'Scroll dock forward')).toHaveLength(0);
+      wheel?.(event); expect(preventDefault).not.toHaveBeenCalled();
+      await act(async () => root!.unmount()); root = null;
+      expect(disconnect).toHaveBeenCalledTimes(1); expect(frames.size).toBe(0);
+      expect(detach.mock.calls.some(([name]) => name === 'wheel')).toBe(true);
+    } finally {
+      request.mockRestore(); cancel.mockRestore(); attach.mockRestore(); detach.mockRestore(); vi.unstubAllGlobals();
+      for (const name of ['clientWidth', 'scrollWidth', 'scrollLeft', 'scrollBy']) Reflect.deleteProperty(FakeNode.prototype, name);
+    }
+  });
+});
+
+// ─── Dock lanes in the mounted shell ────────────────────────────────────────
+
+describe('dock lanes in the mounted shell', () => {
+  const layout = (anchor: string, orientation: string, dockBackground: 'classic' | 'toolbar', secondaryAnchor = anchor) => JSON.stringify({
+    primary: { dockId: 'primary', anchor, orientation },
+    secondary: { dockId: 'secondary', anchor: secondaryAnchor, orientation },
+    dockBackground,
+  });
+  const props = (node: FakeNode): Record<string, (event?: unknown) => void> =>
+    node[Object.keys(node).find((k) => k.startsWith('__reactProps$'))!] as Record<string, (event?: unknown) => void>;
+  const shell = () => createElement(WorkspaceShell, { snapshotReady: true, children: null });
+
+  afterEach(() => { window.localStorage.clear(); });
+
+  it.each([
+    ['classic', 'bottom', 'bottom', 'horizontal', ['primary', 'secondary']],
+    ['toolbar', 'bottom', 'bottom', 'horizontal', ['primary', 'secondary']],
+    ['classic', 'right', 'top-right', 'vertical', ['secondary', 'primary']],
+    ['toolbar', 'right', 'top-right', 'vertical', ['secondary', 'primary']],
+  ] as const)('two docks on one anchor or neighbouring anchors share ONE cluster, one after the other (%s, %s + %s, %s)', async (background, primary, secondary, orientation, order) => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', layout(primary, orientation, background, secondary));
+    await render(shell());
+    const clusters = byAttr('data-dock-cluster');
+    expect(clusters).toHaveLength(1);
+    const capsules = clusters[0].querySelectorAll('[data-dock-capsule]');
+    expect(capsules.map((c) => c.getAttribute('data-dock-capsule'))).toEqual([...order]);
+    // Siblings in one flex line: they can only sit one after the other, never on top of each other — and flush.
+    expect(capsules[0].parentNode).toBe(capsules[1].parentNode);
+    expect(clusters[0].getAttribute('class')).not.toMatch(/\bgap-/);
+    const [first, second] = orientation === 'horizontal' ? ['Right', 'Left'] : ['Bottom', 'Top'];
+    if (background === 'classic') {
+      expect(capsules[0].style.borderTopWidth || undefined).toBeUndefined();
+    } else {
+      // ONE contour: the shared side has no border and square corners; the outer side keeps both.
+      expect(capsules[0].style[`border${first}Width`]).toBe('0');
+      expect(capsules[1].style[`border${second}Width`]).toBe('0');
+      expect(capsules[0].style[`border${second}Width`]).toBe('1px');
+    }
+  });
+
+  it('the join writes nothing: the stored background and transparencies are the ones the user chose', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', layout('left', 'vertical', 'classic'));
+    const before = window.localStorage.getItem('neuralis:workspace:dockLayout');
+    await render(shell());
+    expect(window.localStorage.getItem('neuralis:workspace:dockLayout')).toBe(before);
+  });
+
+  it('a hover dock\'s trigger lies INSIDE its own cluster; hovering it opens the dock, pinned docks get no trigger', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', JSON.stringify({
+      primary: { dockId: 'primary', anchor: 'bottom', orientation: 'horizontal' },
+      secondary: { dockId: 'secondary', anchor: 'right', orientation: 'vertical' },
+    }));
+    window.localStorage.setItem('neuralis:workspace:dockMode:primary', 'iconHover');
+    await render(shell());
+    const [hoverCluster, pinnedCluster] = byAttr('data-dock-cluster');
+    const trigger = hoverCluster.childNodes[0];
+    expect(trigger.getAttribute('aria-hidden')).toBe('true');
+    expect(trigger.getAttribute('class')).toContain('-bottom-1');
+    expect(trigger.getAttribute('class')).toContain('pointer-events-auto');
+    const capsule = hoverCluster.querySelectorAll('[data-dock-capsule]')[0];
+    expect(capsule.getAttribute('class')).toContain('opacity-0');
+    expect(capsule.getAttribute('class')).toContain('pointer-events-none');
+    await act(async () => { props(hoverCluster).onMouseEnter(); });
+    expect(capsule.getAttribute('class')).toContain('opacity-100');
+    expect(capsule.getAttribute('class')).toContain('pointer-events-auto');
+    expect(pinnedCluster.querySelectorAll('[aria-hidden="true"]').filter((n) => String(n.getAttribute('class')).includes('pointer-events-auto'))).toHaveLength(0);
+    // The cluster itself never takes a click — only its trigger and an open dock do.
+    expect(hoverCluster.getAttribute('class')).toContain('pointer-events-none');
+  });
+
+  it('two docks on the right column: one lane at the label width, the icon dock flush with the screen edge', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', JSON.stringify({
+      primary: { dockId: 'primary', anchor: 'top-right', orientation: 'vertical' },
+      secondary: { dockId: 'secondary', anchor: 'bottom-right', orientation: 'vertical' },
+    }));
+    window.localStorage.setItem('neuralis:workspace:dockMode:primary', 'labelPinned');
+    await render(shell());
+    const lanes = byAttr('data-dock-lane');
+    expect(lanes.map((l) => l.getAttribute('data-dock-lane'))).toEqual(['vertical:right']);
+    expect(lanes[0].getAttribute('class')).toContain('items-end');
+    expect(lanes[0].style.width).toBe('11rem');
+    expect(lanes[0].style.right).toBe('0');
+    expect(byAttr('data-dock-capsule', 'secondary')[0].style.width).toBe('3.5rem');
+    expect(byAttr('data-dock-cluster').map((c) => c.getAttribute('class'))).toEqual([
+      expect.not.stringContaining('mt-auto'), expect.stringContaining('mt-auto'),
+    ]);
+  });
+
+  it('a hidden dock shows a 3 px edge indicator inside its trigger, gone while the dock is revealed; a pinned dock has none', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', JSON.stringify({
+      primary: { dockId: 'primary', anchor: 'bottom', orientation: 'horizontal' },
+      secondary: { dockId: 'secondary', anchor: 'right', orientation: 'vertical' },
+    }));
+    window.localStorage.setItem('neuralis:workspace:dockMode:primary', 'labelHoverHidden');
+    await render(shell());
+    const [hoverCluster, pinnedCluster] = byAttr('data-dock-cluster');
+    const indicator = hoverCluster.childNodes[0].querySelectorAll('[data-dock-edge-indicator]')[0];
+    expect(indicator).toBeDefined();
+    expect(indicator.getAttribute('class')).toContain('h-[3px]');
+    expect(indicator.getAttribute('class')).toContain('pointer-events-none');
+    expect(indicator.getAttribute('class')).toContain('opacity-100');
+    expect(indicator.style.backgroundColor).toBe('rgba(var(--surface-tone-rgb), 0.35)');
+    await act(async () => { props(hoverCluster).onMouseEnter(); });
+    expect(indicator.getAttribute('class')).toContain('opacity-0');
+    expect(pinnedCluster.querySelectorAll('[data-dock-edge-indicator]')).toHaveLength(0);
+  });
+
+  it('the rotate control sits IN the grip\'s hover group and in flow: reached without leaving it, hidden it is not hit-testable and covers only the dock', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', layout('top-right', 'vertical', 'classic'));
+    await render(shell());
+    const capsule = byAttr('data-dock-capsule', 'primary')[0];
+    const gripWrap = capsule.childNodes[0];
+    expect(gripWrap.getAttribute('class')).toContain('group/grip');
+    const rotate = byAttr('data-dock-rotate')[0];
+    // A flow sibling of the grip inside the same group — no margin gap, no absolute overlay over the stage.
+    expect(rotate.parentNode).toBe(gripWrap);
+    expect(rotate.getAttribute('class')).not.toMatch(/\babsolute\b|\b(ml|mr|mt|mb)-\d/);
+    expect(rotate.getAttribute('class')).toContain('opacity-0');
+    expect(rotate.getAttribute('class')).toContain('pointer-events-none');
+    expect(rotate.getAttribute('class')).toContain('group-hover/grip:pointer-events-auto');
+  });
+
+  it('the background image follows the Background material, never the Universe toggle', async () => {
+    for (const [level, opacity] of [['opaque', '1'], ['dim', '0.6'], ['transparent', '0.34']] as const) {
+      window.localStorage.setItem('neuralis:workspace:dockLayout', JSON.stringify({ backgroundTransparency: level }));
+      await render(shell());
+      const image = dom.container.querySelectorAll('DIV').find((n) => n.style.backgroundImage === 'var(--bg-image)')!;
+      expect([level, String(image.style.opacity)]).toEqual([level, opacity]);
+      await act(async () => root!.unmount()); root = null;
+    }
+  });
+
+  it('the grip is in the item flow, and its picker offers the eight anchors (no centre) and both orientations', async () => {
+    window.localStorage.setItem('neuralis:workspace:dockLayout', layout('left', 'vertical', 'classic'));
+    await render(shell());
+    const capsule = byAttr('data-dock-capsule', 'primary')[0];
+    const gripWrap = capsule.childNodes[0];
+    expect(gripWrap.getAttribute('class')).not.toContain('absolute');
+    const grip = byAttr('aria-label', 'Move primary dock')[0];
+    await act(async () => { props(grip).onClick({ detail: 0 }); });
+    const picker = byAttr('aria-label', 'primary dock position')[0];
+    const anchors = picker.querySelectorAll('[aria-label]').filter((n) => String(n.getAttribute('aria-label')).startsWith('Anchor '));
+    expect(anchors.map((n) => n.getAttribute('aria-label')).sort()).toEqual([
+      'Anchor bottom', 'Anchor bottom-left', 'Anchor bottom-right', 'Anchor left', 'Anchor right', 'Anchor top', 'Anchor top-left', 'Anchor top-right',
+    ]);
+    await press(byAttr('aria-label', 'Horizontal')[0]);
+    expect(JSON.parse(window.localStorage.getItem('neuralis:workspace:dockLayout')!).primary).toEqual({ dockId: 'primary', anchor: 'left', orientation: 'horizontal' });
+    await act(async () => { props(byAttr('aria-label', 'Move primary dock')[0]).onClick({ detail: 0 }); });
+    await press(byAttr('aria-label', 'Anchor top-right')[0]);
+    expect(JSON.parse(window.localStorage.getItem('neuralis:workspace:dockLayout')!).primary).toEqual({ dockId: 'primary', anchor: 'top-right', orientation: 'horizontal' });
+    expect(byAttr('aria-label', 'primary dock position')).toHaveLength(0);
+  });
+});
+
+describe('the Apps footer', () => {
+  const Glyph = () => null;
+  const items = [
+    ...[1, 2, 3].map((n) => ({ id: `app-${n}`, position: n, title: `App ${n}`, icon: Glyph, onClick: () => undefined })),
+    { id: 'apps', position: 9999, title: 'Apps', icon: Glyph, onClick: () => undefined, section: 'footer' as const },
+  ];
+  const buttonOf = (title: string): FakeNode => byAttr('title', title)[0];
+
+  it.each(['iconPinned', 'labelPinned', 'iconHover', 'labelHoverHidden'] as const)('rides OUTSIDE the scroller, after it, in every dock mode and orientation (%s)', async (mode) => {
+    for (const orientation of ['vertical', 'horizontal'] as const) {
+      await render(createElement(Dock, { dockId: 'primary', placement: { dockId: 'primary', anchor: 'top-left', orientation }, mode, onChangeMode: () => undefined, items }));
+      const capsule = byAttr('data-dock-capsule', 'primary')[0];
+      const footer = byAttr('data-dock-footer')[0];
+      expect(footer.parentNode).toBe(capsule);
+      expect(capsule.childNodes.at(-1)).toBe(footer);
+      expect(footer.contains(buttonOf('Apps'))).toBe(true);
+      // Paired control: a main item stays inside the scroller, never in the footer.
+      expect(footer.contains(buttonOf('App 3'))).toBe(false);
+      expect(capsule.contains(buttonOf('App 3'))).toBe(true);
+      await act(async () => root!.unmount()); root = null;
+    }
+  });
+
+  it('a dock running reversed from its corner keeps the footer on the main items\' outer end: before the scroller', async () => {
+    await render(createElement(Dock, { dockId: 'primary', placement: { dockId: 'primary', anchor: 'bottom-left', orientation: 'vertical' }, mode: 'iconPinned', onChangeMode: () => undefined, items }));
+    const capsule = byAttr('data-dock-capsule', 'primary')[0];
+    const footer = byAttr('data-dock-footer')[0];
+    expect(footer.parentNode).toBe(capsule);
+    expect(capsule.childNodes.at(-1)).not.toBe(footer);
   });
 });

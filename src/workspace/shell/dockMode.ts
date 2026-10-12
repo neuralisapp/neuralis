@@ -2,6 +2,15 @@ export type DockMode = 'iconPinned' | 'iconHover' | 'labelPinned' | 'labelHoverH
 
 export const DOCK_MODES: DockMode[] = ['iconPinned', 'labelPinned', 'iconHover', 'labelHoverHidden'];
 
+/** The modes that keep the dock on screen (Randomize picks only these: a hidden dock would have to be hunted for). */
+export const PINNED_DOCK_MODES: readonly DockMode[] = DOCK_MODES.filter(dockModeIsPinned);
+
+/** Where each dock's mode is stored (one key per dock). */
+export const DOCK_MODE_KEYS = Object.freeze({
+  primary: 'neuralis:workspace:dockMode:primary',
+  secondary: 'neuralis:workspace:dockMode:secondary',
+});
+
 export function isDockMode(v: unknown): v is DockMode {
   return typeof v === 'string' && (DOCK_MODES as readonly string[]).includes(v);
 }

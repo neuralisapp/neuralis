@@ -18,8 +18,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmod, readdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { spell } from '../cli/spelling.mts';
 
 /** The version this release of the host is built and tested against. */
@@ -233,6 +233,7 @@ export async function readQdrantState(path: string): Promise<QdrantState | null>
 
 /** Atomic (temp + rename), operator-only. */
 export async function writeQdrantState(path: string, state: QdrantState): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${randomBytes(4).toString('hex')}`;
   await writeFile(tmp, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
   await chmod(tmp, 0o600);

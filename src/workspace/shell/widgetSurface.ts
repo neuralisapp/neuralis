@@ -8,6 +8,23 @@
 import type { CSSProperties } from 'react';
 import type { TransparencyLevel, WidgetInstance } from '../store/types';
 import type { WidgetDefinition } from '../widgets/types';
+import { themeScopeStyle } from '../theme/ThemeContext';
+import { DARK_THEME } from '../theme/themes';
+
+/**
+ * The ONE control-surface material — the Apps/Layout panel and the Phone dock
+ * sheet: the Dark palette, fully opaque, no backdrop filter. It follows neither
+ * the widget/dock theme nor the Opaque/Dim/Clear choice, so it never lets the
+ * widgets under it show through. Its root re-declares the Dark palette tokens
+ * (`themeScopeStyle`), so an enclosing Light scope's ink never reaches it.
+ */
+export const CONTROL_SURFACE_THEME_ID = DARK_THEME.id;
+export const CONTROL_SURFACE: CSSProperties = Object.freeze({
+  ...themeScopeStyle(DARK_THEME),
+  backgroundColor: 'rgb(var(--w-bg-rgb))',
+  color: 'var(--w-text)',
+  borderColor: 'var(--control-border)',
+});
 
 /**
  * The actual chrome surface for a transparency level. Mirrors the widget
@@ -23,24 +40,36 @@ import type { WidgetDefinition } from '../widgets/types';
  * STABLE object identity per level: React's `diffProperties` skips a prop when
  * `nextProp === lastProp`, which elides the whole style walk on every re-render
  * that did not change the level. Safe because the only caller
- * (`PanelChrome.tsx:25`) never mutates the result.
+ * (`PanelChrome`) spreads it into its memoized style and never mutates it.
  */
 const TRANSPARENT_SURFACE: CSSProperties = Object.freeze({
   backgroundColor: 'transparent',
   backgroundImage: 'none',
-  border: '1px solid rgba(255,255,255,0.06)',
+  border: '1px solid var(--w-clear-border)',
   boxShadow: 'none',
   color: 'var(--w-text)',
   ['--w-fade-rgba' as string]: 'rgba(var(--w-bg-rgb), 0)',
 } as CSSProperties);
 
+/**
+ * Dim glass — the ONE record the widget surface and the docks (`dockSurface.ts`)
+ * share: a 72 % surface over a light 6 px blur keeps the background behind it
+ * readable instead of washing it out. A classic dock's small icon tile takes
+ * `tileAlpha`: at 72 % a 48 px near-black tile reads as opaque, so it would not
+ * look like glass at all; icons need no body-text contrast. `DIM_BLUR_CLASS`
+ * is its literal twin, because Tailwind only emits a utility it can read in
+ * the source; `widgetSurface.test.ts` pins the pair.
+ */
+export const DIM_GLASS = { alpha: 0.72, tileAlpha: 0.42, blurPx: 6 } as const;
+export const DIM_BLUR_CLASS = 'backdrop-blur-[6px]';
+
 const DIM_SURFACE: CSSProperties = Object.freeze({
   // Legacy rgba() syntax — `--w-bg-rgb` is comma-separated ("14, 15, 18")
-  // so it expands as `rgba(14, 15, 18, 0.55)`. The modern slash-alpha form
-  // (`rgb(... / 0.55)`) would be invalid against the same var format.
-  backgroundColor: 'rgba(var(--w-bg-rgb), 0.55)',
+  // so it expands as `rgba(14, 15, 18, 0.72)`. The modern slash-alpha form
+  // (`rgb(... / 0.72)`) would be invalid against the same var format.
+  backgroundColor: `rgba(var(--w-bg-rgb), ${DIM_GLASS.alpha})`,
   backgroundImage: 'var(--w-surface-image)',
-  border: '1px solid rgba(255,255,255,0.04)',
+  border: '1px solid var(--w-dim-border)',
   boxShadow: 'var(--w-shadow)',
   color: 'var(--w-text)',
   ['--w-fade-rgba' as string]: 'rgba(var(--w-bg-rgb), 0)',
@@ -49,7 +78,7 @@ const DIM_SURFACE: CSSProperties = Object.freeze({
 const OPAQUE_SURFACE: CSSProperties = Object.freeze({
   backgroundColor: 'rgb(var(--w-bg-rgb))',
   backgroundImage: 'var(--w-surface-image)',
-  border: '1px solid transparent',
+  border: '1px solid var(--w-opaque-border)',
   boxShadow: 'var(--w-shadow)',
   color: 'var(--w-text)',
   ['--w-fade-rgba' as string]: 'rgb(var(--w-bg-rgb))',
@@ -82,7 +111,7 @@ const OPAQUE_SURFACE: CSSProperties = Object.freeze({
  * layer promotion buys nothing. That ranking does not transfer to a GPU. Any
  * future attempt to drop this needs a measurement on real hardware first.
  *
- * `dim` keeps `backdrop-blur-md`: at alpha 0.55 the blur is also genuinely
+ * `dim` keeps its light `DIM_GLASS` blur: below alpha 1 the blur is genuinely
  * visible. `transparent` emits none — it has no surface to blur behind.
  *
  * (c) is ADDITIONALLY held by `PanelChrome`'s unconditional `isolate`
@@ -98,12 +127,25 @@ const OPAQUE_SURFACE: CSSProperties = Object.freeze({
  */
 const SURFACE_LEVELS = {
   transparent: { style: TRANSPARENT_SURFACE, blurClass: null },
-  dim: { style: DIM_SURFACE, blurClass: 'backdrop-blur-md' },
+  dim: { style: DIM_SURFACE, blurClass: DIM_BLUR_CLASS },
   opaque: { style: OPAQUE_SURFACE, blurClass: 'backdrop-blur-xl' },
 } as const satisfies Record<
   TransparencyLevel,
   { readonly style: CSSProperties; readonly blurClass: string | null }
 >;
+
+/** The three materials, in their Layout order — the ONE option set (the Layout rows, the parsers and Randomize read it). */
+export const TRANSPARENCY_LEVELS = ['opaque', 'dim', 'transparent'] as const satisfies readonly TransparencyLevel[];
+
+/**
+ * How strongly an uploaded background image shows at each Background
+ * material. The Universe draws over the image and never dims it.
+ */
+const BACKGROUND_IMAGE_OPACITY: Readonly<Record<TransparencyLevel, number>> = Object.freeze({ opaque: 1, dim: 0.6, transparent: 0.34 });
+
+export function backgroundImageOpacity(level: TransparencyLevel): number {
+  return BACKGROUND_IMAGE_OPACITY[level];
+}
 
 export function surfaceStyle(level: TransparencyLevel): CSSProperties {
   return SURFACE_LEVELS[level].style;

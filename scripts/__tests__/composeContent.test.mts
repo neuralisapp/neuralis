@@ -63,6 +63,17 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
   };
 }
 
+describe('custom published MCP port', () => {
+  it('maps the chosen host port to the fixed companion listener in every install channel', () => {
+    for (const monorepo of [true, false]) {
+      const content = buildComposeContent(baseInput({ mcpPort: 43393, monorepo, imageTag: '0.2.1' }), STAMP);
+      expect(content).toContain('      - "43393:3101"\n');
+      expect(content).toContain('      - MCP_HTTP_PORT=3101\n');
+      expect(content).not.toContain('      - MCP_HTTP_PORT=43393\n');
+    }
+  });
+});
+
 /** The service block for `name:` — from its header to the next top-level-ish key. */
 function serviceBlock(content: string, name: string): string {
   const start = content.indexOf(`\n  ${name}:\n`);

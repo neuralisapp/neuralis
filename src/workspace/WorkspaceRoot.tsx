@@ -1,6 +1,7 @@
 'use client';
 
 import { createElement, useEffect, useRef, useState, type ComponentType } from 'react';
+import { useSession } from 'next-auth/react';
 import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts';
 import { useWorkspaceStore } from './store/workspaceStore';
 import { useWorkspaceSession } from './store/selectors';
@@ -75,6 +76,12 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
   );
 
   useEffect(() => { bootstrap(); }, [bootstrap]);
+
+  // Group layouts are user-local: the store reads them under the LIVE signed-in
+  // user only, and a user change unmounts the previous user's retained windows.
+  const { data: authSession, status: authStatus } = useSession();
+  const liveUserId = authStatus === 'authenticated' ? ((authSession?.user as { id?: string } | undefined)?.id ?? null) : null;
+  useEffect(() => { useWorkspaceStore.getState().setLiveUserId(liveUserId); }, [liveUserId]);
 
   // The notification badges' feed has ONE holder, here, ABOVE
   // `NeuralisHostProvider`: every package provider that attaches at runtime

@@ -1,5 +1,7 @@
 'use client';
 
+import { AppGlyph } from '../packages/PackageAppIcon';
+import type { PackageAppImage } from '../packages/dockRuntime';
 import { useCallback, useEffect, useRef, useState, type ComponentType, type CSSProperties } from 'react';
 import { Bell, CheckCheck, ChevronDown, ChevronLeft, Settings2, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -31,6 +33,8 @@ export const CLEAR_CONFIRM_MS = 4000;
 export type AppIdentity = {
   label: string;
   icon: ComponentType<{ className?: string; style?: CSSProperties }>;
+  /** The app's declared picture (the glyph stays the fallback). */
+  image?: PackageAppImage;
   color?: string;
 };
 
@@ -45,7 +49,7 @@ export function appIdentity(
   dockItems: readonly PackageDockItem[],
 ): AppIdentity {
   const item = dockKey ? dockItems.find((d) => packageDockKey(d.packageId, d.id) === dockKey) : undefined;
-  if (item) return { label: item.label, icon: resolveDockIcon(item.icon), color: item.color };
+  if (item) return { label: item.label, icon: resolveDockIcon(item.icon), image: item.image, color: item.color };
   const bare = packageId.includes('/') ? packageId.slice(packageId.lastIndexOf('/') + 1) : packageId;
   return { label: bare, icon: Bell };
 }
@@ -60,7 +64,7 @@ export function AppGroupHeader({
         className="w-6 h-6 rounded-lg flex items-center justify-center bg-white/[0.06] shrink-0"
         style={identity.color ? { boxShadow: `inset 0 0 0 1px ${identity.color}40` } : undefined}
       >
-        <Icon className="w-3.5 h-3.5" style={identity.color ? { color: identity.color } : undefined} />
+        <AppGlyph image={identity.image} icon={Icon} size={14} className="w-3.5 h-3.5" style={identity.color ? { color: identity.color } : undefined} />
       </span>
       <span className="min-w-0 flex-1 flex items-baseline gap-1.5">
         <span className="min-w-0 truncate text-[12px] font-semibold text-white/75">{identity.label}</span>

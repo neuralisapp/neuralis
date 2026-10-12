@@ -1,22 +1,10 @@
 import React from 'react';
 import type { WidgetDefinition, WidgetRenderContext } from './types';
-import { LayoutSettingsPanel } from '../shell/LayoutSettingsPanel';
-
-const HOST_REGISTRY: Record<string, WidgetDefinition> = {
-  'host:layout-settings': {
-    type: 'host:layout-settings',
-    title: 'Layout',
-    icon: 'LayoutDashboard',
-    openBehavior: { singleton: true },
-    chrome: { mode: 'frameless' },
-    render: () => <LayoutSettingsPanel />,
-  },
-};
 
 const PACKAGE_REGISTRY = new Map<string, WidgetDefinition>();
 
 export function getWidgetDefinition(type: string): WidgetDefinition | undefined {
-  return PACKAGE_REGISTRY.get(type) ?? HOST_REGISTRY[type];
+  return PACKAGE_REGISTRY.get(type);
 }
 
 export function renderWidget(ctx: WidgetRenderContext): React.ReactElement {
@@ -25,6 +13,15 @@ export function renderWidget(ctx: WidgetRenderContext): React.ReactElement {
     return <div className="p-4 text-white/50 text-sm">Unknown widget: {ctx.instance.type}</div>;
   }
   return def.render(ctx);
+}
+
+/**
+ * Whether a widget type may have several windows bound to one agent: every
+ * type except a manifest `open.singleton: true`. The ONE predicate the store's
+ * open targets, the dock's "New window" and the launcher share.
+ */
+export function isRepeatableWidget(type: string): boolean {
+  return getWidgetDefinition(type)?.openBehavior?.singleton !== true;
 }
 
 export function registerWidget(def: WidgetDefinition): void {

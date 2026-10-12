@@ -30,6 +30,40 @@ export type WorkspaceSession = {
  */
 export type ProjectWorkspaceState = { lastAgentId: string | null; dock?: DockPrefsById };
 
+/**
+ * How the workspace presents a project: `agent` = each agent keeps its own
+ * layout (the agent dock switches between them); `group` = ONE shared layout of
+ * the selected Group, holding windows of several agents.
+ */
+export type WorkspacePresentation = 'agent' | 'group';
+
+/**
+ * A user-local Group: a named set of the project's agents whose windows share
+ * one layout. Presentation organization only — membership is never a grant;
+ * every window still runs as its bound agent under the caller's real session.
+ */
+export type WorkspaceGroup = { id: string; name: string; memberIds: string[] };
+
+/**
+ * One user's Groups in one project (`groupScopeKey(userId, projectId)`):
+ * the presentation choice, the selected Group and the Groups themselves.
+ * Persisted beside `projectStateById`; absent ⇒ per-agent presentation.
+ */
+export type GroupScopeState = {
+  presentation: WorkspacePresentation;
+  selectedGroupId: string | null;
+  groups: WorkspaceGroup[];
+};
+
+/**
+ * Where a layout lives. `agent` = the per-agent runtime (`agentRuntimeKey`,
+ * unchanged); `group` = the user's Group runtime in a project. Window id, bound
+ * agent and conversation/resource ids are separate coordinates.
+ */
+export type RuntimeLocator =
+  | { kind: 'agent'; projectId: string; agentId: string }
+  | { kind: 'group'; userId: string; projectId: string; groupId: string };
+
 /** One dock's arrangement: keys in display order, and the keys it hides. */
 export type DockPrefs = { order: string[]; hidden: string[] };
 
@@ -42,7 +76,7 @@ export type DockPrefsById = { primary?: DockPrefs; secondary?: DockPrefs };
  * grid. Per-agent (lives on `AgentRuntime.layout`), persisted via the store's
  * `partialize`.
  */
-export type StageMode = 'tiled' | 'canvas' | 'grid';
+export type StageMode = 'tiled' | 'canvas' | 'grid' | 'phone';
 
 /**
  * Free-floating geometry for a widget in `canvas` / `grid` stage modes.
@@ -66,8 +100,9 @@ export type TiledLayoutState = {
    *  `useDockItems.tsx`, `selectors.ts` (not deprecated). */
   chatCollapsed?: boolean;
   widgetSplitsById?: Record<string, number>;
-  /** Active stage renderer. Defaults to `'tiled'` when absent. */
-  stageMode?: StageMode;
+  /** Saved stage renderer, `'tiled'` when absent. Never `'phone'`: Phone is a
+   *  presentation of this layout (automatic, or a transient manual choice). */
+  stageMode?: Exclude<StageMode, 'phone'>;
   /** Per-widget geometry for `canvas` mode (free-floating, world space). */
   freeformById?: Record<string, FreeformGeometry>;
   /** Per-widget geometry for `grid` mode (packed, snapped, container space).
@@ -106,6 +141,12 @@ export type WidgetInstance = {
    * entirely — client state only, server data untouched.
    */
   hidden?: boolean;
+  /**
+   * The agent this window is BOUND to — set when a window is created in a
+   * Group runtime and never changed afterwards. Absent in a per-agent runtime,
+   * whose windows are bound to that runtime's agent.
+   */
+  agentId?: string;
 };
 
 export type AgentRuntime = {

@@ -139,11 +139,14 @@ function makeDefinition(): PackageDefinition {
   return { id: PACKAGE_ID } as unknown as PackageDefinition;
 }
 
-function makeInit(overrides: Partial<PackageAssetScopeInit> = {}): PackageAssetScopeInit {
+function makeInit(
+  overrides: Partial<Omit<PackageAssetScopeInit, 'purpose'>> = {},
+): PackageAssetScopeInit & { purpose: 'document' } {
   return {
     userId: 'user-1',
     projectId: 'proj-1',
     agentId: undefined,
+    purpose: 'document',
     packageId: PACKAGE_ID,
     surfaceKind: 'widget',
     surfaceId: 'example_workspace',

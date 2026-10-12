@@ -42,6 +42,8 @@ vi.mock('../../store/ProjectStore', () => ({
 
 import {
   resolveVisiblePackageSurface,
+  resolveVisiblePackageDockImage,
+  isDockEntryGranted,
   isPackageDefinitionVisible,
   computeSurfaceFingerprint,
   getDefinitionGeneration,
@@ -439,5 +441,126 @@ describe('resolveVisiblePackageSurface', () => {
     mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
     expect(isPackageDefinitionVisible(def, scope, undefined)).toBe(true);
     expect(isPackageDefinitionVisible(def, scope, ['other'])).toBe(false);
+  });
+});
+
+describe('resolveVisiblePackageDockImage — the dock picture rides the ONE dock rule', () => {
+  function withDock(dock: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    const base = makePackage();
+    return {
+      ...base,
+      app: {
+        surfaces: [
+          ...base.app.surfaces,
+          {
+            kind: 'dock',
+            id: 'example.dock',
+            label: 'Example',
+            icon: 'Package',
+            image: 'app/shared/icon.png',
+            action: { type: 'open-widget', widget: 'example_workspace' },
+            ...dock,
+          },
+        ],
+      },
+      ...extra,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.listPackages.mockReturnValue([withDock({})]);
+    mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
+    mocks.getPackageOwnerScope.mockReturnValue(undefined);
+    mocks.getStatus.mockReturnValue(undefined);
+    mocks.getProjectById.mockResolvedValue({ id: 'proj-1' });
+  });
+
+  it('resolves the DECLARED picture of a visible dock entry', async () => {
+    const result = await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock');
+    expect(result).toMatchObject({
+      packageId: 'example-package',
+      dockId: 'example.dock',
+      imagePath: 'app/shared/icon.png',
+      sharedRel: 'icon.png',
+      trust: 'untrusted',
+    });
+    expect(result?.fingerprint).toBeTruthy();
+    expect(result?.generation).toBeTruthy();
+  });
+
+  it('null for an entry without a picture, an unknown dock, or an invalid declared path', async () => {
+    mocks.listPackages.mockReturnValue([withDock({ image: undefined })]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    mocks.listPackages.mockReturnValue([withDock({})]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'other.dock')).toBeNull();
+    for (const image of ['app/shared/icon.svg', '../secret.png', 'https://x.example/i.png', 'app/surfaces/widget/example_workspace/i.png']) {
+      mocks.listPackages.mockReturnValue([withDock({ image })]);
+      expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock'), image).toBeNull();
+    }
+  });
+
+  it("feature loss on the entry OR on its target widget hides the picture", async () => {
+    mocks.listPackages.mockReturnValue([withDock({ requires: { features: ['dock.secret'] } })]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    expect(
+      await resolveVisiblePackageDockImage(makeSession({ grantedFeatures: ['dock.secret'] }), 'example-package', 'example.dock'),
+    ).not.toBeNull();
+
+    const gatedTarget = withDock({});
+    (gatedTarget.app.surfaces[0] as Record<string, unknown>).requires = { features: ['widget.secret'] };
+    mocks.listPackages.mockReturnValue([gatedTarget]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    expect(
+      await resolveVisiblePackageDockImage(makeSession({ grantedFeatures: ['widget.secret'] }), 'example-package', 'example.dock'),
+    ).not.toBeNull();
+  });
+
+  it('a target widget no visible package declares leaves the entry (and its picture) visible — the snapshot semantics, as-is', async () => {
+    mocks.listPackages.mockReturnValue([withDock({ action: { type: 'open-widget', widget: 'no.such.widget' } })]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).not.toBeNull();
+  });
+
+  it('the whole-package ladder applies: uninstalled, error status, base-access, foreign owner scope', async () => {
+    mocks.getProjectPackageIds.mockReturnValue(new Set<string>());
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
+
+    mocks.getStatus.mockReturnValue({ status: 'error', error: 'boom' });
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    mocks.getStatus.mockReturnValue(undefined);
+
+    mocks.listPackages.mockReturnValue([withDock({}, { requires: { accessFeature: 'pkg.access' } })]);
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+    mocks.listPackages.mockReturnValue([withDock({})]);
+
+    mocks.getPackageOwnerScope.mockReturnValue({ kind: 'user', userId: 'someone-else' });
+    expect(await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock')).toBeNull();
+  });
+
+  it('the fingerprint moves with the declared path, the target and the trust — never with nothing', async () => {
+    const fingerprintOf = async (dock: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+      mocks.listPackages.mockReturnValue([withDock(dock, extra)]);
+      return (await resolveVisiblePackageDockImage(makeSession(), 'example-package', 'example.dock'))?.fingerprint;
+    };
+    const base = await fingerprintOf({});
+    expect(await fingerprintOf({})).toBe(base);
+    expect(await fingerprintOf({ image: 'app/shared/other.png' })).not.toBe(base);
+    expect(await fingerprintOf({ action: { type: 'action', id: 'go' } })).not.toBe(base);
+    expect(await fingerprintOf({}, { access: { trust: 'trusted' } })).not.toBe(base);
+    // A label/glyph change is not part of the served declaration.
+    expect(await fingerprintOf({ label: 'Renamed', icon: 'Star' })).toBe(base);
+  });
+
+  it('isDockEntryGranted — the shared rule, enumerated', () => {
+    const dock = { action: { type: 'open-widget' as const, widget: 'w' } };
+    const gated = { requires: { features: ['f'] } };
+    expect(isDockEntryGranted(dock, [], () => undefined)).toBe(true);
+    expect(isDockEntryGranted(dock, [], () => gated)).toBe(false);
+    expect(isDockEntryGranted(dock, ['f'], () => gated)).toBe(true);
+    expect(isDockEntryGranted({ ...dock, requires: { features: ['g'] } }, ['f'], () => gated)).toBe(false);
+    expect(isDockEntryGranted({ action: { type: 'action' as const, id: 'x' } }, [], () => gated)).toBe(true);
+    // No caller scope (legacy unscoped call) passes, as everywhere else.
+    expect(isDockEntryGranted(dock, undefined, () => gated)).toBe(true);
   });
 });

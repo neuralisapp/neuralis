@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useContext, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronRight, Inbox } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -14,7 +14,10 @@ import {
 } from '../notifications/notificationsClient';
 import type { DockBadgeTarget } from './DockBadge';
 import { NOTIFICATION_TONE } from './DockBadge';
+import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
+import { DEFAULT_THEME } from '../theme/themes';
 import type { DockEdge } from './dockPlacement';
+import { AppGlyph } from '../packages/PackageAppIcon';
 
 const POPOVER_WIDTH = 304;
 const POPOVER_GAP = 8;
@@ -97,6 +100,7 @@ export function NotificationPopover({
   anchor: DOMRect;
   onClose: () => void;
 }) {
+  const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
   const [rows, setRows] = useState<NotificationRow[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [seen, setSeen] = useState(false);
@@ -137,11 +141,12 @@ export function NotificationPopover({
         role="dialog"
         aria-label={`${target.title} notifications`}
         onKeyDown={onKeyDown}
-        className="fixed flex flex-col rounded-2xl bg-black/90 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/60 overflow-hidden"
-        style={{ zIndex: 9999, width: POPOVER_WIDTH, ...position, maxHeight: Math.max(160, Math.min(440, position.maxHeight)) }}
+        data-theme-id={dockTheme.id}
+        className="fixed flex flex-col rounded-2xl backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/60 overflow-hidden"
+        style={{ ...themeScopeStyle(dockTheme), backgroundColor: 'rgba(var(--w-bg-rgb), 0.96)', zIndex: 9999, width: POPOVER_WIDTH, ...position, maxHeight: Math.max(160, Math.min(440, position.maxHeight)) }}
       >
         <div className="flex items-center gap-2 px-3.5 pt-3 pb-2">
-          <Icon className="w-4 h-4 shrink-0" style={target.color ? { color: target.color } : undefined} />
+          <AppGlyph image={target.image} icon={Icon} size={16} className="w-4 h-4 shrink-0" style={target.color ? { color: target.color } : undefined} />
           <span className="min-w-0 truncate text-[13px] font-semibold text-white/85">{target.title}</span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">

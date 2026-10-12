@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext } from 'react';
+import { usePresentation } from '../store/selectors';
 
 /**
  * Callback a stage uses to register (or clear, with `null`) the placeholder
@@ -16,6 +17,15 @@ export type RegisterPlaceholder = (widgetId: string, el: HTMLDivElement | null) 
 const StageOutletContext = createContext<RegisterPlaceholder | null>(null);
 
 export const StageOutletProvider = StageOutletContext.Provider;
+
+/**
+ * The ONE empty-stage hint every stage shows: an empty Group says what a Group
+ * is; otherwise the stage's own words (`fallback`).
+ */
+export function useStageEmptyText(fallback: string): string {
+  const { presentation } = usePresentation();
+  return presentation === 'group' ? 'Pick an agent or open an app — this Group’s windows share one layout.' : fallback;
+}
 
 export function useStageOutlet(): RegisterPlaceholder {
   const register = useContext(StageOutletContext);

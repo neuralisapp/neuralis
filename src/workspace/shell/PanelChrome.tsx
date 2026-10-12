@@ -1,10 +1,13 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useContext, useMemo, type ReactNode } from 'react';
+import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
+import { DEFAULT_THEME } from '../theme/themes';
 import { cn } from '@/lib/cn';
 import type { TransparencyLevel } from '../store/types';
 import { WidgetControls } from './WidgetControls';
 import { surfaceStyle, surfaceBlurClass } from './widgetSurface';
+import { useWindowBinding } from '../store/selectors';
 
 export type ChromeMode = 'toolbar' | 'frameless' | 'floating';
 
@@ -17,12 +20,26 @@ export function PanelChrome(props: {
   contentClassName?: string;
   level?: TransparencyLevel;
   onCycleTransparency?: () => void;
+  /** The window id: in a Group the chrome names the agent the window is bound to. */
+  windowId?: string;
 }) {
   const { title, subtitle, onClose, children, contentClassName, onCycleTransparency } = props;
+  const binding = useWindowBinding(props.windowId ?? '');
+  const bindingLabel = binding.name ? `${binding.name}${binding.outside ? ' · outside group' : ''}` : '';
+  const agentTag = bindingLabel ? (
+    <span
+      data-window-agent=""
+      className={cn('max-w-[10rem] truncate rounded-full px-1.5 py-0.5 text-[10px] font-medium', binding.outside ? 'bg-amber-400/15 text-amber-200' : 'bg-white/10 text-white/70')}
+      title={`Runs as ${bindingLabel}`}
+    >
+      {bindingLabel}
+    </span>
+  ) : null;
   const mode: ChromeMode = props.mode ?? 'toolbar';
   const level: TransparencyLevel = props.level ?? 'opaque';
 
-  const surface = surfaceStyle(level);
+  const theme = useContext(ThemeContext)?.theme ?? DEFAULT_THEME;
+  const surface = useMemo(() => ({ ...themeScopeStyle(theme), ...surfaceStyle(level) }), [theme, level]);
 
   return (
     <div
@@ -47,7 +64,8 @@ export function PanelChrome(props: {
         surfaceBlurClass(level),
         mode === 'frameless' && 'group',
       )}
-      aria-label={subtitle ? `${title} ${subtitle}` : title}
+      data-theme-id={theme.id}
+      aria-label={[title, subtitle, bindingLabel].filter(Boolean).join(' ')}
       style={surface}
     >
       {/* ── Toolbar: header row with title + inline controls ── */}
@@ -62,6 +80,7 @@ export function PanelChrome(props: {
           >
             {title}
           </span>
+          {agentTag}
           <WidgetControls
             level={level}
             onCycleTransparency={onCycleTransparency}
@@ -72,9 +91,14 @@ export function PanelChrome(props: {
         </div>
       )}
 
-      {/* ── Frameless: hover-reveal overlay controls ── */}
+      {/* ── Frameless: hover-reveal overlay controls — always shown where there
+          is no hover to reveal them (a touch screen) and on the Phone stage. ── */}
       {mode === 'frameless' && (
-        <div className="absolute top-1.5 right-1.5 z-50 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div
+          data-widget-controls=""
+          className="absolute top-1.5 right-1.5 z-50 flex items-center gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 in-data-phone-window:opacity-100 transition-opacity"
+        >
+          {agentTag}
           <WidgetControls
             level={level}
             onCycleTransparency={onCycleTransparency}
@@ -87,7 +111,8 @@ export function PanelChrome(props: {
 
       {/* ── Floating: always-visible overlay controls ── */}
       {mode === 'floating' && (
-        <div className="absolute top-1.5 right-1.5 z-50">
+        <div className="absolute top-1.5 right-1.5 z-50 flex items-center gap-1">
+          {agentTag}
           <WidgetControls
             level={level}
             onCycleTransparency={onCycleTransparency}

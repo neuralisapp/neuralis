@@ -10,7 +10,9 @@
  * independently required) → per-surface `requires.features` → trust /
  * renderer declaration. `snapshot.ts` calls these SAME helpers per
  * definition; the asset mint/GET routes call `resolveVisiblePackageSurface`,
- * which runs the FULL ladder for one exact surface.
+ * which runs the FULL ladder for one exact surface, and — for a dock entry's
+ * declared picture — `resolveVisiblePackageDockImage`, which runs the same
+ * ladder plus the ONE dock rule (`isDockEntryGranted`) the snapshot applies.
  *
  * Deny-by-default: every unresolved input (missing definition, missing
  * surface, failed feature, error-status package, undeclared renderer) yields
@@ -24,9 +26,11 @@ import {
   hasFeature,
   isAbsoluteAssetUrl,
   isHtmlEntryPath,
+  resolveDockImagePath,
 } from '@neuralis/package-system';
 import type {
   CardUiElement,
+  DockUiElement,
   HostTarget,
   PackageDefinition,
   PackageTrust,
@@ -160,6 +164,53 @@ export function isPackageDefinitionVisible(
   return true;
 }
 
+/**
+ * THE ONE dock-entry visibility rule — the scoped snapshot, the dock-picture
+ * mint and its every GET/heartbeat recheck all call it. The entry's own
+ * `requires.features` must pass; an `open-widget` entry ALSO needs its TARGET
+ * widget's features. A target that is not among the caller-visible widgets
+ * (none declared, an untrusted absolute url the snapshot drops, a package the
+ * caller cannot see) leaves the entry visible: that is the snapshot's
+ * long-standing semantics, preserved here verbatim rather than tightened for
+ * one consumer — a second, stricter copy is how the dock and its picture would
+ * start disagreeing.
+ */
+export function isDockEntryGranted(
+  dock: Pick<DockUiElement, 'requires' | 'action'>,
+  grantedFeatures: string[] | undefined,
+  findTargetWidget: (widgetType: string) => FeatureFiltered | undefined,
+): boolean {
+  if (!hasRequiredFeatures(dock, grantedFeatures)) return false;
+  if (dock.action.type !== 'open-widget') return true;
+  const target = findTargetWidget(dock.action.widget);
+  return target ? hasRequiredFeatures(target, grantedFeatures) : true;
+}
+
+/**
+ * The widget an `open-widget` dock action resolves to, among the widgets the
+ * snapshot would carry for these caller-visible definitions: same drop rule
+ * (an untrusted package's absolute url), same last-declared-wins order as the
+ * snapshot's type map.
+ */
+function findVisibleTargetWidget(
+  definitions: PackageDefinition[],
+  widgetType: string,
+): WidgetUiElement | undefined {
+  let found: WidgetUiElement | undefined;
+  for (const definition of definitions) {
+    const trust = definition.access?.trust;
+    for (const entry of definition.app?.surfaces ?? []) {
+      if (entry.kind !== 'widget') continue;
+      const widget = entry as WidgetUiElement;
+      if (widget.type !== widgetType) continue;
+      const url = widget.component?.url;
+      if (url && isAbsoluteAssetUrl(url) && trust === 'untrusted') continue;
+      found = widget;
+    }
+  }
+  return found;
+}
+
 // ---------------------------------------------------------------------------
 // Exact-surface resolution (asset-scope mint / GET)
 // ---------------------------------------------------------------------------
@@ -245,6 +296,25 @@ export function normalizeSurfaceAssetMode(
   return 'bundle';
 }
 
+/**
+ * Stable digest of a dock picture's declaration — the purpose, the dock, the
+ * normalized picture path, the action target and the trust. A changed
+ * declaration (a new path, a re-targeted entry, a trust change) mints a new
+ * value, so every handle bound to the old one answers 410 on its next recheck;
+ * the package generation is compared beside it, as for every scope.
+ */
+export function computeDockImageFingerprint(input: {
+  dockId: string;
+  imagePath: string;
+  target: string;
+  trust: PackageTrust;
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify(['icon', input.dockId, input.imagePath, input.target, input.trust]))
+    .digest('base64url')
+    .slice(0, 24);
+}
+
 /** Stable digest of the surface's runtime-relevant declaration. */
 export function computeSurfaceFingerprint(input: {
   surfaceKind: SurfaceAssetKind;
@@ -297,45 +367,12 @@ export async function resolveVisiblePackageSurface(
   surfaceKind: SurfaceAssetKind,
   surfaceId: string,
 ): Promise<VisiblePackageSurface | null> {
-  if (!session.projectId || !session.userId) return null;
   if (surfaceKind !== 'widget' && surfaceKind !== 'card') return null;
   if (!surfaceId) return null;
-
-  const definition = getCommunityPackageRegistry()
-    .listPackages()
-    .find((candidate) => candidate.id === packageId);
-  if (!definition) return null;
-
-  // Disabled/error status — a package whose load failed must not serve assets
-  // (fail-closed). `partial` means the CODE runtime is unavailable — a missing
-  // build, a crashed runtime, or a trust demotion (`untrusted-node`,
-  // `untrusted-mcp`) — while every declarative contribution did register, so
-  // its static assets stay valid and are still served.
-  const status = getPackageRuntimeManager().getLoader().getStatus(packageId);
-  if (status?.status === 'error') return null;
-
-  let packageAccessFeature: Record<string, string> | undefined;
-  try {
-    const project = await getProjectById(session.projectId);
-    packageAccessFeature = project?.packageAccessFeature;
-  } catch {
-    // DENY-BY-DEFAULT: if the override map cannot be resolved, hide.
-    return null;
-  }
-
-  const scope: PackageVisibilityScope = {
-    // The SAME host target the four snapshot routes pass (`runtime/widgets/
-    // dock/commands` → `host: 'neuralis-workspace'`) — the asset routes serve
-    // the same workspace surface.
-    host: 'neuralis-workspace',
-    projectId: session.projectId,
-    userId: session.userId,
-    agentId: session.agentId,
-    role: session.role,
-    grantedFeatures: session.grantedFeatures,
-    packageAccessFeature,
-  };
-  if (!isPackageDefinitionVisible(definition, scope, session.grantedFeatures)) return null;
+  const visible = await resolveVisibleDefinition(session, packageId);
+  if (!visible) return null;
+  const { definition } = visible;
+  if (!session.projectId) return null;
 
   const surface = (definition.app?.surfaces ?? []).find((entry) => {
     if (surfaceKind === 'widget') {
@@ -392,4 +429,113 @@ export async function resolveVisiblePackageSurface(
     generation: getDefinitionGeneration(definition),
     definition,
   };
+}
+
+export type VisiblePackageDockImage = {
+  packageId: string;
+  dockId: string;
+  /** Normalized package-relative picture path (`app/shared/…`). */
+  imagePath: string;
+  /** The same path relative to `app/shared/`. */
+  sharedRel: string;
+  trust: PackageTrust;
+  /** Server-computed picture fingerprint (`computeDockImageFingerprint`). */
+  fingerprint: string;
+  generation: string;
+};
+
+/**
+ * Resolve ONE exact, caller-visible dock entry's declared picture — the same
+ * whole-package ladder as {@link resolveVisiblePackageSurface}, then the ONE
+ * dock rule ({@link isDockEntryGranted}, target widget included) and the
+ * kernel's structural picture rule. `null` for every not-visible reason, and
+ * for an entry that declares no (valid) picture: the caller never names a
+ * path, so there is nothing else to serve.
+ */
+export async function resolveVisiblePackageDockImage(
+  session: SessionContext,
+  packageId: string,
+  dockId: string,
+): Promise<VisiblePackageDockImage | null> {
+  if (!dockId) return null;
+  const visible = await resolveVisibleDefinition(session, packageId);
+  if (!visible) return null;
+  const { definition, scope, definitions } = visible;
+
+  const dock = (definition.app?.surfaces ?? []).find(
+    (entry) => entry.kind === 'dock' && (entry as DockUiElement).id === dockId,
+  ) as DockUiElement | undefined;
+  if (!dock || typeof dock.image !== 'string') return null;
+  const image = resolveDockImagePath(dock.image);
+  if (!image.ok) return null;
+
+  const granted = isDockEntryGranted(dock, session.grantedFeatures, (widgetType) =>
+    findVisibleTargetWidget(
+      definitions.filter((candidate) => isPackageDefinitionVisible(candidate, scope, session.grantedFeatures)),
+      widgetType,
+    ),
+  );
+  if (!granted) return null;
+
+  const trust: PackageTrust = definition.access?.trust ?? 'untrusted';
+  const target = dock.action.type === 'open-widget'
+    ? `widget:${dock.action.widget}`
+    : `action:${dock.action.id}`;
+  return {
+    packageId: definition.id,
+    dockId,
+    imagePath: image.path,
+    sharedRel: image.sharedRel,
+    trust,
+    fingerprint: computeDockImageFingerprint({ dockId, imagePath: image.path, target, trust }),
+    generation: getDefinitionGeneration(definition),
+  };
+}
+
+/**
+ * The whole-package half both exact resolvers share: a registered definition,
+ * not in `error` status, visible to this session through the shared ladder
+ * (host → project + owner scope → base access with the project's override).
+ */
+async function resolveVisibleDefinition(
+  session: SessionContext,
+  packageId: string,
+): Promise<{ definition: PackageDefinition; scope: PackageVisibilityScope; definitions: PackageDefinition[] } | null> {
+  if (!session.projectId || !session.userId) return null;
+
+  const definitions = getCommunityPackageRegistry().listPackages();
+  const definition = definitions.find((candidate) => candidate.id === packageId);
+  if (!definition) return null;
+
+  // Disabled/error status — a package whose load failed must not serve assets
+  // (fail-closed). `partial` means the CODE runtime is unavailable — a missing
+  // build, a crashed runtime, or a trust demotion (`untrusted-node`,
+  // `untrusted-mcp`) — while every declarative contribution did register, so
+  // its static assets stay valid and are still served.
+  const status = getPackageRuntimeManager().getLoader().getStatus(packageId);
+  if (status?.status === 'error') return null;
+
+  let packageAccessFeature: Record<string, string> | undefined;
+  try {
+    const project = await getProjectById(session.projectId);
+    packageAccessFeature = project?.packageAccessFeature;
+  } catch {
+    // DENY-BY-DEFAULT: if the override map cannot be resolved, hide.
+    return null;
+  }
+
+  const scope: PackageVisibilityScope = {
+    // The SAME host target the four snapshot routes pass (`runtime/widgets/
+    // dock/commands` → `host: 'neuralis-workspace'`) — the asset routes serve
+    // the same workspace surface.
+    host: 'neuralis-workspace',
+    projectId: session.projectId,
+    userId: session.userId,
+    agentId: session.agentId,
+    role: session.role,
+    grantedFeatures: session.grantedFeatures,
+    packageAccessFeature,
+  };
+  if (!isPackageDefinitionVisible(definition, scope, session.grantedFeatures)) return null;
+  return { definition, scope, definitions };
 }

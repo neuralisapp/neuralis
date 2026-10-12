@@ -1,185 +1,148 @@
 'use client';
 
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { RotateCcw, Palette, ImagePlus, Trash2, Sparkles, GripVertical } from 'lucide-react';
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { RotateCcw, ImagePlus, Trash2, Sparkles, GripVertical, Shuffle, Undo2, Pencil, Link2 } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import type { DockEdge, DockAlign, DockLayoutConfig, DockId, ChatPosition } from './dockPlacement';
+import type { DockLayoutConfig, DockId } from './dockPlacement';
 import { DEFAULT_DOCK_LAYOUT, readDockLayoutConfig, saveDockLayoutConfig } from './dockPlacement';
+import { DockPositionPicker } from './Dock';
 import type { StageMode, TransparencyLevel } from '../store/types';
-import { useWorkspaceStore, agentRuntimeKey } from '../store/workspaceStore';
+import { useWorkspaceStore, activeRuntimeKeyOf, effectiveStageMode, SAVED_STAGE_MODES } from '../store/workspaceStore';
+import { TRANSPARENCY_LEVELS } from './widgetSurface';
+import { usePresentation, useProjectGroups } from '../store/selectors';
+import { hasLayoutUndo, randomizeLayout, undoLayout, type LayoutTransactionDeps } from './layoutTransaction';
 import { useTheme } from '../theme/useTheme';
+import type { Theme } from '../theme/types';
 
-// ─── 9-position grid selector (edge + align combined) ─────────────────────
+// ─── Primitives ────────────────────────────────────────────────────────────
 
-type GridPos = { edge: DockEdge; align: DockAlign; row: number; col: number; label: string };
-
-// A side dock fills its edge, so `start` and `center` render alike there; the
-// side cells carry `start` — the shipped default (`DEFAULT_DOCK_LAYOUT`) — and
-// count a stored `center` as the same cell.
-const GRID_POSITIONS: GridPos[] = [
-  { edge: 'top', align: 'start', row: 0, col: 0, label: '↖' },
-  { edge: 'top', align: 'center', row: 0, col: 1, label: '↑' },
-  { edge: 'top', align: 'end', row: 0, col: 2, label: '↗' },
-  { edge: 'left', align: 'start', row: 1, col: 0, label: '←' },
-  // center cell (1,1) is empty / preview
-  { edge: 'right', align: 'start', row: 1, col: 2, label: '→' },
-  { edge: 'bottom', align: 'start', row: 2, col: 0, label: '↙' },
-  { edge: 'bottom', align: 'center', row: 2, col: 1, label: '↓' },
-  { edge: 'bottom', align: 'end', row: 2, col: 2, label: '↘' },
-];
-
-export function PositionGrid({ value, onChange, label, color }: {
-  value: { edge: DockEdge; align: DockAlign };
-  onChange: (edge: DockEdge, align: DockAlign) => void;
+/** The ONE segmented control of the Layout view (stage, chat side, materials, dock background). */
+function Segmented<T extends string>({ label, value, options, onChange, disabled = false }: {
   label: string;
-  color: string;
+  value: T | null;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+  disabled?: boolean;
 }) {
   return (
-    <div className="flex flex-col items-center gap-1.5">
-      <span className="text-xs font-medium text-white/60">{label}</span>
-      <div className="grid grid-cols-3 grid-rows-3 gap-1 w-[5.5rem] h-[5.5rem]">
-        {Array.from({ length: 9 }, (_, i) => {
-          const row = Math.floor(i / 3);
-          const col = i % 3;
-          // Center cell = mini preview
-          if (row === 1 && col === 1) {
-            return (
-              <div key="center" className="rounded-md border border-white/10 bg-white/5 flex items-center justify-center">
-                <div className="w-1.5 h-1.5 rounded-sm" style={{ backgroundColor: color, opacity: 0.6 }} />
-              </div>
-            );
-          }
-          const pos = GRID_POSITIONS.find((p) => p.row === row && p.col === col);
-          if (!pos) return <div key={i} />;
-          const sideEdge = pos.edge === 'left' || pos.edge === 'right';
-          const active = value.edge === pos.edge
-            && (value.align === pos.align || (sideEdge && value.align === 'center'));
-          return (
-            <button
-              key={`${pos.edge}-${pos.align}`}
-              type="button"
-              onClick={() => onChange(pos.edge, pos.align)}
-              className={cn(
-                'rounded-md transition-all text-[11px] flex items-center justify-center',
-                active ? 'text-white shadow-lg scale-105' : 'bg-white/8 text-white/35 hover:bg-white/15 hover:text-white/55',
-              )}
-              style={active ? { backgroundColor: color } : undefined}
-              title={`${pos.edge} / ${pos.align}`}
-            >
-              {pos.label}
-            </button>
-          );
-        })}
-      </div>
+    <div role="group" aria-label={label} className={cn('inline-flex flex-wrap rounded-lg bg-white/5 p-0.5 gap-0.5', disabled && 'opacity-40')}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          disabled={disabled}
+          aria-pressed={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={cn(
+            'h-7 px-2.5 rounded-md text-xs transition-colors disabled:cursor-not-allowed',
+            value === option.value ? 'bg-white/15 text-white font-medium' : 'text-white/55 hover:text-white hover:bg-white/8',
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   );
 }
 
-// ─── Chat position toggle ──────────────────────────────────────────────────
-
-function ChatPositionToggle({ value, onChange }: { value: ChatPosition; onChange: (v: ChatPosition) => void }) {
+function Section({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-white/50">Chat:</span>
-      <div className="flex gap-1">
-        {(['start', 'end'] as const).map((pos) => (
-          <button
-            key={pos}
-            type="button"
-            onClick={() => onChange(pos)}
-            className={cn(
-              'px-2.5 py-1 rounded-md text-xs transition',
-              value === pos ? 'bg-white/20 text-white' : 'bg-white/5 text-white/40 hover:bg-white/15',
-            )}
-          >
-            {pos === 'start' ? '← Left' : 'Right →'}
-          </button>
-        ))}
+    <section aria-label={title} className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2">
+        <h4 className="mr-auto text-[11px] font-semibold uppercase tracking-wider text-white/40">{title}</h4>
+        {action}
       </div>
-    </div>
+      {children}
+    </section>
   );
 }
 
-// ─── Default widget transparency ───────────────────────────────────────────
-
-const TRANSPARENCY_OPTIONS: { value: TransparencyLevel; label: string }[] = [
-  { value: 'opaque', label: 'Opaque' },
-  { value: 'dim', label: 'Dim' },
-  { value: 'transparent', label: 'Clear' },
-];
-
-function TransparencyDefaultToggle({ value, onChange, label }: { value: TransparencyLevel; onChange: (v: TransparencyLevel) => void; label: string }) {
+function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-white/50">{label}</span>
-      <div className="flex gap-1">
-        {TRANSPARENCY_OPTIONS.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => onChange(opt.value)}
-            className={cn(
-              'px-2.5 py-1 rounded-md text-xs transition flex items-center gap-1.5',
-              value === opt.value ? 'bg-white/20 text-white' : 'bg-white/5 text-white/40 hover:bg-white/15',
-            )}
-            title={`Default transparency: ${opt.label}`}
-          >
-            <span
-              aria-hidden
-              className={cn(
-                'w-2.5 h-2.5 rounded-[3px] border border-white/40',
-                opt.value === 'opaque' && 'bg-white/85',
-                opt.value === 'dim' && 'bg-white/35',
-                opt.value === 'transparent' && 'bg-transparent',
-              )}
-            />
-            {opt.label}
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <span className="w-24 shrink-0 text-xs text-white/60">{label}</span>
+      {children}
     </div>
   );
 }
 
-// ─── Stage mode (tiled / canvas / grid) ────────────────────────────────────
+const MATERIAL_LABEL: Record<TransparencyLevel, string> = { opaque: 'Opaque', dim: 'Dim', transparent: 'Clear' };
+const MATERIALS = TRANSPARENCY_LEVELS.map((value) => ({ value, label: MATERIAL_LABEL[value] }));
 
-const STAGE_MODE_OPTIONS: { value: StageMode; label: string }[] = [
-  { value: 'tiled', label: 'Tiled' },
-  { value: 'canvas', label: 'Canvas' },
-  { value: 'grid', label: 'Grid' },
-];
+// ─── Stage mode (tiled / canvas / grid / phone) ────────────────────────────
 
-function StageModeToggle() {
+const STAGE_LABEL: Record<StageMode, string> = { tiled: 'Tiled', canvas: 'Canvas', grid: 'Grid', phone: 'Phone' };
+const STAGE_MODES = [...SAVED_STAGE_MODES, 'phone' as const].map((value) => ({ value, label: STAGE_LABEL[value] }));
+
+function StageModeRows({ autoPhone, onAutoPhone }: { autoPhone: boolean; onAutoPhone: (value: boolean) => void }) {
   const agentId = useWorkspaceStore((s) => s.session.agentId);
-  const stageMode = useWorkspaceStore((s) =>
-    (agentId && s.session.projectId
-      ? (s.runtimeByAgentId[agentRuntimeKey(s.session.projectId, agentId)]?.layout.stageMode ?? 'tiled')
-      : 'tiled'),
-  );
+  const runtimeKey = useWorkspaceStore(activeRuntimeKeyOf);
+  const stageMode = useWorkspaceStore((s) => (runtimeKey ? effectiveStageMode(s, runtimeKey) : 'tiled'));
+  const manual = useWorkspaceStore((s) => Boolean(runtimeKey && s.manualModeByRuntimeKey[runtimeKey]));
   const setStageMode = useWorkspaceStore((s) => s.setStageMode);
-
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-white/50">Mode:</span>
-      <div className="flex gap-1">
-        {STAGE_MODE_OPTIONS.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => { if (agentId) setStageMode({ agentId, mode: opt.value }); }}
-            disabled={!agentId}
-            className={cn(
-              'px-2.5 py-1 rounded-md text-xs transition',
-              stageMode === opt.value ? 'bg-white/20 text-white' : 'bg-white/5 text-white/40 hover:bg-white/15',
-              !agentId && 'opacity-40 cursor-not-allowed',
-            )}
-            title={`Layout mode: ${opt.label}`}
-          >
-            {opt.label}
+    <>
+      <Row label="Mode">
+        <Segmented label="Stage mode" value={stageMode} options={STAGE_MODES} disabled={!agentId} onChange={(mode) => { if (agentId) setStageMode({ agentId, mode }); }} />
+        {manual && autoPhone ? (
+          <button type="button" className="h-7 px-2 rounded-md text-xs text-white/55 hover:text-white hover:bg-white/8" title="Follow the device again: Phone on a small screen, the saved mode elsewhere" onClick={() => useWorkspaceStore.getState().clearManualStageMode()}>
+            Auto
           </button>
-        ))}
-      </div>
-    </div>
+        ) : null}
+      </Row>
+      <Row label="Phone">
+        <label className="flex items-center gap-2 text-xs text-white/70">
+          <input type="checkbox" checked={autoPhone} onChange={(event) => { onAutoPhone(event.target.checked); if (event.target.checked) useWorkspaceStore.getState().clearManualStageMode(); }} />
+          Switch to Phone automatically on a small screen
+        </label>
+      </Row>
+    </>
+  );
+}
+
+// ─── View (per agent / Group) ──────────────────────────────────────────────
+
+/**
+ * The same view choice as the project menu, through the same store actions.
+ * In a Group the Group row is always there — even with one Group — with its
+ * "Edit" entry: the agent dock's edit draft, which holds the Groups' names and
+ * members (Save/Cancel at the dock's end).
+ */
+function ViewRows() {
+  const { presentation, groupId, available } = usePresentation();
+  const groups = useProjectGroups();
+  const editingGroups = useWorkspaceStore((s) => s.dockEditing.secondary);
+  if (!available) return null;
+  const store = useWorkspaceStore.getState;
+  return (
+    <>
+      <Row label="View">
+        <Segmented label="Workspace view" value={presentation} options={[{ value: 'agent', label: 'Per agent' }, { value: 'group', label: 'Group' }]} onChange={(value) => store().setPresentation(value)} />
+      </Row>
+      {presentation === 'group' ? (
+        <Row label="Group">
+          <Segmented label="Group" value={groupId} options={groups.map((g) => ({ value: g.id, label: g.name }))} onChange={(id) => store().selectGroup(id)} />
+          <EditGroupsButton editing={editingGroups} />
+        </Row>
+      ) : null}
+    </>
+  );
+}
+
+/** "Edit" for the Groups: opens the agent dock's edit draft (names, members, new, delete). */
+export function EditGroupsButton({ editing, className }: { editing: boolean; className?: string }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={editing}
+      disabled={editing}
+      onClick={() => useWorkspaceStore.getState().setDockEditing('secondary', true)}
+      title={editing ? 'Editing the Groups at the agent dock — Save or Cancel there' : 'Rename Groups and choose their agents (at the agent dock)'}
+      className={cn('h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition', editing ? 'bg-white/15 text-white' : 'bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80', className)}
+    >
+      <Pencil className="w-3 h-3" />
+      {editing ? 'Editing…' : 'Edit'}
+    </button>
   );
 }
 
@@ -212,20 +175,19 @@ export function EditDocksToggle() {
 
   if (confirming) {
     return (
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-white/50">Docks:</span>
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-white/70">Discard both drafts?</span>
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="px-2 py-1 rounded-md text-xs bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80 transition"
+          className="h-7 px-2.5 rounded-md text-xs bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80 transition"
         >
           Keep editing
         </button>
         <button
           type="button"
           onClick={() => { setConfirming(false); setDockEditing('both', false); }}
-          className="px-2 py-1 rounded-md text-xs bg-red-500/20 text-red-100 hover:bg-red-500/30 transition"
+          className="h-7 px-2.5 rounded-md text-xs bg-red-500/20 text-red-100 hover:bg-red-500/30 transition"
         >
           Discard
         </button>
@@ -234,33 +196,107 @@ export function EditDocksToggle() {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-white/50">Docks:</span>
-      <button
-        type="button"
-        onClick={() => (bothEditing ? setConfirming(true) : setDockEditing('both', true))}
-        disabled={!projectId}
-        aria-pressed={bothEditing}
-        className={cn(
-          'px-2.5 py-1 rounded-md text-xs transition flex items-center gap-1.5',
-          bothEditing ? 'bg-[#cba6f7] text-neutral-950 font-semibold' : 'bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80',
-          !projectId && 'opacity-40 cursor-not-allowed',
-        )}
-        title={bothEditing ? 'Leave dock editing without saving' : 'Reorder and hide dock items in this project'}
+    <button
+      type="button"
+      onClick={() => (bothEditing ? setConfirming(true) : setDockEditing('both', true))}
+      disabled={!projectId}
+      aria-pressed={bothEditing}
+      className={cn(
+        'h-7 px-2.5 rounded-md text-xs transition flex items-center gap-1.5',
+        bothEditing ? 'bg-[#cba6f7] text-neutral-950 font-semibold' : 'bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80',
+        !projectId && 'opacity-40 cursor-not-allowed',
+      )}
+      title={bothEditing ? 'Leave dock editing without saving' : 'Reorder and hide dock items in this project'}
+    >
+      <GripVertical className="w-3 h-3" />
+      {bothEditing ? 'Editing docks…' : 'Edit docks'}
+    </button>
+  );
+}
+
+// ─── Theme ─────────────────────────────────────────────────────────────────
+
+/** One theme as a colour sample: its surface, a line of its text and a control strip. */
+function ThemeSwatch({ theme, pressed, onClick, surface }: { theme: Theme; pressed: boolean; onClick: () => void; surface: string }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      aria-label={`${surface}: ${theme.name}`}
+      title={theme.name}
+      onClick={onClick}
+      className={cn('flex flex-col items-center gap-1 rounded-lg p-1 transition-colors', pressed ? 'bg-white/12' : 'hover:bg-white/6')}
+    >
+      <span
+        aria-hidden="true"
+        className={cn('block w-12 h-8 rounded-md border p-1', pressed ? 'border-[#cba6f7]' : 'border-white/15')}
+        style={{ backgroundColor: `rgb(${theme.colors.widgetBg})` }}
       >
-        <GripVertical className="w-3 h-3" />
-        {bothEditing ? 'Editing docks…' : 'Edit docks'}
-      </button>
+        <span className="block h-1.5 w-7 rounded-full" style={{ backgroundColor: theme.colors.widgetText }} />
+        <span className="mt-1 block h-2.5 w-full rounded-sm" style={{ backgroundColor: `rgb(${theme.colors.composerBg})` }} />
+      </span>
+      <span className={cn('text-[11px]', pressed ? 'text-white' : 'text-white/55')}>{theme.name}</span>
+    </button>
+  );
+}
+
+const SURFACES = ['Widgets', 'Docks', 'Background'] as const;
+type Surface = (typeof SURFACES)[number];
+/** Each surface's material field in the dock layout record. */
+const MATERIAL_FIELD = {
+  Widgets: 'defaultWidgetTransparency',
+  Docks: 'defaultDockTransparency',
+  Background: 'backgroundTransparency',
+} as const satisfies Record<Surface, keyof DockLayoutConfig>;
+
+/**
+ * ONE row per surface (Widgets, Docks, Background): its four theme samples and
+ * its Opaque / Dim / Clear material, side by side — each choice exists once.
+ * The stored keys are unchanged (three theme ids, three material fields).
+ */
+function SurfaceRows({ config, update }: { config: DockLayoutConfig; update: (next: DockLayoutConfig) => void }) {
+  const { theme, dockTheme, backgroundTheme, setThemeId, setDockThemeId, setBackgroundThemeId, availableThemes } = useTheme();
+  const current: Record<Surface, string> = { Widgets: theme.id, Docks: dockTheme.id, Background: backgroundTheme.id };
+  const setters: Record<Surface, (id: string) => void> = { Widgets: setThemeId, Docks: setDockThemeId, Background: setBackgroundThemeId };
+  return (
+    <div className="flex flex-col gap-2">
+      {SURFACES.map((surface) => (
+        <Row key={surface} label={surface}>
+          <div role="group" aria-label={`${surface} theme`} className="flex flex-wrap gap-0.5">
+            {availableThemes.map((t) => <ThemeSwatch key={t.id} theme={t} surface={surface} pressed={current[surface] === t.id} onClick={() => setters[surface](t.id)} />)}
+          </div>
+          <Segmented
+            label={`${surface} material`}
+            value={config[MATERIAL_FIELD[surface]]}
+            options={MATERIALS}
+            onChange={(level) => update({ ...config, [MATERIAL_FIELD[surface]]: level })}
+          />
+        </Row>
+      ))}
     </div>
   );
 }
 
-// ─── Theme controls (moved from ThemeSwitcher) ─────────────────────────────
+/** One click: the docks and the background take the Widgets theme. */
+function SameThemeEverywhere() {
+  const { theme, dockTheme, backgroundTheme, setDockThemeId, setBackgroundThemeId } = useTheme();
+  const same = dockTheme.id === theme.id && backgroundTheme.id === theme.id;
+  return (
+    <button
+      type="button"
+      disabled={same}
+      onClick={() => { setDockThemeId(theme.id); setBackgroundThemeId(theme.id); }}
+      title={same ? 'Every surface already wears one theme' : `Give the docks and the background the Widgets theme (${theme.name})`}
+      className="h-6 px-2 rounded-md text-[11px] flex items-center gap-1 text-white/55 hover:text-white hover:bg-white/10 transition disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default"
+    >
+      <Link2 className="w-3 h-3" /> Same theme everywhere
+    </button>
+  );
+}
 
-function ThemeSection() {
-  const { theme, setThemeId, availableThemes, backgroundImage, setBackgroundImage, clearBackgroundImage, toggleUniverse } = useTheme();
-  const universeOn = theme.useUniverseBackground !== false;
-  const [moreOpen, setMoreOpen] = useState(false);
+function BackgroundRow() {
+  const { backgroundTheme, backgroundImage, setBackgroundImage, clearBackgroundImage, toggleUniverse } = useTheme();
+  const universeOn = backgroundTheme.useUniverseBackground !== false;
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -275,73 +311,36 @@ function ThemeSection() {
     finally { setIsUploading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
   };
 
+  const chip = 'h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors';
   return (
-    <div className="flex flex-col gap-2">
+    <Row label="">
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePickBackground} />
-      <div className="flex items-center gap-2">
-        <Palette className="w-3.5 h-3.5 text-white/40" />
-        <span className="text-xs font-medium text-white/60">Theme</span>
-      </div>
-      <div className="flex flex-wrap gap-1">
-        {availableThemes.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setThemeId(t.id)}
-            className={cn(
-              'px-2 py-1 rounded-md text-[11px] transition flex items-center gap-1.5',
-              theme.id === t.id ? 'bg-white/15 text-white' : 'bg-white/5 text-white/50 hover:bg-white/10',
-            )}
-          >
-            <div className="w-2 h-2 rounded-full shrink-0" style={{ background: t.colors.primary }} />
-            {t.name}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex gap-1.5">
-        <button type="button" onClick={toggleUniverse}
-          className={cn('flex-1 px-2 py-1.5 rounded-md text-[11px] flex items-center gap-1.5 transition border',
-            universeOn ? 'border-white/15 bg-white/8 text-white/70' : 'border-white/8 bg-white/3 text-white/40',
-          )}>
+      <div className="flex flex-wrap items-center gap-1">
+        <button type="button" onClick={toggleUniverse} aria-pressed={universeOn} className={cn(chip, universeOn ? 'bg-white/15 text-white' : 'bg-white/5 text-white/55 hover:bg-white/10')}>
           <Sparkles className="w-3 h-3" />
-          Universe {universeOn ? 'On' : 'Off'}
+          Universe
         </button>
-        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}
-          className="flex-1 px-2 py-1.5 rounded-md text-[11px] border border-white/8 bg-white/3 text-white/40 hover:bg-white/8 flex items-center gap-1.5 transition disabled:opacity-50">
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading} className={cn(chip, 'bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-50')}>
           <ImagePlus className="w-3 h-3" />
-          {backgroundImage ? 'Replace' : 'Image'}
+          {backgroundImage ? 'Replace image' : 'Image'}
         </button>
         {backgroundImage ? (
-          <button type="button" onClick={() => { clearBackgroundImage(); setUploadError(null); }}
-            className="px-2 py-1.5 rounded-md text-[11px] border border-white/8 bg-white/3 text-white/40 hover:bg-white/8 transition">
+          <button type="button" aria-label="Remove background image" onClick={() => { clearBackgroundImage(); setUploadError(null); }} className={cn(chip, 'bg-white/5 text-white/55 hover:bg-white/10')}>
             <Trash2 className="w-3 h-3" />
           </button>
         ) : null}
       </div>
-      {uploadError ? <div className="text-[10px] text-red-300/80">{uploadError}</div> : null}
-    </div>
+      {uploadError ? <span className="text-[11px] text-red-300/90">{uploadError}</span> : null}
+    </Row>
   );
 }
 
-// ─── Live preview ──────────────────────────────────────────────────────────
-
-function LayoutPreview({ config }: { config: DockLayoutConfig }) {
-  const dockStyle = (edge: DockEdge, color: string): string => {
-    const base = `absolute rounded-sm ${color}`;
-    switch (edge) {
-      case 'left': return `${base} left-0 top-0 bottom-0 w-2`;
-      case 'right': return `${base} right-0 top-0 bottom-0 w-2`;
-      case 'top': return `${base} top-0 left-0 right-0 h-2`;
-      case 'bottom': return `${base} bottom-0 left-0 right-0 h-2`;
-    }
-  };
-
+/** A Docks-section cell: its label above its control. */
+function DockMapCell({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="w-24 h-16 rounded-lg border border-white/10 bg-white/5 relative overflow-hidden">
-      <div className={dockStyle(config.primary.edge, 'bg-blue-400/60')} />
-      <div className={dockStyle(config.secondary.edge, 'bg-purple-400/60')} />
-      <div className="absolute inset-3 rounded-sm bg-white/10" />
+    <div className="flex flex-col items-start gap-1.5">
+      <span className="text-xs text-white/60">{label}</span>
+      {children}
     </div>
   );
 }
@@ -353,6 +352,9 @@ export function LayoutSettingsPanel() {
 
   useEffect(() => {
     setConfig(readDockLayoutConfig());
+    const changed = (event: Event) => setConfig((event as CustomEvent<DockLayoutConfig>).detail);
+    window.addEventListener('neuralis:layout-changed', changed);
+    return () => window.removeEventListener('neuralis:layout-changed', changed);
   }, []);
 
   const update = (next: DockLayoutConfig) => {
@@ -361,75 +363,86 @@ export function LayoutSettingsPanel() {
     window.dispatchEvent(new CustomEvent('neuralis:layout-changed', { detail: next }));
   };
 
-  const updateDock = (dockId: DockId, edge: DockEdge, align: DockAlign) => {
-    update({ ...config, [dockId]: { ...config[dockId], edge, align } });
+  // Randomize / Undo: one coordinated commit and its one Undo (layoutTransaction.ts).
+  const { appearance, applyAppearance } = useTheme();
+  const [notice, setNotice] = useState<string | null>(null);
+  const [canUndo, setCanUndo] = useState(() => hasLayoutUndo(useWorkspaceStore.getState()));
+  const runTransaction = (run: (deps: LayoutTransactionDeps) => ReturnType<typeof randomizeLayout>) => {
+    const result = run({
+      storage: window.localStorage,
+      random: Math.random,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      appearance,
+      applyAppearance,
+    });
+    setNotice(result.ok ? null : result.message);
+    setCanUndo(hasLayoutUndo(useWorkspaceStore.getState()));
+  };
+
+  const placeDock = (dockId: DockId) => (next: Pick<DockLayoutConfig['primary'], 'anchor' | 'orientation'>) => {
+    update({ ...config, [dockId]: { dockId, ...next } });
   };
 
   return (
-    <div className="h-full w-full overflow-y-auto p-4 flex flex-col gap-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-white/80">Layout</h3>
-        <button type="button" onClick={() => update(DEFAULT_DOCK_LAYOUT)}
-          className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-white/50 hover:text-white/80 hover:bg-white/10 transition"
-          title="Reset to default">
-          <RotateCcw className="w-3 h-3" /> Reset
-        </button>
+    <div className="h-full w-full overflow-y-auto px-4 py-3 flex flex-col gap-5">
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-1">
+          <h3 className="mr-auto text-sm font-semibold text-white/85">Layout</h3>
+          <button type="button" onClick={() => runTransaction(randomizeLayout)}
+            className="h-7 flex items-center gap-1.5 px-2 rounded-md text-xs text-white/55 hover:text-white hover:bg-white/10 transition"
+            title="A random valid layout: view, docks, modes, themes, materials, chat side, background and the open windows' arrangement — one Undo restores all of it">
+            <Shuffle className="w-3 h-3" /> Randomize
+          </button>
+          {canUndo ? (
+            <button type="button" onClick={() => runTransaction(undoLayout)}
+              className="h-7 flex items-center gap-1.5 px-2 rounded-md text-xs text-white/75 hover:text-white hover:bg-white/10 transition"
+              title="Restore everything Randomize changed">
+              <Undo2 className="w-3 h-3" /> Undo
+            </button>
+          ) : null}
+          <button type="button" onClick={() => update(DEFAULT_DOCK_LAYOUT)}
+            className="h-7 flex items-center gap-1.5 px-2 rounded-md text-xs text-white/55 hover:text-white hover:bg-white/10 transition"
+            title="Reset the docks, chat side and materials to the defaults">
+            <RotateCcw className="w-3 h-3" /> Reset
+          </button>
+        </div>
+        {notice ? <p role="status" className="text-[11px] leading-snug text-amber-200/90">{notice}</p> : null}
       </div>
 
-      <div className="flex justify-center">
-        <LayoutPreview config={config} />
-      </div>
+      <Section title="Workspace">
+        <ViewRows />
+        <StageModeRows autoPhone={config.autoPhone} onAutoPhone={(autoPhone) => update({ ...config, autoPhone })} />
+        <Row label="Chat">
+          <Segmented label="Chat side" value={config.chatPosition} options={[{ value: 'start', label: 'Left' }, { value: 'end', label: 'Right' }]} onChange={(chatPosition) => update({ ...config, chatPosition })} />
+        </Row>
+      </Section>
 
-      {/* 9-position dock selectors */}
-      <div className="flex flex-wrap gap-5 justify-center">
-        <PositionGrid
-          value={config.primary}
-          onChange={(edge, align) => updateDock('primary', edge, align)}
-          label="Primary"
-          color="#60a5fa"
-        />
-        <PositionGrid
-          value={config.secondary}
-          onChange={(edge, align) => updateDock('secondary', edge, align)}
-          label="Secondary"
-          color="#a78bfa"
-        />
-      </div>
+      <Section title="Appearance" action={<SameThemeEverywhere />}>
+        <SurfaceRows config={config} update={update} />
+        <BackgroundRow />
+      </Section>
 
-      {/* Dock order + hidden items (per project) */}
-      <EditDocksToggle />
-
-      {/* Stage mode (tiled / canvas / grid) */}
-      <StageModeToggle />
-
-      {/* Chat position */}
-      <ChatPositionToggle
-        value={config.chatPosition}
-        onChange={(chatPosition) => update({ ...config, chatPosition })}
-      />
-
-      {/* Default widget transparency */}
-      <TransparencyDefaultToggle
-        label="Widgets:"
-        value={config.defaultWidgetTransparency}
-        onChange={(defaultWidgetTransparency) => update({ ...config, defaultWidgetTransparency })}
-      />
-
-      {/* Default dock transparency */}
-      <TransparencyDefaultToggle
-        label="Dock:"
-        value={config.defaultDockTransparency}
-        onChange={(defaultDockTransparency) => update({ ...config, defaultDockTransparency })}
-      />
-
-      {/* Theme (moved from ThemeSwitcher dock item) */}
-      <div className="border-t border-white/8 pt-4">
-        <ThemeSection />
-      </div>
-
-      <p className="text-[10px] text-white/25 text-center">
-        Primary = tools &amp; files &bull; Secondary = agents
-      </p>
+      {/* Two columns: the two placement maps, then the shared dock settings beside them (one column when narrow). */}
+      <Section title="Docks">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
+          <div className="flex flex-col gap-3">
+            <DockMapCell label="Apps dock">
+              <DockPositionPicker label="Apps dock position" value={config.primary} onChange={placeDock('primary')} />
+            </DockMapCell>
+            <DockMapCell label="Agents dock">
+              <DockPositionPicker label="Agents dock position" value={config.secondary} onChange={placeDock('secondary')} />
+            </DockMapCell>
+          </div>
+          <div className="flex flex-col gap-3">
+            <DockMapCell label="Background">
+              <Segmented label="Dock background" value={config.dockBackground} options={[{ value: 'classic', label: 'Icon tiles' }, { value: 'toolbar', label: 'Toolbar' }]} onChange={(dockBackground) => update({ ...config, dockBackground })} />
+            </DockMapCell>
+            <DockMapCell label="Items">
+              <EditDocksToggle />
+            </DockMapCell>
+          </div>
+        </div>
+      </Section>
     </div>
   );
 }

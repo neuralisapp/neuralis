@@ -1,18 +1,29 @@
 'use client';
 
 import { useShallow } from 'zustand/react/shallow';
-import { useWorkspaceStore, agentRuntimeKey, type WorkspaceStore } from './workspaceStore';
-import type { DockPrefs } from './types';
+import { useWorkspaceStore, agentRuntimeKey, type WorkspaceStore, effectiveStageMode, activeRuntimeKeyOf, activeGroup, activeGroupScope, authorizedWindowOrder, boundAgentOf, getDefaultChatWidgetType, newWindowAgentOf } from './workspaceStore';
+import type { DockPrefs, WidgetInstance, WorkspaceGroup, WorkspacePresentation } from './types';
+import { getWidgetDefinition } from '../widgets/registry';
 import type { DockId } from '../shell/dockPlacement';
 
 const EMPTY_ARRAY: string[] = [];
 const EMPTY_OBJECT: Record<string, never> = {};
 
-/** Composite runtime key of the ACTIVE (project, agent) pair, or null. */
+/** Key of the layout the stage shows: the agent's own, or the selected Group's. */
 function activeRuntimeKey(s: WorkspaceStore): string | null {
-  return s.session.projectId && s.session.agentId
-    ? agentRuntimeKey(s.session.projectId, s.session.agentId)
-    : null;
+  return activeRuntimeKeyOf(s);
+}
+
+/**
+ * The active runtime's windows the caller may see: in a Group runtime only the
+ * windows whose bound agent is in the freshly fetched agent list (identity- and
+ * memo-stable — see `authorizedWindowOrder`).
+ */
+function visibleWindows(s: WorkspaceStore, key: string | null): { openOrder: string[]; byId: Record<string, WidgetInstance> } {
+  const runtime = key ? s.runtimeByAgentId[key] : undefined;
+  if (!runtime) return { openOrder: EMPTY_ARRAY, byId: EMPTY_OBJECT };
+  const openOrder = authorizedWindowOrder(key, runtime.widgets.openOrder, runtime.widgets.byId, s.agents);
+  return { openOrder, byId: runtime.widgets.byId };
 }
 
 /**
@@ -118,16 +129,45 @@ export function useStageShell() {
   return useWorkspaceStore(
     useShallow((s) => {
       const key = activeRuntimeKey(s);
-      const runtime = key ? s.runtimeByAgentId[key] : undefined;
+      const { openOrder, byId } = visibleWindows(s, key);
       return {
         agentId: s.session.agentId,
         runtimeKey: key,
-        openOrder: runtime?.widgets.openOrder ?? EMPTY_ARRAY,
-        byId: runtime?.widgets.byId ?? EMPTY_OBJECT,
-        stageMode: runtime?.layout.stageMode ?? 'tiled',
+        openOrder,
+        byId,
+        stageMode: effectiveStageMode(s, key),
+        phoneForegroundId: effectiveStageMode(s, key) === 'phone' && key ? phoneForegroundId(openOrder, byId, s.phoneForegroundByRuntimeKey[key]) : null,
       };
     }),
   );
+}
+
+/** The Phone foreground window id alone (null off Phone) — a primitive, so the dock re-renders only when it changes. */
+export function usePhoneForegroundId(): string | null {
+  return useWorkspaceStore((s) => {
+    const key = activeRuntimeKey(s);
+    if (!key || effectiveStageMode(s, key) !== 'phone') return null;
+    const { openOrder, byId } = visibleWindows(s, key);
+    return phoneForegroundId(openOrder, byId, s.phoneForegroundByRuntimeKey[key]);
+  });
+}
+
+/**
+ * The Phone foreground: the requested window; with none (a first open) or a
+ * stale/minimized one, the chat slot's window — the chat is what an agent opens
+ * to, even beside another package's default-open widget — else the last
+ * visible window.
+ */
+export function phoneForegroundId(order: string[], byId: Record<string, import('./types').WidgetInstance>, requested?: string): string | null {
+  const shown = (id: string): boolean => Boolean(byId[id] && !byId[id].hidden && getWidgetDefinition(byId[id].type));
+  if (requested && shown(requested)) return requested;
+  const chatType = getDefaultChatWidgetType();
+  const chat = chatType ? order.find((id) => byId[id]?.type === chatType && shown(id)) : undefined;
+  if (chat) return chat;
+  for (let index = order.length - 1; index >= 0; index--) {
+    if (shown(order[index])) return order[index];
+  }
+  return null;
 }
 
 /**
@@ -153,8 +193,9 @@ export function useDockWidgetItems() {
   return useWorkspaceStore(
     useShallow((s) => {
       const key = activeRuntimeKey(s);
-      const runtime = key ? s.runtimeByAgentId[key] : undefined;
-      return { byId: runtime?.widgets.byId ?? EMPTY_OBJECT };
+      const { openOrder, byId } = visibleWindows(s, key);
+      // `openOrder` keeps the dock blind to withheld Group windows.
+      return { byId, openOrder, runtimeKey: key };
     }),
   );
 }
@@ -171,17 +212,81 @@ export function useOpenWidgets() {
     useShallow((s) => {
       const key = activeRuntimeKey(s);
       const runtime = key ? s.runtimeByAgentId[key] : undefined;
+      const visible = visibleWindows(s, key);
       return {
         agentId: s.session.agentId,
-        openOrder: runtime?.widgets.openOrder ?? EMPTY_ARRAY,
-        byId: runtime?.widgets.byId ?? EMPTY_OBJECT,
+        openOrder: visible.openOrder,
+        byId: visible.byId,
         mainSplit: runtime?.layout.mainSplit,
         chatCollapsed: runtime?.layout.chatCollapsed,
         widgetSplitsById: runtime?.layout.widgetSplitsById ?? EMPTY_OBJECT,
-        stageMode: runtime?.layout.stageMode ?? 'tiled',
+        stageMode: effectiveStageMode(s, key),
         freeformById: runtime?.layout.freeformById ?? EMPTY_OBJECT,
         gridById: runtime?.layout.gridById ?? EMPTY_OBJECT,
       };
+    }),
+  );
+}
+
+/**
+ * The presentation of the active project for the signed-in user, as stable
+ * primitives (the ProjectSwitcher / Layout / Phone sheet read it).
+ */
+export function usePresentation(): { presentation: WorkspacePresentation; groupId: string | null; groupName: string | null; available: boolean } {
+  return useWorkspaceStore(
+    useShallow((s) => {
+      const group = activeGroup(s);
+      return {
+        presentation: group ? 'group' as const : 'agent' as const,
+        groupId: group?.id ?? null,
+        groupName: group?.name ?? null,
+        // Groups exist only for a signed-in user in a project.
+        available: Boolean(s.liveUserId && s.session.projectId),
+      };
+    }),
+  );
+}
+
+/** The signed-in user's Groups in the active project (reference-stable per write). */
+export function useProjectGroups(): WorkspaceGroup[] {
+  return useWorkspaceStore((s) => activeGroupScope(s)?.groups ?? NO_GROUPS);
+}
+const NO_GROUPS: WorkspaceGroup[] = [];
+
+/** The agent a new window binds to (see `newWindowAgentOf`). */
+export function useNewWindowAgent(): string | null {
+  return useWorkspaceStore(newWindowAgentOf);
+}
+
+/**
+ * A window's bound agent for its chrome: empty `name` in a per-agent layout
+ * (the agent dock already names it); in a Group the agent's name, and
+ * `outside` when it is no longer a member (the window stays, labelled).
+ */
+export function useWindowBinding(widgetInstanceId: string): { name: string; outside: boolean } {
+  return useWorkspaceStore(
+    useShallow((s) => {
+      const key = activeRuntimeKey(s);
+      const group = activeGroup(s);
+      const inst = key && group ? s.runtimeByAgentId[key]?.widgets.byId[widgetInstanceId] : undefined;
+      const bound = key && inst ? boundAgentOf(key, inst) : null;
+      if (!group || !bound) return NO_BINDING;
+      return { name: s.agents.byId[bound]?.name || bound, outside: !group.memberIds.includes(bound) };
+    }),
+  );
+}
+const NO_BINDING = { name: '', outside: false };
+
+/** Retained (hidden, still mounted) runtimes' windows: `[key, byId, key, byId…]`. */
+export function useRetainedWindows(): Array<string | Record<string, WidgetInstance>> {
+  return useWorkspaceStore(
+    useShallow((s) => {
+      const out: Array<string | Record<string, WidgetInstance>> = [];
+      for (const key of s.retainedRuntimeKeys) {
+        const rt = s.runtimeByAgentId[key];
+        if (rt) out.push(key, rt.widgets.byId);
+      }
+      return out;
     }),
   );
 }

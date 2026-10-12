@@ -48,7 +48,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { compareReleaseVersions, MANIFEST_VERSION, parseReleaseManifest, type ReleaseManifest } from '@neuralis/package-system/contracts';
@@ -96,6 +96,20 @@ function readJson(path: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * `npm` started without a shell: through the npm CLI that ran this command
+ * (`npx` / `npm exec` set `npm_execpath` to its `npm-cli.js`), by this same
+ * Node. On Windows `npm` is an `npm.cmd` shim that Node starts only through a
+ * shell; outside npm the name is the program.
+ */
+export function npmInvocation(args: string[], env: Readonly<Record<string, string | undefined>> = process.env, platform: NodeJS.Platform = process.platform): [string, string[]] {
+  const cli = env.npm_execpath;
+  if (cli && basename(cli) === 'npm-cli.js') return [process.execPath, [cli, ...args]];
+  // Windows outside npm (pnpm, yarn, a bare node): the npm Node ships beside itself.
+  const bundled = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  return platform === 'win32' && existsSync(bundled) ? [process.execPath, [bundled, ...args]] : ['npm', args];
 }
 
 function installedVersion(installDir: string, name: string): string {
@@ -342,8 +356,8 @@ async function updateOnePackage(args: UpdateArgs, ctx: CliContext): Promise<numb
   if (args.asJson) console.log(JSON.stringify({ layout: 'folder', plan: [row], apply: args.apply }, null, 2));
   else console.log(`\n  ${row.unchanged ? dot : ok} ${row.name} ${row.current} → ${c.bold}${row.target}${c.reset}\n`);
   if (row.unchanged || !args.apply) return 0;
-  const result = spawnSync('npm', ['install', `${match.name}@${args.targetVersion}`, '--save-exact'], { cwd: installDir, stdio: 'inherit' });
-  if (result.status !== 0) throw new CliExit(1, `npm install failed (exit ${result.status})`, ['The installation is unchanged.']);
+  const result = spawnSync(...npmInvocation(['install', `${match.name}@${args.targetVersion}`, '--save-exact']), { cwd: installDir, stdio: 'inherit' });
+  if (result.status !== 0) throw new CliExit(1, `npm install failed (${result.error?.message ?? `exit ${result.status}`})`, ['The installation is unchanged.']);
   console.log(`  ${ok} installed. ${c.dim}The container runs its image: \`npx neuralis rebuild\` carries the package into it.${c.reset}\n`);
   return 0;
 }
@@ -431,8 +445,8 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   if (layout === 'clone') return afterHostSwap({ args, ctx, layout, manifest, tag, previous: host.current });
 
   console.log(`  ${dot} installing     : ${c.bold}${HOST_PACKAGE}@${target}${c.reset}`);
-  const install = spawnSync('npm', ['install', `${HOST_PACKAGE}@${target}`, '--save-exact'], { cwd: installDir, stdio: 'inherit' });
-  if (install.status !== 0) throw new CliExit(1, `npm install failed (exit ${install.status})`, ['The installation is unchanged.']);
+  const install = spawnSync(...npmInvocation(['install', `${HOST_PACKAGE}@${target}`, '--save-exact']), { cwd: installDir, stdio: 'inherit' });
+  if (install.status !== 0) throw new CliExit(1, `npm install failed (${install.error?.message ?? `exit ${install.status}`})`, ['The installation is unchanged.']);
   console.log(`\n  ${ok} installed.`);
 
   // The post-install steps run in the code that was just installed: re-exec its bin.

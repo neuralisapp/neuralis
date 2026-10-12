@@ -43,18 +43,26 @@ export const DARK_THEME: Theme = {
   },
 };
 
+/**
+ * Every theme is DARK polarity — white text on a dark surface, so apps built for
+ * the dark design fit each one. They step in lightness (widget L ≈ 6 / 11 / 15 /
+ * 23 %): Dark near-black, Focus a deep blue slate, Graphite charcoal, Light a
+ * neutral grey at the white-text ceiling — on its widget surface and its Dim glass
+ * the median body text (`text-white/55`) still reads >= 4.5:1
+ * (`appearanceControls.test.ts` derives the median from the sources).
+ */
 export const FOCUS_THEME: Theme = {
   id: 'focus',
   name: 'Focus',
   useUniverseBackground: true,
   colors: {
-    background: '#090a0c',
+    background: '#0c0e15',
     backgroundPattern: 'none',
     backgroundOverlay: 'none',
     canvasBg: '#000000',
     canvasStar: '#ffffff',
-    widgetBg: '25, 26, 30',
-    composerBg: '36, 38, 42',
+    widgetBg: '23, 25, 32',
+    composerBg: '38, 41, 52',
     widgetBorder: 'rgba(255, 255, 255, 0.05)',
     widgetText: 'rgba(255, 255, 255, 0.92)',
     primary: '#93c5fd',
@@ -75,7 +83,7 @@ export const FOCUS_THEME: Theme = {
     backdropBlur: 'blur(20px)',
     widgetShadow: '0 18px 42px -28px rgba(0,0,0,0.86)',
     panelSurfaceImage: 'none',
-    universeOpacity: 0.12,
+    universeOpacity: 0.6,
     controlSurface: 'rgba(255,255,255,0.05)',
     controlSurfaceElevated: 'rgba(147,197,253,0.18)',
     controlBorder: 'rgba(255,255,255,0.10)',
@@ -86,18 +94,18 @@ export const FOCUS_THEME: Theme = {
   },
 };
 
-export const LIGHT_THEME: Theme = {
+export const GRAPHITE_THEME: Theme = {
   id: 'light',
-  name: 'Light',
+  name: 'Graphite',
   useUniverseBackground: true,
   colors: {
-    background: '#06080d',
+    background: '#14161c',
     backgroundPattern: 'none',
     backgroundOverlay: 'none',
     canvasBg: '#000000',
     canvasStar: '#e5e7eb',
-    widgetBg: '22, 24, 30',
-    composerBg: '36, 38, 44',
+    widgetBg: '34, 37, 44',
+    composerBg: '50, 53, 62',
     widgetBorder: 'transparent',
     widgetText: 'rgba(255, 255, 255, 0.92)',
     primary: '#dbeafe',
@@ -129,5 +137,24 @@ export const LIGHT_THEME: Theme = {
   },
 };
 
+/**
+ * Light (stored id `white`): Graphite's white-ink palette on a neutral grey with
+ * no blue — the lightest a white-text theme can be.
+ */
+export const LIGHT_THEME: Theme = {
+  ...GRAPHITE_THEME,
+  id: 'white', name: 'Light',
+  colors: {
+    ...GRAPHITE_THEME.colors,
+    background: '#2a2b2f', canvasStar: '#ffffff',
+    widgetBg: '56, 57, 61', composerBg: '72, 73, 78',
+    primary: '#f4f4f5', iconAccent: 'rgba(244,244,245,0.92)', iconMuted: 'rgba(255,255,255,0.55)',
+    universeOpacity: 0.6,
+    controlSurfaceElevated: 'rgba(255,255,255,0.16)',
+    controlPlaceholder: 'rgba(255,255,255,0.50)',
+    selectionBg: 'rgba(255,255,255,0.24)',
+  },
+};
+
 export const DEFAULT_THEME: Theme = DARK_THEME;
-export const THEMES: Theme[] = [DARK_THEME, LIGHT_THEME, FOCUS_THEME];
+export const THEMES: Theme[] = [DARK_THEME, FOCUS_THEME, GRAPHITE_THEME, LIGHT_THEME];

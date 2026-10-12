@@ -249,7 +249,7 @@ describe('projectStateById (the switch store)', () => {
   it('persist partialize carries the switch store', () => {
     const partialize = useWorkspaceStore.persist.getOptions().partialize!;
     const persisted = partialize(s());
-    expect(Object.keys(persisted).sort()).toEqual(['projectStateById', 'runtimeByAgentId', 'session']);
+    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
   });
 });
 
@@ -414,8 +414,8 @@ describe('client-state reset bus (the broom reaches package stores through the k
     s().closeWidget({ agentId: 'a1', widgetInstanceId: chat }); // control: a different type
 
     expect(c.scopes).toEqual([
-      { level: 'widget', projectId: 'p1', agentId: 'a1', widgetType: 'filesystem' },
-      { level: 'widget', projectId: 'p1', agentId: 'a1', widgetType: 'chat' },
+      { level: 'widget', projectId: 'p1', agentId: 'a1', widgetType: 'filesystem', instanceId: files },
+      { level: 'widget', projectId: 'p1', agentId: 'a1', widgetType: 'chat', instanceId: chat },
     ]);
     // Emitted AFTER the delete: the handler no longer sees the instance.
     expect(c.seen[0].runtimeAtEmit?.widgets.byId[files]).toBeUndefined();

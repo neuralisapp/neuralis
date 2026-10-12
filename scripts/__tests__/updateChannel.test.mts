@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { compareReleaseVersions, parseReleaseManifest } from '@neuralis/package-system/contracts';
 import { detectChannel, discoverBuiltinDeps } from '../setup/discoverPackages.mts';
 import { imageTagAfterUpdate, upsertEnvValue } from '../setup/envFile.mts';
-import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack } from '../update.mts';
+import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, npmInvocation, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack } from '../update.mts';
 import { applyStack, HEALTH_TIMEOUT_MS, outsideComposeRefusal, stackCommands, type HealthAnswer, type StackPorts } from '../update/stack.mts';
 import { checkpointTakenLine } from '../upgrade.mts';
 import { mergePlatformConfig, platformConfigPath } from '../setup/platformConfig.mts';
@@ -189,7 +189,8 @@ describe('the image tag an applied update moves', () => {
     const { previous } = await upsertEnvValue(dir, 'NEURALIS_IMAGE_TAG', '0.2.0');
     expect(previous).toBe('0.1.0');
     expect(readFileSync(join(dir, '.env'), 'utf-8')).toBe(before.replace('NEURALIS_IMAGE_TAG=0.1.0', 'NEURALIS_IMAGE_TAG=0.2.0'));
-    expect(statSync(join(dir, '.env')).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX mode bits: Node reports every writable file as 0o666 there.
+    expect(statSync(join(dir, '.env')).mode & 0o777).toBe(process.platform === 'win32' ? 0o666 : 0o600);
   });
 
   it('a .env without the key gets it appended; a missing .env is refused, never created', async () => {
@@ -203,7 +204,7 @@ describe('the image tag an applied update moves', () => {
 
   it('the folder update installs the ONE host package and moves the tag only in the re-executed, newly installed code', () => {
     const source = readFileSync(UPDATE_SCRIPT, 'utf-8');
-    const install = source.indexOf("spawnSync('npm', ['install', `${HOST_PACKAGE}@${target}`, '--save-exact']");
+    const install = source.indexOf("spawnSync(...npmInvocation(['install', `${HOST_PACKAGE}@${target}`, '--save-exact'])");
     const failed = source.indexOf('npm install failed', install);
     const reexec = source.indexOf("'--host-swapped'", failed);
     const write = source.indexOf("upsertEnvValue(configDir, 'NEURALIS_IMAGE_TAG'");
@@ -346,11 +347,26 @@ describe('the update command refuses rather than half-working', () => {
     await expect(runUpdateVerb(['agent-core', '--version', '0.2.0'], cliContext(folder))).rejects.toThrow(/not a registry-installed package of this folder/);
   });
 
+  it('starts npm through the npm CLI that ran `npx neuralis`, never by a name Windows resolves only to npm.cmd', () => {
+    const cli = join('/opt', 'node', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    for (const platform of ['linux', 'win32'] as const) {
+      expect(npmInvocation(['install', 'neuralis@0.2.1', '--save-exact'], { npm_execpath: cli }, platform))
+        .toEqual([process.execPath, [cli, 'install', 'neuralis@0.2.1', '--save-exact']]);
+    }
+    expect(npmInvocation(['install'], {}, 'linux')).toEqual(['npm', ['install']]);
+    expect(npmInvocation(['install'], { npm_execpath: '/opt/pnpm/bin/pnpm.cjs' }, 'darwin')).toEqual(['npm', ['install']]);
+    // Windows outside npm: the npm CLI Node ships beside itself, never the `npm` name (npm.cmd).
+    const bundled = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    expect(npmInvocation(['install'], { npm_execpath: '/opt/pnpm/bin/pnpm.cjs' }, 'win32'))
+      .toEqual(existsSync(bundled) ? [process.execPath, [bundled, 'install']] : ['npm', ['install']]);
+    expect(readFileSync(UPDATE_SCRIPT, 'utf-8')).not.toMatch(/spawnSync\('npm'/);
+  });
+
   it('a clone prints the git checkout and never installs the host package', () => {
     const source = readFileSync(UPDATE_SCRIPT, 'utf-8');
     expect(source).toContain('git fetch --tags && git checkout v${version} && npm install');
     const cloneBranch = source.slice(source.indexOf("if (layout === 'clone') return afterHostSwap"), source.indexOf("console.log(`  ${dot} installing"));
-    expect(cloneBranch).not.toContain("spawnSync('npm'");
+    expect(cloneBranch).not.toContain('npmInvocation(');
   });
 });
 
@@ -513,7 +529,7 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
     const answers = [...(opts.health ?? [{ kind: 'absent' }, { kind: 'starting', detail: 'HTTP 503 initializing' }, { kind: 'ready' }])] as HealthAnswer[];
     const ports: StackPorts = {
       async exec(cmd, args, o) {
-        const line = [cmd === process.execPath ? 'neuralis' : cmd, ...args.filter((a) => !a.endsWith('bin/neuralis.mjs'))].join(' ');
+        const line = [cmd === process.execPath ? 'neuralis' : cmd, ...args.filter((a) => a !== join(dir, 'node_modules', 'neuralis', 'bin', 'neuralis.mjs'))].join(' ');
         expect(o.cwd).toBe(dir); // every step runs in the install folder
         expect(args).not.toContain('-f'); // a -f would skip the override file
         calls.push(line);

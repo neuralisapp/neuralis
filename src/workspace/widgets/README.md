@@ -19,24 +19,51 @@ If a feature belongs to a product area, implement it in its package. Use this di
 
 The open/minimize/close/transparency lifecycle is host-level — it works for ALL
 package widgets with no per-package code. It lives in `../store/workspaceStore.ts`
-and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
+and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.tsx`:
 
-- **Stage modes (tiled / canvas / grid)** — `StageHost` picks the renderer from the
-  per-agent `layout.stageMode` (default `tiled`). `TiledStage` = a resizable
+- **Stage modes (tiled / canvas / grid / phone)** — `StageHost` picks the renderer from the
+  shared `effectiveStageMode`: transient per-runtime manual choice, then enabled
+  automatic Phone, then saved `layout.stageMode` (default `tiled`). Automatic Phone
+  uses layout width≤600, or coarse primary input with the minimum screen dimension≤600;
+  keyboard viewport height and pinch scale do not select a mode. Auto clears the
+  active manual choice without rewriting saved desktop geometry; Phone is never
+  saved as `layout.stageMode` (a manual Phone pick lives in the transient choice
+  alone), so Auto always returns to the saved desktop mode. `TiledStage` = a resizable
   `PanelGroup`. `CanvasStage` renders `react-rnd` windows in two flavours: **canvas** =
   an infinite pan/zoom board of free, overlapping windows (drag the empty background
-  to pan, Ctrl/⌘+wheel or the on-screen zoom control to scale — `layout.canvasView` =
-  x/y/zoom); **grid** = a bounded, packed grid that snaps drag/resize to a coarse step.
+  to pan or pinch; Ctrl/⌘+wheel on the empty board or the on-screen zoom control
+  scales around the pointer/center — `layout.canvasView` = x/y/zoom). Wheel magnitude
+  and pixel/line/page units are normalized into one queued frame; window content
+  retains native scrolling and browser zoom. Cancel/Escape rolls back a pan/pinch,
+  and completed gestures retain the existing debounced persistence. New canvas
+  windows use the inverse current viewport transform and a bounded overlap search;
+  existing geometry and current pan/zoom stay unchanged; **grid** = a bounded, packed grid that snaps drag/resize to a coarse step.
   The two keep SEPARATE geometry (`layout.freeformById` for canvas, `layout.gridById`
   for grid — each x/y/w/h/z), seeded lazily on first entry. Both render each widget
   through the SAME `PanelChrome` as tiled (frameless stays frameless, toolbar keeps
   its header) plus a hover-reveal drag grip — so a widget looks identical in every
-  mode. The Layout "Mode:" row toggles it (`setStageMode`); all of it persists per
-  agent.
+  mode. The Layout "Mode" row toggles it (`setStageMode`); all of it persists per
+  agent. Phone shows ONE foreground window at a time in the same `PanelChrome` /
+  `WidgetControls` as the desktop. The edge docks are not rendered there: one small
+  "Docks" launcher in its own row under the stage (it never covers the composer)
+  opens the dock sheet on the fixed control material — the open windows as a row of
+  tiles (tap = bring to front, × = minimize) and each dock as a four-column icon grid
+  with the desktop item visuals and a one-line label. An app or agent tap acts and
+  closes the sheet (an agent tap brings that agent's chat to the front); the account
+  and project tiles keep it open for their popups. Tap outside, a drag down, Escape
+  or the launcher closes it — the sheet ends above the launcher row, so the launcher
+  stays tappable; dock editing opens it. A horizontal swipe (>= 64 px, at least twice
+  as wide as tall) on the foreground window brings the previous/next open window
+  forward in the sheet's tile order, with no wrap-around; a touch that starts in an
+  input, an editor, a frame, a canvas, the terminal or anything that scrolls sideways
+  — or while text is selected — stays with that content. A frameless window's control
+  strip is always visible on Phone and on any touch screen (no hover to reveal it). Desktop dock modes, anchors,
+  materials and preferences are untouched by Phone, and the foreground choice is
+  transient, excluded from persistence.
 - **Keep-alive across BOTH minimize AND mode-switch** — the reverse-portal machinery
   (one detached "outlet" DOM node per instance, each rendered ONCE via a portal and
   moved with `appendChild`) lives in **`StageHost`**, NOT in a stage. Because the
-  outlet nodes outlive whichever stage is mounted, switching tiled↔canvas↔grid — and
+  outlet nodes outlive whichever stage is mounted, switching tiled↔canvas↔grid↔phone — and
   minimizing/restoring — never remounts a widget's REACT subtree (component state,
   timers, the Terminal's PTY socket and fetch caches all survive; no re-fetch).
   **Iframe content is the documented exception:** the stage unmounts its placeholder
@@ -45,7 +72,10 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   discards its browsing context — every `renderer: "iframe"` package widget, and any
   `direct` widget that renders a frame of its own, reloads from the same URL with a
   fresh document and loses all in-frame state, on minimize/restore AND on stage-mode
-  switch. A state-preserving relocate needs `Element.moveBefore()` plus a pre-relocate
+  switch. Changing the relative order of retained tiled panels rebuilds only layout
+  registration (the panel library does not re-sort retained registrations): widget
+  React state survives, but every visible iframe reloads at that reorder boundary.
+  Ordinary add/minimize/restore does not rebuild the retained panel group. A state-preserving relocate needs `Element.moveBefore()` plus a pre-relocate
   boundary (no Safari support), so it is a named follow-up, not a v1 property.
   **The `hidden` flag is what a `direct` widget can do about it:** the host passes
   `WidgetInstance.hidden` to every direct renderer, so a widget can drop the part
@@ -56,6 +86,10 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   and survive the move perfectly well, they are simply not worth rendering into
   nothing. A `renderer: "iframe"` surface has no such lever either way — the host
   owns its frame.
+  Switching foreground within Phone only hides/inerts the existing wrapper:
+  it neither re-homes the outlet nor synthesizes a minimized flag. Background
+  viewers therefore remain mounted, including their existing transport/resource
+  cost; actual minimize and stage changes retain the documented iframe boundary.
   Each stage is pure layout: it renders frames and
   registers a placeholder div per widget via `stageOutlet`'s `registerPlaceholder`;
   `StageHost` moves the outlet into the active placeholder (or an off-screen stash
@@ -64,8 +98,65 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   `hidden` beside `agentId`, `widgetId`, and `state`. A widget may disconnect a
   view transport while hidden without destroying its server-side resource; the
   Terminal uses this to detach WebSockets while its managed PTY keeps running.
-- **Open / restore** — `openWidget` (dock click / chat-starter / package code). A
-  singleton that is minimized is restored (unhidden) instead of duplicated.
+- **Open / restore / windows** — `openWidget` (dock click / chat-starter / package
+  code) picks the window with a `target`: by default the most recently focused
+  window of that type bound to that agent (restored when minimized), a new one
+  only when none exists; `'new'` adds another window when the type is repeatable
+  (`isRepeatableWidget`: every type except a manifest `open.singleton: true`);
+  `{ instanceId }` means exactly that window. A dock item click follows the same
+  rule — zero windows open the first, one is brought forward, several open the
+  item's window chooser (each row brings its window forward; its broom is
+  "Clean this window", which resets that ONE window's package view state through
+  the `instance` reset scope and keeps it open; "New window" adds one). The Apps
+  launcher offers "New window" on a repeatable app that is already open; on Phone
+  the chooser is a row of tiles in the dock sheet. The chat slot has no dock item:
+  its chooser is the agent tile's — a click on the SELECTED agent (rows of that
+  agent's chat windows + "New window"; `opensWindowChooser` in `../shell/Dock.tsx`,
+  `chooserWhenActive`; on Phone only once that chat is in front — the first tap
+  brings the chat), a click on another agent selects it, however many chat windows
+  it has, and opens the
+  default-open widgets with the chat slot LAST (`agentTapOpenOrder`), so on Phone the
+  chat is the foreground; with no foreground chosen yet Phone shows the chat slot's
+  window (`phoneForegroundId`). A PACKAGE opening a window
+  for another agent through the port (`buildWorkspaceHostPort.ts`) brings that
+  agent's layout into view per agent; in a Group the window joins the shared
+  layout and the selected agent stays.
+- **Per agent / Group** — the project menu (the same switcher trigger, no extra
+  control: in a Group it reads `project · Group`), the Layout panel and the Phone
+  sheet choose the view. Per agent is the layout each agent always had; a Group
+  is ONE user-local shared layout (`groupStateByScope`, keyed by the LIVE signed-in
+  user + project, persisted beside the runtimes) holding windows of several
+  agents. The first Group ("Main", every authorized agent) is created only from
+  the fetched agent list; more Groups, names and members are edited in the agent
+  dock's Edit-docks draft (reached from the Layout Group row's "Edit", shown in a
+  Group even with one Group, and the project menu's "Edit groups…") and committed
+  by its Save. The agent dock then lists the
+  Group's members, and picking one only chooses the agent for NEW windows. Every
+  window keeps the agent it was created for (`WidgetInstance.agentId` in a Group
+  runtime, the runtime's agent otherwise) and its chrome names it (marked
+  "outside group" once the agent left the Group). A Group window whose agent is
+  missing from the freshly fetched agent list is not shown (`authorizedWindowOrder`).
+  Membership is never a grant. The runtimes left by a view or Group switch stay
+  MOUNTED off-screen (`retainedRuntimeKeys`, at most six), so switching back shows
+  the same live windows — under the same rule: a retained window (per-agent or
+  Group) stays mounted only while the agent list is loaded and its agent is in it;
+  a project or user change drops them. An empty stage shows ONE hint, the stage's
+  own, worded for a Group in a Group (`useStageEmptyText`). Deleting a Group
+  (inline confirm) drops its own layout only; per-agent layouts are never copied,
+  rekeyed or deleted.
+- **Randomize / Undo** (Layout panel header) — ONE coordinated commit over the
+  layout's eight stored keys (`../shell/layoutTransaction.ts`): the view first
+  (per agent or an EXISTING Group — never a new Group or a membership change),
+  then the docks' anchors with each anchor's natural orientation
+  (`naturalOrientations`, the drag's rule) and a PINNED mode only (never a hover
+  mode that would hide a dock), the dock background, the three themes, the three
+  materials, the chat side, the Universe (the uploaded image stays) and the live
+  windows' arrangement — every value from its owner's exported option set. Every key is written strictly; a storage
+  failure restores the previous bytes and publishes nothing; success publishes one
+  store update, one appearance update and one `neuralis:layout-changed`. ONE Undo
+  restores all of it, and is refused once anything in the layout changed since
+  (a setting, a window, a dock, a canvas gesture, the background image) or the
+  user/project switched. An open dock draft blocks Randomize until Save/Cancel.
 - **Minimize (close-to-dock)** — the widget header **X** (and double-clicking
   another dock item, `exclusiveOpenWidget`) sets `WidgetInstance.hidden` and
   PRESERVES the instance (kept mounted off-screen by the keep-alive above — with
@@ -79,7 +170,9 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   store-holding ProjectSwitcher row (active or not) carry the same broom
   (`cleanAgentStore` / `cleanProjectStore`); none of the three touches server
   data. Every level ALSO emits its scope on `store/clientResetBus.ts` after its
-  own `set()` (widget level carries the widget TYPE, read before the delete),
+  own `set()` (widget level carries the widget TYPE and the window id, read
+  before the delete; the per-window "Clean this window" emits the `instance`
+  level),
   which the host port exposes as `WorkspaceHostPort.onClientStateReset` — the
   generic way a PACKAGE's own client store learns about the broom (brain-core's
   Files store resets its tree, tabs and caches through it) without any host →
@@ -100,6 +193,13 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   shown); the inbox (per-app groups with a two-click Clear) and the settings
   live in the account popup, a row opens only its own package's widget through
   `openWidget`.
+- **Apps menu** — the fixed dock entry opens a centered, searchable launcher on the
+  fixed control material (opaque Dark whatever the theme or material) with
+  every authorized app, including apps hidden from the dock. It is a dialog,
+  never a widget instance, so the entry has no highlight or broom. Its Layout button
+  opens settings. Pins use the existing dock preferences writer and are disabled
+  until an active dock draft is saved or cancelled. Empty projects retain Apps
+  and Layout access without a synthetic agent.
 - **Edit docks** (Layout panel) — the docks enter edit mode (a dock already
   editing keeps its draft; with both editing the toggle asks before it
   discards both): drag or the arrow
@@ -117,15 +217,41 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   project record — the picture as a hash reference served by `/api/appearance/*`
   — and both editors (`UserProfilePopup`, the owner-strength `ProjectEditPopup`
   under the switcher's Project settings) are the kernel `IconPicker`.
+- **Appearance scopes** — one row per surface (Widgets, Docks, Background): four theme
+  samples and that surface's Opaque / Dim / Clear material side by side, on the three
+  stored theme keys and three material fields; "Same theme everywhere" copies the
+  Widgets theme to the other two. Every theme is dark polarity — white text, so an
+  app built for the dark design fits each one — and they step in widget lightness
+  (≈ 6 / 11 / 15 / 23 %): Dark, Focus (a blue slate), Graphite (id `light`) and Light
+  (id `white`; ids never change, labels only), a neutral grey at the white-text ceiling
+  where the median body text (`text-white/55`) still reads >= 4.5:1 on the widget and its
+  Dim glass (`appearanceControls.test.ts`). A theme is only its CSS variables on each
+  theme scope root (`themeScopeStyle`). Dock background selects icon tiles or a toolbar surface for
+  both docks. **Placement** is an anchor (four corners, four edge midpoints — never
+  the centre) and an orientation chosen independently: 16 placements. Two docks on
+  the same anchor and orientation — or on neighbouring anchors of one line (an end and
+  its midpoint, joined at the end) — join one after the other: toolbar draws ONE contour
+  across the pair (shared corners square), classic sits the tiles flush; two at the
+  opposite ends of a line share the lane and never overlap. Drag the grip — an edge
+  midpoint takes its edge's direction, a corner the drag's dominant direction, R during
+  the drag flips it; after a drop (and on grip hover/focus) a rotate control INSIDE the
+  grip's hover group and in flow (stacked across the dock's thickness — no gap to cross,
+  and hidden it covers only the dock, never a widget control) turns the dock in place, so all 16 placements are reachable — or click the grip
+  for the map picker beside the dock; Escape cancels. Moving or joining docks never changes theme, material or
+  transparency. A stored placement this build cannot read resets that dock alone. A
+  dock in a hover mode shows a 3 px edge indicator inside its trigger strip, as long as
+  its own section and in the dock theme's tone, hidden while it is revealed (CSS only).
 - **Default widget transparency** — `DockLayoutConfig.defaultWidgetTransparency`
-  (Layout settings "Widgets:" row, localStorage) is the render baseline; precedence
+  (Layout → Appearance "Widgets" material, localStorage; first run: Dim) is the render baseline; precedence
   is per-instance override → manifest `chrome.transparent` → user default → opaque.
   The manifest `chrome.userTransparency:false` opt-out and `untrusted` trust-lock on
   the cycle button are unchanged. The surface math (`surfaceStyle`) + the precedence
   helper (`resolveWidgetLevel`) live in `../shell/widgetSurface.ts`, shared by
-  `PanelChrome`, which both `TiledStage` and `CanvasStage` render every widget through.
+  `PanelChrome`, which `TiledStage`, `CanvasStage` and `PhoneStage` render every widget through.
 - **The backdrop blur stays wherever there is a surface** — `surfaceBlurClass` returns
-  `backdrop-blur-xl` at `opaque`, `backdrop-blur-md` at `dim`, and `null` only at
+  `backdrop-blur-xl` at `opaque`, the light Dim glass at `dim` (`DIM_GLASS`: 72 % over a
+  6 px blur, the ONE value the dock capsule shares — a classic dock's Dim tiles read the same
+  alpha, which the capsule publishes as `--dock-dim-alpha`), and `null` only at
   `transparent`. The style and the blur are read off ONE per-level record in
   `widgetSurface.ts`, so a level's alpha and its filter can never drift apart.
   **Do not remove the `opaque` blur as "invisible".** The blur itself really is
@@ -153,16 +279,20 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
   containment or paint CSS.
 - **Animated universe background** — `../shell/AnimatedUniverseBackground.tsx` paints a
   100-node starfield behind the whole shell. It is per-theme (`useUniverseBackground`
-  plus a per-theme `universeOpacity`) and user-toggleable in Layout settings, which is
-  the only path that unmounts it. The loop holds ONE invariant, encoded in
+  plus a per-theme `universeOpacity`, visible on every theme — >= 0.5) and
+  user-toggleable in Layout settings, which is the only path that unmounts it. Its
+  stars are the background theme's `canvasStar`, read per frame. It
+  draws OVER an uploaded image and never dims it: the image's opacity is the
+  Background material alone (`backgroundImageOpacity`: Opaque 1 · Dim 0.6 · Clear 0.34,
+  `DockLayoutConfig.backgroundTransparency`). The loop holds ONE invariant, encoded in
   `../shell/frameLoop.ts` and unit-pinned: **at most one scheduled frame exists at any
   time, and cleanup can always reach it** — pausing cancels, resuming early-returns
   unless actually paused, and a resize sets a flag consumed by the next frame rather
   than scheduling its own. Under `prefers-reduced-motion: reduce` the component paints
   exactly one static frame (warmed to the animation's steady-state density) and starts
   no loop at all; flipping the OS preference rebuilds the effect in the other mode.
-- **Dock transparency** — `DockLayoutConfig.defaultDockTransparency` (Layout settings
-  "Dock:" row) styles EVERY dock element (package items, user avatar, project switcher,
+- **Dock transparency** — `DockLayoutConfig.defaultDockTransparency` (Layout → Appearance
+  "Docks" material) styles EVERY dock element (package items, user avatar, project switcher,
   dock-mode switch, agent tiles) via a `Dock`-provided context (`../shell/dockSurface.ts`):
   `opaque` = the filled backgrounds; `dim` = faint; `transparent` = no backgrounds
   (icons only), an active/open item's icon glows, the minimized colour ring stays.
@@ -177,7 +307,8 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
     The dock tracks are FIXED per mode from ONE table (`DOCK_TRACK` in
     `../shell/dockPlacement.ts`, read by both `Dock` and `dockEdgeTrack`), so the
     re-render cannot re-derive the stage width and loop back through `onLayout` — no
-    `auto` track, no `w-fit` dock. `useOpenWidgets` is for the two
+    content-derived grid track. A dock is content-sized ALONG its lane and scrolls
+    when the lane is shorter; its cross size is the fixed track. `useOpenWidgets` is for the two
     STAGES, which must repaint on geometry. Geometry lives on `runtime.layout`, never on
     the instance, so `widgets.byId` keeps its identity through every geometry write.
   - **The streaming ring is compositor-driven** (`.streaming-ring*` in
@@ -195,7 +326,10 @@ and `../shell/{StageHost,TiledStage,CanvasStage,Dock,useDockItems}.tsx`:
     (removing it drifts the rounded corners by up to 58/255).
   - **`DockScrollContainer` never measures on an event.** `scrollHeight`/`clientHeight`/
     `scrollTop` are a forced synchronous layout, and four sources (mount, `ResizeObserver`,
-    `MutationObserver`, `scroll`) feed the same read. They all go through ONE rAF
+    `MutationObserver`, `scroll`) feed the same read — plus, on a horizontal dock, a
+    vertical `wheel` it turns into its own scroll (the one non-passive listener: it
+    cancels the page scroll only while the dock can still move that way, and it reads
+    the range the last frame measured, never the layout). They all go through ONE rAF
     (`../shell/frameLoop.ts`, `pending`-guarded so a burst collapses into a single
     layout read on the next frame). The `MutationObserver` keeps `subtree: true` on
     purpose — `Dock.tsx` appends items inside wrapper divs, never to the scroller

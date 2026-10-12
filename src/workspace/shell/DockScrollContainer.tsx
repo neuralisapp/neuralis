@@ -3,25 +3,18 @@
 import type { ReactNode, CSSProperties } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown } from 'lucide-react';
-import { cn } from '@/lib/cn';
 import { createFrameLoop, type FrameLoop } from './frameLoop';
-import type { DockAlign } from './dockPlacement';
-
 type Props = {
   children: ReactNode;
-  align?: DockAlign;
   orientation?: 'horizontal' | 'vertical';
 };
 
-function horizontalAlignClass(align: DockAlign): string {
-  switch (align) {
-    case 'start': return 'justify-start';
-    case 'center': return 'justify-center';
-    case 'end': return 'justify-end';
-  }
-}
-
-export function DockScrollContainer({ children, align = 'start', orientation = 'horizontal' }: Props) {
+/**
+ * The dock's scroller. It is CONTENT-sized and shrinks only when its lane is
+ * shorter than its items, so the lane — not this box — places the dock along
+ * its edge.
+ */
+export function DockScrollContainer({ children, orientation = 'horizontal' }: Props) {
   // Callback ref, NOT a stable ref object: the vertical and horizontal branches
   // below render DIFFERENT scroll `<div>`s, so the element identity changes with
   // `orientation`. Effects keyed on a ref object would not re-run and would keep
@@ -31,6 +24,8 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
   const [showEnd, setShowEnd] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const isVertical = orientation === 'vertical';
+  const wheelDelta = useRef(0);
+  const horizontalRange = useRef({ width: 0, max: 0, at: 0 });
 
   /**
    * Reads `scrollHeight`/`clientHeight`/`scrollTop` — a FORCED SYNCHRONOUS
@@ -43,6 +38,8 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
       setShowStart(el.scrollTop > 2);
       setShowEnd(el.scrollTop < el.scrollHeight - el.clientHeight - 2);
     } else {
+      if (wheelDelta.current !== 0) { el.scrollBy({ left: wheelDelta.current }); wheelDelta.current = 0; }
+      horizontalRange.current = { width: el.clientWidth, max: el.scrollWidth - el.clientWidth, at: el.scrollLeft };
       setHasOverflow(el.scrollWidth > el.clientWidth + 1);
       setShowStart(el.scrollLeft > 2);
       setShowEnd(el.scrollLeft < el.scrollWidth - el.clientWidth - 2);
@@ -90,14 +87,30 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
     // Passive: `scroll` is not cancelable, and the handler must stay free of
     // layout reads so the scroll path never forces a synchronous layout.
     scrollEl.addEventListener('scroll', onChange, { passive: true });
+    // A horizontal dock turns a vertical wheel into its own scroll, so this one
+    // listener is NOT passive: it must `preventDefault` the page scroll — but
+    // only while the dock can still move that way, and it reads the range the
+    // last frame measured (no layout read), then joins the same frame.
+    const onWheel = (event: WheelEvent) => {
+      if (isVertical || event.deltaX !== 0 || event.ctrlKey || !event.deltaY) return;
+      const { width, max, at } = horizontalRange.current;
+      if (max <= 0 || (event.deltaY < 0 && at <= 0) || (event.deltaY > 0 && at >= max)) return;
+      event.preventDefault();
+      const unit = event.deltaMode === 2 ? width : event.deltaMode === 1 ? 16 : 1;
+      wheelDelta.current = Math.max(-width, Math.min(width, wheelDelta.current + event.deltaY * unit));
+      scheduleUpdate(scrollEl);
+    };
+    if (!isVertical) scrollEl.addEventListener('wheel', onWheel, { passive: false });
 
     return () => {
       ro.disconnect();
       mo.disconnect();
       scrollEl.removeEventListener('scroll', onChange);
+      if (!isVertical) scrollEl.removeEventListener('wheel', onWheel);
       loopRef.current?.cancel();
+      wheelDelta.current = 0;
     };
-  }, [scrollEl, measure, scheduleUpdate]);
+  }, [scrollEl, measure, scheduleUpdate, isVertical]);
 
   const scroll = useCallback((direction: -1 | 1) => {
     if (!scrollEl) return;
@@ -123,12 +136,13 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
 
   if (isVertical) {
     return (
-      <div className="relative flex-1 min-h-0 flex flex-col">
+      <div className="relative min-h-0 flex flex-col">
         {/* Up arrow */}
         {showStart ? (
           <button
             type="button"
             onClick={() => scroll(-1)}
+            aria-label="Scroll dock backward"
             className="absolute left-0 right-0 top-0 z-10 h-6 flex items-center justify-center bg-gradient-to-b from-black/50 to-transparent rounded-t-xl"
           >
             <ChevronUp className="w-4 h-4 text-white/60" />
@@ -138,7 +152,7 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
         {/* Scrollable content */}
         <div
           ref={setScrollEl}
-          className="flex-1 min-h-0 flex flex-col gap-2 overflow-y-auto overflow-x-hidden"
+          className="min-h-0 flex flex-col gap-2 [&>*]:shrink-0 overflow-y-auto overflow-x-hidden"
           style={scrollStyle}
         >
           {children}
@@ -149,6 +163,7 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
           <button
             type="button"
             onClick={() => scroll(1)}
+            aria-label="Scroll dock forward"
             className="absolute left-0 right-0 bottom-0 z-10 h-6 flex items-center justify-center bg-gradient-to-t from-black/50 to-transparent rounded-b-xl"
           >
             <ChevronDown className="w-4 h-4 text-white/60" />
@@ -159,12 +174,13 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
   }
 
   return (
-    <div className="relative flex-1 min-w-0 flex items-center">
+    <div className="relative min-w-0 flex items-center">
       {/* Left arrow */}
       {showStart ? (
         <button
           type="button"
           onClick={() => scroll(-1)}
+          aria-label="Scroll dock backward"
           className="absolute left-0 top-0 bottom-0 z-10 w-7 flex items-center justify-center bg-gradient-to-r from-black/50 to-transparent rounded-l-xl"
         >
           <ChevronLeft className="w-4 h-4 text-white/60" />
@@ -174,7 +190,7 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
       {/* Scrollable content */}
       <div
         ref={setScrollEl}
-        className={cn('flex-1 flex flex-row gap-2 items-center overflow-x-auto', horizontalAlignClass(align))}
+        className="min-w-0 flex flex-row gap-2 items-center overflow-x-auto overflow-y-hidden [&>*]:shrink-0"
         style={scrollStyle}
       >
         {children}
@@ -185,6 +201,7 @@ export function DockScrollContainer({ children, align = 'start', orientation = '
         <button
           type="button"
           onClick={() => scroll(1)}
+          aria-label="Scroll dock forward"
           className="absolute right-0 top-0 bottom-0 z-10 w-7 flex items-center justify-center bg-gradient-to-l from-black/50 to-transparent rounded-r-xl"
         >
           <ChevronRight className="w-4 h-4 text-white/60" />

@@ -4,9 +4,10 @@
  * packageAssetScope — the TAB-LOCAL, refcounted client of the identity-free
  * package asset scope (CARD1 3A).
  *
- * One scope per `(projectId, agentId, packageId, surfaceKind, surfaceId,
- * fingerprint)` coordinate is minted and REUSED across consumers (multiple
- * cards of one type, widget re-renders): concurrent `acquire()` calls share a
+ * One scope per `(projectId, agentId, packageId, purpose, surfaceKind,
+ * surfaceId, fingerprint)` coordinate is minted and REUSED across consumers
+ * (multiple cards of one type, widget re-renders, the same dock picture shown
+ * by the dock, the app menu and the inbox at once): concurrent `acquire()` calls share a
  * single in-flight mint, the returned scoped URL is STABLE for the whole
  * document generation, a 60 s heartbeat keeps the server scope alive while
  * any consumer holds a reference, and the LAST release sends a best-effort
@@ -21,6 +22,13 @@
  * module. The mint POST is host-only (cookie session + `x-project-id` /
  * `x-agent-id` headers); the NAVIGATED url and every subresource request
  * carry NO identity — no token or project ever enters a query string.
+ *
+ * Two purposes share this ONE lifecycle: `document` (a widget/card entry —
+ * the default when a coordinate names none) and `icon` (a dock entry's
+ * declared picture; `surfaceKind: 'dock'`, the dock id, and the declared path
+ * as the fingerprint). The server refuses an icon mint at the per-user cap with
+ * ONE typed answer; it rejects as {@link AssetScopeCapacityError}, the caller
+ * keeps its glyph, and nothing here retries on a timer.
  */
 
 export const ASSET_SCOPE_HEARTBEAT_MS = 60_000;
@@ -53,11 +61,29 @@ export function isAssetBackedSurfaceUrl(url: string): boolean {
   return !(/^(https?:)?\/\//i.test(url) || url.startsWith('/'));
 }
 
+/** What a scope serves — see the module header. */
+export type AssetScopePurpose = 'document' | 'icon';
+
+/**
+ * The server's icon-only capacity refusal (429 `icon_capacity`): the user's
+ * scope cap is full of documents, which an icon never displaces. Settled, not
+ * retried — the next attempt comes from a visibility change, an invalidation
+ * or a remount.
+ */
+export class AssetScopeCapacityError extends Error {
+  constructor() {
+    super('asset scope capacity reached for icons');
+    this.name = 'AssetScopeCapacityError';
+  }
+}
+
 export type AssetScopeCoordinate = {
   projectId: string;
   agentId?: string;
   packageId: string;
-  surfaceKind: 'widget' | 'card';
+  /** Absent ⇒ `document`. `icon` pairs with `surfaceKind: 'dock'`. */
+  purpose?: AssetScopePurpose;
+  surfaceKind: 'widget' | 'card' | 'dock';
   surfaceId: string;
   /**
    * Client-side declaration fingerprint (renderer/url/bridge digest) — a
@@ -97,6 +123,7 @@ function coordKey(coord: AssetScopeCoordinate): string {
     coord.projectId,
     coord.agentId ?? null,
     coord.packageId,
+    coord.purpose ?? 'document',
     coord.surfaceKind,
     coord.surfaceId,
     coord.fingerprint,
@@ -119,11 +146,16 @@ async function mintScope(coord: AssetScopeCoordinate): Promise<ScopeState> {
     headers: mintHeaders(coord),
     body: JSON.stringify({
       projectId: coord.projectId,
+      ...(coord.purpose === 'icon' ? { purpose: 'icon' } : {}),
       surfaceKind: coord.surfaceKind,
       surfaceId: coord.surfaceId,
       rendererFingerprint: coord.fingerprint,
     }),
   });
+  if (res.status === 429 && coord.purpose === 'icon') {
+    const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+    if (body?.code === 'icon_capacity') throw new AssetScopeCapacityError();
+  }
   if (!res.ok) {
     throw new Error(`asset scope mint failed (${res.status})`);
   }

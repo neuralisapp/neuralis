@@ -32,6 +32,8 @@
  *    do NOT add either); the whole list lives in the kernel primitive
  *    `@neuralis/package-system/paths` (`containment.ts`), and
  *    is not restated here.
+ *  - An ICON-purpose record (a dock picture) is refused outright, before any
+ *    other check: icons are served on the authenticated lane only.
  *  - `.html` and `.htm` are refused: this lane must never serve a DOCUMENT that
  *    could be used as an alternative frame `src` (see
  *    `PACKAGE_APP_PUB_DENIED_EXTS`). `.svg` is allowed because the anti-
@@ -129,6 +131,10 @@ export async function handlePackageAppPubGet(
   const authority = getPackageAssetScopeAuthority();
   const record = authority.getByPubToken(token);
   if (!record) return notFound();
+  //    An ICON scope (a dock entry's declared picture) never has a public lane:
+  //    its one file is served on the authenticated entry lane only, after the
+  //    full recheck and a byte sniff. Refused by PURPOSE, not by extension.
+  if (record.purpose === 'icon') return notFound();
 
   // 2. Namespace + extension allowlist, still before any fs or registry work.
   //    `.html` and `.htm` die here.

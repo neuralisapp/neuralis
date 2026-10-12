@@ -57,19 +57,28 @@
  *
  * Error bodies are uniform constants — no error text, `Location` or header
  * ever reflects the runtime package id or a resolved filesystem path.
+ *
+ * ICON scopes (a dock entry's declared picture) ride this SAME lane with a
+ * narrower contract: the recheck goes through the dock resolver, only
+ * `shared/<the exact declared file>` is served, the byte cap is the raster
+ * appearance floor (`APPEARANCE_IMAGE_MAX_BYTES`, 256 KiB) on the descriptor's
+ * stat BEFORE the read, and the bytes must sniff as PNG/JPEG/WebP — the
+ * response carries the SNIFFED type, never the extension's. No `<base>`, no
+ * HTML, no other file of the package.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { resolve } from 'node:path';
 import type { SessionContext } from '@neuralis/package-system/contracts';
 import { isHtmlEntryPath } from '@neuralis/package-system';
+import { APPEARANCE_IMAGE_MAX_BYTES, sniffRasterImage } from '@neuralis/package-system/web-common';
 import {
   resolveSessionContext,
   SessionResolutionError,
 } from '../auth/resolveSessionContext';
 import { resolveVerifiedAgentScope } from '../auth/resolveVerifiedAgentScope';
-import { resolveVisiblePackageSurface } from './packageVisibility';
-import { getPackageAssetScopeAuthority } from './PackageAssetScopeAuthority';
+import { resolveVisiblePackageDockImage, resolveVisiblePackageSurface } from './packageVisibility';
+import { getPackageAssetScopeAuthority, type PackageAssetScopeRecord } from './PackageAssetScopeAuthority';
 import { ensureProjectPackagesLoaded } from './projectPackages';
 import { buildPackageAppAssetCsp, PACKAGE_APP_ASSET_MAX_BYTES } from './packageAppAssetCsp';
 import {
@@ -93,6 +102,22 @@ function forbidden(): NextResponse {
   return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 }
 
+/**
+ * The current declaration a record is re-checked against — the dock resolver
+ * for an icon, the surface resolver for a document. ONE branch, shared by
+ * this GET and the app-scope heartbeat.
+ */
+export async function resolveCurrentScopeDeclaration(
+  session: SessionContext,
+  record: Pick<PackageAssetScopeRecord, 'purpose' | 'packageId' | 'surfaceKind' | 'surfaceId'>,
+): Promise<{ fingerprint: string; generation: string; trust: string } | null> {
+  if (record.purpose === 'icon') {
+    return resolveVisiblePackageDockImage(session, record.packageId, record.surfaceId);
+  }
+  if (record.surfaceKind === 'dock') return null;
+  return resolveVisiblePackageSurface(session, record.packageId, record.surfaceKind, record.surfaceId);
+}
+
 export async function handlePackageAppAssetGet(
   req: NextRequest,
   handle: string,
@@ -107,7 +132,7 @@ export async function handlePackageAppAssetGet(
   // subresource lane — ONE rule, two lanes, no second copy to drift).
   const parsed = parseAssetRequest(pathSegments, PACKAGE_APP_ASSET_MIME_BY_EXT);
   if (!parsed.ok) return notFound();
-  const { namespace, rest, mime } = parsed;
+  const { namespace, rest } = parsed;
 
   // Fresh canonical cookie session — the iframe navigation carries cookies
   // only (no headers, no query). The project comes from the RECORD, never
@@ -139,12 +164,7 @@ export async function handlePackageAppAssetGet(
   // FULL shared visibility recheck + drift compare (trust / generation /
   // fingerprint). Any loss or drift revokes.
   await ensureProjectPackagesLoaded(record.projectId);
-  const surface = await resolveVisiblePackageSurface(
-    { ...session, agentId: record.agentId },
-    record.packageId,
-    record.surfaceKind,
-    record.surfaceId,
-  );
+  const surface = await resolveCurrentScopeDeclaration({ ...session, agentId: record.agentId }, record);
   if (
     !surface ||
     surface.fingerprint !== record.fingerprint ||
@@ -163,6 +183,17 @@ export async function handlePackageAppAssetGet(
   const contained = resolveContainedAssetPath(root, rest);
   if (!contained.ok) return contained.reason === 'escape' ? forbidden() : notFound();
 
+  const icon = record.purpose === 'icon';
+  // An icon scope opens exactly ONE file: the declared picture, in `shared/`.
+  if (
+    icon &&
+    (namespace !== 'shared' || !record.sharedRoot ||
+      contained.absPath !== resolve(record.sharedRoot, record.entryRelPath))
+  ) {
+    return notFound();
+  }
+  const byteCap = icon ? APPEARANCE_IMAGE_MAX_BYTES : PACKAGE_APP_ASSET_MAX_BYTES;
+
   // Containment, REAL half + the B-baseline memory bound (CARD1 3C), in ONE
   // helper because they must be decided on the SAME file: `openContainedAssetFile`
   // realpaths the root AND the request (a symlink under the surface root pointing
@@ -173,17 +204,13 @@ export async function handlePackageAppAssetGet(
   // preflight's, and the package id is logged server-side only, never in a
   // response. A symlink escape maps to the SAME 403 as a lexical one — the
   // status split is a property of the lane, not of how the escape was spelled.
-  const opened = await openContainedAssetFile(
-    root,
-    contained.absPath,
-    PACKAGE_APP_ASSET_MAX_BYTES,
-  );
+  const opened = await openContainedAssetFile(root, contained.absPath, byteCap);
   if (!opened.ok) {
     if (opened.reason === 'too_large') {
       getLogger()
         .child('package-app-asset')
         .warn(
-          `Package app asset exceeds the ${PACKAGE_APP_ASSET_MAX_BYTES}-byte cap ` +
+          `Package app asset exceeds the ${byteCap}-byte cap ` +
             `(${opened.size} bytes) for package '${record.packageId}' ` +
             `surface ${record.surfaceKind}/${record.surfaceId}; refusing to serve.`,
         );
@@ -202,6 +229,23 @@ export async function handlePackageAppAssetGet(
     return notFound();
   } finally {
     await opened.handle.close().catch(() => undefined);
+  }
+
+  // A picture is served by what its BYTES are, never by its name: a renamed SVG
+  // or HTML document under a `.png` name stops here.
+  let mime = parsed.mime;
+  if (icon) {
+    const sniffed = sniffRasterImage(new Uint8Array(buffer));
+    if (!sniffed) {
+      getLogger()
+        .child('package-app-asset')
+        .warn(
+          `Package dock picture for package '${record.packageId}' dock ${record.surfaceId} ` +
+            'is not a PNG, JPEG or WebP; refusing to serve.',
+        );
+      return notFound();
+    }
+    mime = sniffed.mimeType;
   }
 
   // A served asset keeps the scope alive (same idle window as heartbeat). The
@@ -244,6 +288,7 @@ export async function handlePackageAppAssetGet(
   let bytes = new Uint8Array(buffer);
   let contentLength = String(opened.size);
   if (
+    !icon &&
     record.assetMode === 'bundle' &&
     namespace === 'surface' &&
     contained.absPath === resolve(record.surfaceRoot, record.entryRelPath) &&

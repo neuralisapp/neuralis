@@ -29,10 +29,14 @@
  * Bounded-ness:
  *   - idle expiry: {@link DEFAULT_IDLE_TTL_MS} (5 min) since the last mint /
  *     heartbeat / served asset;
- *   - per-user hard cap {@link DEFAULT_MAX_PER_USER} (128): at the cap the
- *     LEAST-RECENTLY-active record of that user is revoked to admit the new
- *     one (its client re-mints on the resulting 410 — bounded, never a mint
- *     denial-of-service);
+ *   - per-user hard cap {@link DEFAULT_MAX_PER_USER} (128), shared by BOTH
+ *     purposes. A DOCUMENT mint at the cap revokes the user's
+ *     least-recently-active ICON first, then its least-recently-active
+ *     document (that client re-mints on the resulting 410 — bounded, never a
+ *     mint denial-of-service). An ICON mint may displace only an icon: a user
+ *     whose cap is all documents gets ONE typed refusal
+ *     ({@link IconCapacityRefusal}, no count, no record identity) and every
+ *     document keeps serving — a picture never costs an open widget its frame;
  *   - periodic sweep (module getter arms an unref'd interval) + lazy sweep on
  *     every access;
  *   - process restart drops the map — every persisted handle answers 410.
@@ -43,6 +47,20 @@ import type { PackageTrust, SurfaceAssetMode } from '@neuralis/package-system/co
 import type { SurfaceAssetKind } from '@neuralis/package-system';
 
 export const DEFAULT_IDLE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * What a scope serves. `document` = a widget/card surface entry (and, for a
+ * declared bundle, its subresources). `icon` = exactly ONE declared dock
+ * picture under `app/shared/`, byte-sniffed on every GET; never an HTML
+ * document, never a `<base>` injection, never the session-free lane.
+ */
+export type PackageAssetScopePurpose = 'document' | 'icon';
+
+/** `document` scopes bind a widget/card; `icon` scopes bind a dock entry. */
+export type PackageAssetScopeSurfaceKind = SurfaceAssetKind | 'dock';
+
+/** The one refusal a mint can answer — only for an `icon`, only at the per-user cap. */
+export type IconCapacityRefusal = { refused: 'icon_capacity' };
 export const DEFAULT_MAX_PER_USER = 128;
 const SWEEP_INTERVAL_MS = 60 * 1000;
 
@@ -53,7 +71,13 @@ export type PackageAssetScopeRecord = {
   /** VERIFIED agent scope bound at mint (K7) — never a raw header value. */
   agentId?: string;
   packageId: string;
-  surfaceKind: SurfaceAssetKind;
+  /**
+   * The mint route is the ONE producer; `icon` ⟺ `surfaceKind: 'dock'`. Every
+   * lane branches on it explicitly: the GET re-resolves through the dock
+   * resolver and serves only the exact declared file, `_pub` refuses it.
+   */
+  purpose: PackageAssetScopePurpose;
+  surfaceKind: PackageAssetScopeSurfaceKind;
   surfaceId: string;
   renderer: string;
   trust: PackageTrust;
@@ -145,10 +169,16 @@ export class PackageAssetScopeAuthority {
     this.#now = options.now ?? Date.now;
   }
 
-  /** Mint a fresh opaque handle for a fully-verified surface resolution. */
-  mint(input: PackageAssetScopeInit): PackageAssetScopeRecord {
+  /**
+   * Mint a fresh opaque handle for a fully-verified resolution. A document mint
+   * always succeeds; an icon mint answers {@link IconCapacityRefusal} when the
+   * user's cap holds no icon to displace.
+   */
+  mint(input: PackageAssetScopeInit & { purpose: 'document' }): PackageAssetScopeRecord;
+  mint(input: PackageAssetScopeInit): PackageAssetScopeRecord | IconCapacityRefusal;
+  mint(input: PackageAssetScopeInit): PackageAssetScopeRecord | IconCapacityRefusal {
     this.sweep();
-    this.#enforceUserCap(input.userId);
+    if (!this.#admit(input.userId, input.purpose)) return { refused: 'icon_capacity' };
     const now = this.#now();
     const record: PackageAssetScopeRecord = {
       ...input,
@@ -297,17 +327,29 @@ export class PackageAssetScopeAuthority {
     return this.#now() - record.lastSeenAt > this.#idleTtlMs;
   }
 
-  #enforceUserCap(userId: string): void {
-    const owned: PackageAssetScopeRecord[] = [];
+  /**
+   * Per-user cap with purpose-aware victims. One pass over the WHOLE live map
+   * (O(total live scopes) — the same walk `sweep()` makes), then a sort over at
+   * most this user's ≤128 records, and only when the cap is reached.
+   */
+  #admit(userId: string, purpose: PackageAssetScopePurpose): boolean {
+    const icons: PackageAssetScopeRecord[] = [];
+    const documents: PackageAssetScopeRecord[] = [];
     for (const record of this.#records.values()) {
-      if (record.userId === userId) owned.push(record);
+      if (record.userId !== userId) continue;
+      if (record.purpose === 'icon') icons.push(record);
+      else documents.push(record);
     }
-    if (owned.length < this.#maxPerUser) return;
-    owned.sort((a, b) => a.lastSeenAt - b.lastSeenAt);
-    // Revoke the least-recently-active surplus — its client re-mints on 410.
-    for (let i = 0; i <= owned.length - this.#maxPerUser; i += 1) {
-      this.#forget(owned[i]);
-    }
+    const surplus = icons.length + documents.length - this.#maxPerUser + 1;
+    if (surplus <= 0) return true;
+    // An icon displaces only an icon; it never costs a document its scope.
+    if (purpose === 'icon' && icons.length < surplus) return false;
+    const byAge = (a: PackageAssetScopeRecord, b: PackageAssetScopeRecord): number =>
+      a.lastSeenAt - b.lastSeenAt;
+    icons.sort(byAge);
+    const victims = purpose === 'icon' ? icons : [...icons, ...documents.sort(byAge)];
+    for (const victim of victims.slice(0, surplus)) this.#forget(victim);
+    return true;
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripWidgetNavs } from '../workspaceStore';
+import { parsePersistedWorkspace, stripWidgetNavs } from '../workspaceStore';
 import type { AgentRuntime } from '../types';
 
 /**
@@ -57,5 +57,33 @@ describe('stripWidgetNavs (persist partialize)', () => {
     expect(out['p1:clean']).toBe(clean);
     expect(out['p1:dirty']).not.toBe(dirty);
     expect('nav' in out['p1:dirty'].widgets.byId['w1'].state).toBe(false);
+  });
+});
+
+describe('parsePersistedWorkspace (the persisted-state reader)', () => {
+  it('drops ONLY the unreadable runtime; the readable one, the session and the project memory survive', () => {
+    const good = runtimeWith({ draft: 'kept' });
+    const parsed = parsePersistedWorkspace({
+      runtimeByAgentId: { 'p1:a1': good, 'p1:broken': { layout: {} }, 'p1:nolayout': { widgets: { openOrder: [], byId: {} } } },
+      session: { projectId: 'p1', agentId: 'a1', workspaceView: 'agent_create' },
+      projectStateById: { p1: { lastAgentId: 'a1', dock: { primary: { order: ['x'], hidden: [] } } }, p2: 'garbage' },
+    });
+    expect(Object.keys(parsed.runtimeByAgentId)).toEqual(['p1:a1']);
+    expect(parsed.runtimeByAgentId['p1:a1'].widgets.byId.w1.state).toEqual({ draft: 'kept' });
+    expect(parsed.session).toEqual({ projectId: 'p1', agentId: 'a1', workspaceView: 'default' });
+    expect(parsed.projectStateById).toEqual({ p1: { lastAgentId: 'a1', dock: { primary: { order: ['x'], hidden: [] } } } });
+  });
+
+  it('drops an unreadable widget and its order entry, keeping the rest of the runtime', () => {
+    const rt = runtimeWith({});
+    const parsed = parsePersistedWorkspace({ runtimeByAgentId: { k: { ...rt, widgets: { openOrder: ['w1', 'ghost', 7], byId: { ...rt.widgets.byId, bad: { id: 'bad' } } } } } });
+    expect(parsed.runtimeByAgentId.k.widgets.openOrder).toEqual(['w1']);
+    expect(Object.keys(parsed.runtimeByAgentId.k.widgets.byId)).toEqual(['w1']);
+  });
+
+  it('a payload that is not an object reads as an empty workspace, never a crash', () => {
+    for (const raw of [undefined, null, 'x', 7, []]) {
+      expect(parsePersistedWorkspace(raw)).toEqual({ runtimeByAgentId: {}, session: { projectId: null, agentId: null, workspaceView: 'default' }, projectStateById: {}, groupStateByScope: {} });
+    }
   });
 });

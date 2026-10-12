@@ -1,7 +1,7 @@
 'use client';
 
 import { LogOut, Shield, ChevronDown, Pencil, Inbox } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useContext, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSession, signOut } from 'next-auth/react';
 import { cn } from '@/lib/cn';
@@ -13,7 +13,9 @@ import { InboxPanel } from './InboxPanel';
 import { UNREAD_PILL_STYLE, UnreadDot, badgeLabel } from './DockBadge';
 import { inboxRequestView, useInboxRequest, useUnreadTotal, type InboxView } from '../notifications/notificationsClient';
 
-type DockEdge = 'left' | 'right' | 'top' | 'bottom';
+import type { DockEdge } from './dockPlacement';
+import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
+import { DEFAULT_THEME } from '../theme/themes';
 
 type Props = {
   expanded?: boolean;
@@ -24,6 +26,7 @@ type Props = {
 };
 
 export function UserInfo({ expanded = false, align = 'left', disabled = false, pinned = true, edge = 'left' }: Props) {
+  const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
   const { data: session } = useSession();
   const [isOpen, setIsOpen] = useState(false);
   const [view, setView] = useState<'account' | 'inbox'>('account');
@@ -98,8 +101,10 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
     <>
       <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setIsOpen(false)} />
       <div
-        className="fixed bg-black/90 backdrop-blur-xl rounded-xl overflow-hidden"
+        data-theme-id={dockTheme.id}
+        className="fixed backdrop-blur-xl rounded-xl overflow-hidden"
         style={{
+          ...themeScopeStyle(dockTheme), backgroundColor: 'rgba(var(--w-bg-rgb), 0.96)',
           zIndex: 9999, minWidth: '12rem',
           ...(edge === 'bottom'
             ? { bottom: window.innerHeight - pos.top, left: pos.left }
@@ -229,7 +234,7 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
         disabled={disabled}
         className={cn(
           'rounded-xl transition flex items-center shrink-0 overflow-hidden',
-          dockSurf ? dockSurf.bg : (pinned ? 'bg-white/12 hover:bg-white/20' : 'bg-neutral-700 hover:bg-neutral-600'),
+          dockSurf.bg,
           expanded ? 'w-full h-11 px-0' : 'w-12 h-11 justify-center',
           align === 'right' ? 'flex-row-reverse' : 'flex-row',
           'disabled:opacity-40 disabled:cursor-not-allowed',
@@ -237,7 +242,7 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
         title={unread > 0 ? `${name} — ${unread} unread` : name}
       >
         <div className="relative w-12 h-full flex items-center justify-center shrink-0">
-          <UserAvatar userId={userId ?? null} name={name} size={20} />
+          <UserAvatar userId={userId ?? null} name={name} size={30} />
           {unread > 0 ? <UnreadDot className="absolute top-2 right-2.5" /> : null}
         </div>
         {expanded ? (
