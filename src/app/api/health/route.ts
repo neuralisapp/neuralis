@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getBootstrapStatus, peekRuntime } from '@/server/host/bootstrap';
+import { getSetupState } from '@/server/init';
 
 /** Coarse, public-safe health; never starts a runtime or reveals package errors. */
 export const dynamic = 'force-dynamic';
 
 export async function GET(): Promise<NextResponse> {
+  // An unconfigured instance is unhealthy whatever its runtime would say; `code` is the closed reason set.
+  const setup = await getSetupState();
+  if (!setup.configured) return NextResponse.json({ status: 'setup_required', code: setup.reason }, { status: 503 });
   const state = getBootstrapStatus();
   if (state.phase === 'error') {
     // `code` is a closed-set class (a data-format refusal reason, else `bootstrap_failed`);

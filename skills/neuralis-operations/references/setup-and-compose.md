@@ -92,7 +92,6 @@ change an infrastructure answer. What it preserves, and why each one matters:
 | Everything in `platform.json` | Those are admin decisions made through the UI. Only missing keys are added; of the package-declared tunables setup seeds only the embedding target and, for a no-embedding choice, `embeddingEnabled: false` — every other tunable (agent step cap, temperature, project cap) is resolved from its declaration, because seeding one freezes a value the package owns. |
 | `NEXTAUTH_SECRET` | Rotating it invalidates every session — everyone is logged out with no warning. Delete `.env` to rotate deliberately. |
 | `QDRANT_API_KEY` | Every Qdrant client authenticates with it and the compose hands the SAME value to the Qdrant server — re-minting it over a live value locks the server out until the next recreate. Minted only in docker/binary modes; in external mode the wizard asks (empty = unauthenticated server) and preserves what you typed. Delete the line to rotate deliberately, then recreate the stack. |
-| The MCP API key | Every configured MCP client authenticates with it. |
 | Existing source configs | They carry edits to permissions, uri-policy rows and sync excludes. Only a missing one is seeded. |
 | Users and projects | The wizard has never deleted either. |
 | `NEURALIS_COMPOSE_PROJECT` | The Compose project name prefixes the named volumes, the networks and every container name — renaming it orphans `qdrant-data`. |
@@ -141,9 +140,9 @@ loudly — writing nothing — when `.env` has no `QDRANT_API_KEY`: the emitted
 An install that runs the published image gets `image: neuralisapp/neuralis:<tag>` with the
 `.env` `NEURALIS_IMAGE_TAG` value — never a moving tag, never a default: without the line
 `--compose-only` refuses the same way, writing nothing. To move to another release (or back
-to the previous one) by hand — the only way on a pull-only install, which has no install
-folder to run `neuralis update` in — change that line, then `npx neuralis setup --compose-only`
-(or the in-container form below) and `docker compose up -d -V`. An npm install folder that registers packages of its own runs its
+to the previous one) by hand — the only way in an image-only folder, which has no
+`package.json` for `neuralis update` — change that line, then `npx neuralis setup --compose-only`
+(in an image-only folder its image form, below) and `docker compose up -d -V`. An npm install folder that registers packages of its own runs its
 derived image instead: a `build:` block over the generated `operator-image/` context (a Dockerfile
 `FROM` that same tag, `operator.json` — the folder's dependency lines but `neuralis` — and a copy of
 the build helper) with `image: neuralis-<project>:<tag>-<hash>`; the hash covers the context, so a
@@ -228,25 +227,45 @@ docker compose config
 
 ## Running the wizard inside a container
 
-The wizard can run in a one-shot container and write onto a host bind, which is
-how a pull-only install (no source tree) configures itself:
+With Docker and no Node.js, the wizard runs in a one-shot container of the image and
+writes the install folder onto host binds (Linux or WSL2):
 
 ```bash
-docker run -it --rm \
-  -v ~/.neuralis:/.neuralis \
-  -v "$PWD":/out \
-  -p 1455:1455 \
-  neuralisapp/neuralis:<version> \
-  node bin/neuralis.mjs setup --output /out \
-    --uid "$(id -u)" --gid "$(id -g)" --docker-gid "$(stat -c %g /var/run/docker.sock)"
+mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis
+docker run -it --rm --user "$(id -u):$(id -g)" \
+  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
+  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
+  -v "$PWD:$PWD" \
+  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --output "$PWD"
+docker compose up -d
 ```
 
 `<version>` is the release you install; on a fresh install the wizard records the version
-baked into that image as `NEURALIS_IMAGE_TAG`. Two things the container cannot work out for
-itself, hence the flags: it runs as its own user (not yours), and the docker socket's group is invisible through the
-bind. Those values are baked into the generated compose — a wrong one produces a
-stack that cannot write its own data directory. The published port is for the
-OAuth loopback callback, if you sign in to a provider during setup.
+baked into that image as `NEURALIS_IMAGE_TAG`. What each part is for:
+
+- **Both folders exist before `docker run`**, or Docker creates the bind sources root-owned.
+- **`--user "$(id -u):$(id -g)"`** — the wizard writes the data home and the folder as you,
+  and its detection then records your ids (and, through the bound socket, the socket's group)
+  in the compose file. Without it the image's own user cannot write a home you own: setup
+  refuses with the data-root check and names this flag.
+- **The socket, with its group added** — setup uses it to detect Docker, to read the vector
+  store's volume and to pre-pull the desktop image. Without a Docker answering through it,
+  setup in the image refuses before writing anything.
+- **`NEURALIS_HOST_HOME`** — the compose file binds the data home by its HOST path, and the
+  container sees only `/.neuralis`. In the image setup refuses without it while the home is
+  `/.neuralis`; a home bound at its own host path (`-e NEURALIS_HOME=<path> -v <path>:<path>`)
+  needs none. The running app container carries the same value, so a `--compose-only` there
+  binds the host paths too.
+- **The folder at its own path, and `--output "$PWD"`** — `.env` and the compose files land in
+  it, and every path setup prints is a host path.
+
+A refusal prints the command and writes nothing. `--uid`, `--gid` and `--docker-gid` still
+override what detection recorded. The update is the same `docker run` without `-it`, with
+`setup --compose-only` — the five commands in the main page's §Update.
+
+The container's loopback is not the host's: setup does not see an Ollama or Qdrant running on
+the host, and the in-setup ChatGPT sign-in cannot receive its callback. On Linux add
+`--network host` to the `docker run` for both; otherwise add the providers later in Admin.
 
 ## Installing without Docker
 
@@ -268,7 +287,7 @@ starts in a degraded in-memory vector mode and re-probes in the background.
 | `OAUTH_ACCESS_TOKEN_TTL` | Lifetime (seconds) of a `:3101` OAuth access token | Optional, default `3600`. Deploy topology, not a platform-config key: a config write must never be able to widen a token's lifetime. Refresh and auth-code lifetimes are code constants. |
 | `KEEP_ALIVE_TIMEOUT` | :3100 server keep-alive timeout (ms) | Default `55000` (baked in `Dockerfile`; the prod `next start` script takes it via the `--keepAliveTimeout` flag in `package.json` — `next dev` does not accept the flag). Raised from Node's 5s default to kill the reused-keep-alive-socket `ERR_CONNECTION_RESET` race; stays under the 60s `headersTimeout`. Preserve SSE and WebSocket transport through the reverse proxy. |
 | `NEURALIS_HOME` | Data root (in-container: `/.neuralis`) | Setup auto-detects per platform. |
-| `NEURALIS_HOST_HOME` | Host-pair root for the default `data`/`packages` project sources | Required in Docker so their vector payloads carry host paths, not container paths. Custom mounts use the `NEURALIS_MOUNT_*` pair instead. |
+| `NEURALIS_HOST_HOME` | Host path of the data home: the default `data`/`packages` project sources' host-pair root, and the compose binds setup writes from inside a container | Required in Docker so vector payloads carry host paths, not container paths. Setup run in the image refuses without it while the home is `/.neuralis`. Custom mounts use the `NEURALIS_MOUNT_*` pair instead. |
 | `NEURALIS_MOUNT_<slug>` / `NEURALIS_MOUNT_HOST_<SLUG>` | Container path + host-pair root for a `npx neuralis mount` bind | Written to `docker-compose.override.yml`. `discoverRuntimeStack` lists them; `LocalDiskConnector` derives a source's `hostRoot` from the matching pair when the config omits one. |
 | `NEURALIS_HOST_BROKER_SECRET_FILE` | Container path of the bind-mounted host-broker secret | Emitted into the generated compose only when the operator has provisioned the broker. The secret is read from a FILE, never from platform config (config is writable behind the grantable `platform.config` feature). The broker process itself reads `NEURALIS_HOST_BROKER_{SOCKET,LISTEN,SECRET_FILE,CEILING_FILE,SCRATCH_ROOT,SANDBOXER,ORIGIN_ALLOW}` on the **host**, set by its unit — `npx neuralis host-broker init` prints them. |
 | `QDRANT_URL` | Vector DB endpoint | `http://qdrant:6333` in Docker, `http://localhost:6333` native. |

@@ -7,7 +7,7 @@ import { execFileSync, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { access, readFile, stat } from 'node:fs/promises';
 import { platform as osPlatform } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import http from 'node:http';
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { readEnvFile } from './envFile.mts';
@@ -178,6 +178,22 @@ export function resolveConfigDir(
 ): string {
   if (outputOverride) return outputOverride;
   return env.isClone || !inContainer ? env.projectRoot : env.neuralisHome;
+}
+
+/**
+ * The HOST path of the data home — what a generated compose file binds and
+ * hands the app as `NEURALIS_HOST_HOME`. Inside a container the process sees
+ * the bind target, so the host path arrives as an absolute `NEURALIS_HOST_HOME`
+ * (the one-shot setup container is given it; the running app container already
+ * carries it). Anywhere else the data home is its own host path. Files are
+ * still read and written at `neuralisHome`.
+ */
+export function resolveHostHome(
+  neuralisHome: string,
+  inContainer = existsSync('/.dockerenv'),
+  hostHome: string | undefined = process.env.NEURALIS_HOST_HOME,
+): string {
+  return inContainer && hostHome && isAbsolute(hostHome) ? hostHome : neuralisHome;
 }
 
 /**

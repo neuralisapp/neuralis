@@ -2,12 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { register } from '../../instrumentation';
 import { getRuntime } from '../host/bootstrap';
 import { ensureCommunityRuntime, getCommunityPackageRegistry } from '../packages/runtime';
+import type { SetupState } from '../init';
 
 const mocks = vi.hoisted(() => ({
   runtime: vi.fn<() => Promise<void>>(), ui: vi.fn<() => Promise<void>>(),
   whenReady: vi.fn<() => Promise<void>>(), registry: { listPackages: vi.fn(() => []) },
-  error: vi.fn(), order: [] as string[], startMcp: vi.fn<() => Promise<void>>(),
+  error: vi.fn(), info: vi.fn(), order: [] as string[], startMcp: vi.fn<() => Promise<void>>(),
+  setup: vi.fn<() => Promise<SetupState>>(),
 }));
+vi.mock('../init', () => ({ getSetupState: () => mocks.setup() }));
 vi.mock('../upgradeWatchdog', () => ({ installUpgradeWatchdog: () => mocks.order.push('watchdog') }));
 vi.mock('../requestPeerStamp', () => ({ installRequestPeerStamp: () => mocks.order.push('peer') }));
 vi.mock('../host/shutdown', () => ({ installShutdownHandlers: () => mocks.order.push('shutdown'), addShutdownStep: vi.fn() }));
@@ -21,6 +24,7 @@ vi.mock('../host/bootstrap', () => ({
 }));
 vi.mock('../logging/setup', () => ({ getLogger: () => ({ child: (scope: string) => ({
   error: (message: string) => mocks.error(scope, message),
+  info: (message: string) => mocks.info(scope, message),
 }) }) }));
 vi.mock('../host/principalRevocation', () => ({ startPrincipalRevocation: vi.fn() }));
 vi.mock('../store/ProjectStore', () => ({ verifyProjectRecords: vi.fn() }));
@@ -41,6 +45,31 @@ beforeEach(() => {
   mocks.whenReady.mockReset().mockResolvedValue();
   mocks.ui.mockReset().mockResolvedValue();
   mocks.error.mockClear();
+  mocks.info.mockClear();
+  mocks.setup.mockReset().mockResolvedValue({ configured: true });
+});
+
+describe('the setup state', () => {
+  it('without the session secret: one line naming the fix, and nothing that needs the secret starts', async () => {
+    mocks.setup.mockResolvedValue({ configured: false, reason: 'secret_missing' });
+    vi.stubEnv('MCP_HTTP_PORT', '3101');
+    await register();
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown']);
+    expect(mocks.runtime).not.toHaveBeenCalled();
+    expect(mocks.startMcp).not.toHaveBeenCalled();
+    expect(mocks.error).toHaveBeenCalledTimes(1);
+    expect(mocks.error).toHaveBeenCalledWith('setup', expect.stringMatching(/NEXTAUTH_SECRET is not set\. Run setup/));
+  });
+
+  it('with the secret but no owner account: the boot runs and one info line says so', async () => {
+    mocks.setup.mockResolvedValue({ configured: false, reason: 'setup_incomplete' });
+    mocks.runtime.mockResolvedValue();
+    await register();
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'monitor']);
+    await vi.waitFor(() => expect(mocks.runtime).toHaveBeenCalled());
+    expect(mocks.info).toHaveBeenCalledTimes(1);
+    expect(mocks.info).toHaveBeenCalledWith('setup', expect.stringContaining('no owner account yet'));
+  });
 });
 
 describe('runtime-ready attachment prewarm', () => {

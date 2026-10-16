@@ -7,8 +7,8 @@
  * size limit), the path-agnostic safe error surface, `listen`, the companion
  * loop and shutdown. Every surface on it is a package COMPANION mounted by
  * `mountPackageCompanions` through PORTS ONLY — the external MCP endpoint and
- * its OAuth 2.1 authorization server included (OAuth JWT, agent API key,
- * community API key; no env fallback, no x-* header scope override — the
+ * its OAuth 2.1 authorization server included (OAuth JWT, agent API key; no
+ * env fallback, no x-* header scope override — the
  * owning package enforces that inside its own closure).
  */
 import express from 'express';
@@ -16,13 +16,14 @@ import cors from 'cors';
 import { createServer } from 'node:http';
 import { getRuntime } from '../host/bootstrap';
 import { resolveSessionUser } from './resolveSessionUser';
+import { mcpHttpPort, resolveMcpBaseUrl } from './mcpBaseUrl';
 import { mountPackageCompanions, type CompanionMountHandle } from './mountPackageCompanions';
 import { addShutdownStep } from '../host/shutdown';
 import { writeAuditLog, type AuditAction } from '../store/AuditStore';
 import { getProjectById, listProjectsForUser } from '../store/ProjectStore';
 import { getPlatformConfigStore } from '../store/PlatformConfigStore';
 
-const PORT = Number(process.env.MCP_HTTP_PORT || 3101);
+const PORT = mcpHttpPort();
 
 /**
  * The `:3101` request-body parsers, built once with the configured size limit.
@@ -143,7 +144,7 @@ export async function startMcpServer(): Promise<void> {
 
   // The deployment's public facts the OAuth authorization server needs — read
   // HERE, from the host's own env, and handed over as port VALUES.
-  const mcpBaseUrl = process.env.MCP_BASE_URL?.trim() || `http://localhost:${PORT}`;
+  const mcpBaseUrl = resolveMcpBaseUrl();
   const loginRedirectUrl = process.env.APP_URL?.trim() || process.env.NEXTAUTH_URL?.trim() || 'http://localhost:3100';
   const allowedRedirectHosts = process.env.OAUTH_ALLOWED_REDIRECT_HOSTS?.split(',').map((h) => h.trim()).filter(Boolean);
 

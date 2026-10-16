@@ -71,3 +71,22 @@ export function spell(verb: string, at?: Pick<CliContext, 'installDir' | 'packag
   }
   return spellOn(installLayout(installDir, at.packageDir), verb);
 }
+
+/**
+ * The documented Docker-only setup, with the image's version: the image writes
+ * an install folder the host runs, as the host user, through the bound socket.
+ * The setup form is the installation guide's command byte for byte (a test holds
+ * it against the setup-required page); the `--compose-only` form is the first
+ * command of an image-only folder's update.
+ */
+export function imageSetupCommand(version: string, composeOnly = false): string[] {
+  return [
+    composeOnly ? 'cd <the folder that holds docker-compose.yml>' : 'mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis',
+    `docker run ${composeOnly ? '' : '-it '}--rm --user "$(id -u):$(id -g)" \\`,
+    '  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \\',
+    '  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \\',
+    '  -v "$PWD:$PWD" \\',
+    `  neuralisapp/neuralis:${version} node bin/neuralis.mjs setup${composeOnly ? ' --compose-only' : ''} --output "$PWD"`,
+    ...(composeOnly ? [] : ['docker compose up -d']),
+  ];
+}

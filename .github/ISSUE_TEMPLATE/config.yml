@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Installation guide
+    url: https://docs.neuralisapp.com/getting-started/installation
+    about: Requirements, the three install channels and what to do if something fails.
+  - name: Report a security vulnerability
+    url: https://github.com/neuralisapp/neuralis/security/policy
+    about: Never in a public issue — the security policy sends it to security@neuralisapp.com.

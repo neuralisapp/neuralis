@@ -1,0 +1,67 @@
+name: Install or first start failed
+description: Setup, the first start or the first sign-in did not work.
+title: "Install failed: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Check [If something fails](https://docs.neuralisapp.com/getting-started/installation#if-something-fails) first: it covers an old Node.js, a missing compiler, Docker that does not answer, the "Neuralis is not set up yet" page and a busy port.
+
+        **Never paste your `.env`, passwords, API keys or tokens.** Logs can carry them too: read what you paste.
+  - type: dropdown
+    id: channel
+    attributes:
+      label: How are you installing?
+      options:
+        - Docker image only (setup run from the image)
+        - npm (npm create neuralis)
+        - Clone of the public repository
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Neuralis version
+      description: The release you install, e.g. the `<version>` in `neuralisapp/neuralis:<version>`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: For example Ubuntu 24.04, Windows 11 with WSL2 (Ubuntu), macOS 15.
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: "`node --version`"
+      description: Leave empty when you use the Docker image only.
+  - type: textarea
+    id: docker
+    attributes:
+      label: "`docker version`"
+      render: text
+  - type: textarea
+    id: step
+    attributes:
+      label: The step that failed
+      description: The exact command you ran, in order, up to the one that failed.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: message
+    attributes:
+      label: The exact message
+      description: What the failing command printed, or what the browser showed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: The last log lines
+      description: For a started container, `docker compose logs --tail 50 neuralis` in the install folder. Remove anything secret first.
+      render: text

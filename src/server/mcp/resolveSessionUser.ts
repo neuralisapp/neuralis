@@ -20,6 +20,8 @@ export type SessionUser = {
   name: string;
   /** The epoch the cookie was issued under — verified current here; the OAuth consent records it. */
   sessionEpoch: number;
+  /** The record's forced-password-change flag — the OAuth consent refuses such a user, like the catch-all does. */
+  mustChangePassword: boolean;
 };
 
 type RequestLike = {
@@ -49,13 +51,15 @@ export async function resolveSessionUser(req: RequestLike): Promise<SessionUser 
 
     const userId = (token as Record<string, unknown>).userId;
     if (!userId || typeof userId !== 'string') return null;
-    if (!(await resolveActiveUser(userId, { sessionEpoch: token.sessionEpoch }))) return null;
+    const record = await resolveActiveUser(userId, { sessionEpoch: token.sessionEpoch });
+    if (!record) return null;
 
     return {
       userId,
       email: typeof token.email === 'string' ? token.email : '',
       name: typeof token.name === 'string' ? token.name : '',
       sessionEpoch: typeof token.sessionEpoch === 'number' ? token.sessionEpoch : 0,
+      mustChangePassword: record.mustChangePassword === true,
     };
   } catch {
     return null;

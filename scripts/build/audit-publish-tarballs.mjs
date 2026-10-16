@@ -53,6 +53,7 @@ const PACKAGES = [
   'packages/machine-core',
   'neuralis',
   'create-neuralis',
+  'packages/cli',
 ];
 
 /** Never in a tarball or the public host tree, whatever the whitelist says. */

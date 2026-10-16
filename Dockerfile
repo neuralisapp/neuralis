@@ -439,6 +439,21 @@ RUN extism-js --version && wasm-merge --version && wasm-opt --version
 COPY --from=landlock-dl /tmp/nrs-sandboxer /usr/local/bin/nrs-sandboxer
 RUN ( nrs-sandboxer --selftest || [ $? -eq 91 ] )
 
+# The thin `neuralis` command line (packages/cli, built above with every other
+# workspace package): a self-contained bundle, no node_modules of its own,
+# root-owned under /usr/local/lib/neuralis-cli and on PATH as
+# /usr/local/bin/neuralis — so a skill script in a confined `execute` shell runs
+# `neuralis request …` with its session ticket (Landlock reads `/usr`). It is not
+# a host dependency; the host's operator command line stays
+# `node /neuralis/bin/neuralis.mjs <verb>`.
+COPY --from=builder /src/packages/cli/package.json /src/packages/cli/LICENSE.md /src/packages/cli/.mcp.json /usr/local/lib/neuralis-cli/
+COPY --from=builder /src/packages/cli/dist /usr/local/lib/neuralis-cli/dist
+COPY --from=builder /src/packages/cli/skills /usr/local/lib/neuralis-cli/skills
+COPY --from=builder /src/packages/cli/.claude-plugin /usr/local/lib/neuralis-cli/.claude-plugin
+COPY --from=builder /src/packages/cli/.codex-plugin /usr/local/lib/neuralis-cli/.codex-plugin
+RUN ln -s /usr/local/lib/neuralis-cli/dist/neuralis.mjs /usr/local/bin/neuralis && \
+    neuralis --version
+
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
@@ -551,6 +566,10 @@ RUN mkdir -p /.neuralis/app /.neuralis/projects && chmod -R 777 /.neuralis
 RUN chmod 1777 /neuralis
 
 USER nextjs
+
+# /api/health is 200 only for a configured, ready instance (503 `setup_required` before setup).
+# A compose `healthcheck:` overrides this; it covers a container started without compose.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=50s --retries=3 CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3100}/api/health" || exit 1
 
 EXPOSE 3100 3101
 

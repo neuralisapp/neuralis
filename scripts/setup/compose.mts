@@ -548,9 +548,10 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
 
   lines.push(
     '    # Readiness: /api/health is 200 only once the in-process agent-core',
-    '    # bootstrap completes — not merely when the HTTP server binds.',
+    '    # bootstrap completes — not merely when the HTTP server binds. wget, not',
+    '    # a node process: one small fork per probe.',
     '    healthcheck:',
-    `      test: ["CMD-SHELL", "node -e \\"fetch('http://localhost:3100/api/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))\\""]`,
+    '      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3100/api/health || exit 1"]',
     '      interval: 15s',
     '      timeout: 5s',
     '      retries: 5',

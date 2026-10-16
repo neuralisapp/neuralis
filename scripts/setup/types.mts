@@ -93,7 +93,6 @@ export type SetupConfig = {
   projectId: string;
   projectName: string;
   nextAuthSecret: string;
-  mcpApiKey: string;
   /**
    * Where neuralis will actually run. `docker` means the app container is the
    * runtime — setup stores `host.docker.internal` in place of `127.0.0.1` so

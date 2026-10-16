@@ -197,6 +197,14 @@ describe('the Qdrant image is the RECORDED version, digest-pinned', () => {
   });
 });
 
+describe('the app healthcheck', () => {
+  it('probes /api/health with wget — one small fork per probe, no node process', () => {
+    const block = serviceBlock(buildComposeContent(baseInput(), STAMP), 'neuralis');
+    expect(block).toContain('      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3100/api/health || exit 1"]\n');
+    expect(block).not.toContain('node -e');
+  });
+});
+
 describe('the image channel pins ONE exact release — never a moving tag', () => {
   it('emits neuralisapp/neuralis:<the recorded tag>, and the word `latest` appears nowhere', () => {
     const content = buildComposeContent(baseInput({ monorepo: false, imageTag: '0.1.0' }), STAMP);

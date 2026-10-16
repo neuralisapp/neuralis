@@ -67,6 +67,9 @@ export type AuditAction =
   | 'skill.session_ticket_minted'
   | 'skill.session_call'
   | 'skill.session_ticket_rejected'
+  // An external client's (the `neuralis` CLI) OAuth-bearer call on the package catch-all — token-free.
+  | 'cli.session_call'
+  | 'cli.session_rejected'
   // Which declared credential ids a skill activation projected, at which tier ceiling (ids only).
   | 'skill.credentials_projected'
   // modular-meerkat Inc 4 — self-scope channel credential writes (F7).

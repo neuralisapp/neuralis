@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BootstrapStatus } from '@/server/host/bootstrap';
 import type { RuntimeHealthReport } from '@neuralis/package-system/contracts';
+import type { SetupState } from '@/server/init';
 const mocks = vi.hoisted(() => ({
   getBootstrapStatus: vi.fn<() => BootstrapStatus>(),
   health: vi.fn<() => Promise<RuntimeHealthReport>>(), booted: true,
+  getSetupState: vi.fn<() => Promise<SetupState>>(),
 }));
+vi.mock('@/server/init', () => ({ getSetupState: mocks.getSetupState }));
 vi.mock('@/server/host/bootstrap', () => ({
   getBootstrapStatus: mocks.getBootstrapStatus,
   peekRuntime: () => mocks.booted ? { health: mocks.health } : null,
@@ -13,6 +16,7 @@ import { GET } from '../route';
 const base: BootstrapStatus = { phase: 'starting', error: null, errorCode: null, startedAt: Date.now() - 5_000, readyAt: null };
 beforeEach(() => {
   mocks.booted = true;
+  mocks.getSetupState.mockResolvedValue({ configured: true });
   mocks.getBootstrapStatus.mockReturnValue(base);
   mocks.health.mockResolvedValue({ status: 'ok', packages: [], refused: [] });
 });
@@ -59,6 +63,15 @@ describe('GET /api/health', () => {
       expect(await response.json()).toEqual({ status: 'error', error: 'bootstrap_failed', code: errorCode });
     },
   );
+  it.each(['secret_missing', 'setup_incomplete'] as const)('an unconfigured instance (%s) answers 503 setup_required before the runtime is asked', async (reason) => {
+    mocks.getSetupState.mockResolvedValue({ configured: false, reason });
+    mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt: Date.now() });
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: 'setup_required', code: reason });
+    expect(mocks.getBootstrapStatus).not.toHaveBeenCalled();
+    expect(mocks.health).not.toHaveBeenCalled();
+  });
   it('a health hook failure gives a classified failure', async () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready' });
     mocks.health.mockRejectedValueOnce(new Error('/private/token secret'));

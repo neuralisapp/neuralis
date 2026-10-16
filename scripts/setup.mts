@@ -14,11 +14,11 @@
  *                    channel-derived location (monorepo: neuralis/, otherwise
  *                    ~/.neuralis). Lets the wizard run inside a one-shot
  *                    container and emit onto a host bind.
- *   --uid <n>        Host user id for the generated compose. Detection is
- *   --gid <n>        wrong inside a container — it sees its own user, not the
- *   --docker-gid <n> host's, and the docker socket's group is invisible
- *                    through the bind. Read them on the HOST with:
- *                      id -u ; id -g ; stat -c %g /var/run/docker.sock
+ *   --uid <n>        Override the user, group and docker-socket group the
+ *   --gid <n>        generated compose runs with. Detection reads the running
+ *   --docker-gid <n> process and the socket, so in the image — started with
+ *                    `--user "$(id -u):$(id -g)"` and the socket bound, as
+ *                    `imageSetupCommand` prints — it already sees the host's.
  */
 
 import { createInterface } from 'node:readline/promises';
@@ -28,7 +28,7 @@ import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import { randomBytes, randomUUID, createCipheriv, createHash, hkdf } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import bcrypt from 'bcryptjs';
 // The app's own slug + project-id derivation (`src/lib/utils.ts`, dependency-free).
 import { slugify } from '../src/lib/utils';
@@ -36,8 +36,8 @@ import { slugify } from '../src/lib/utils';
 // `./setup/records.mts`.
 
 import { CliExit, type CliContext } from './cli/registry.mts';
-import { spell } from './cli/spelling.mts';
-import { detectEnvironment, resolveConfigDir, type DetectedEnv } from './setup/detect.mts';
+import { imageSetupCommand, installLayout, spell, type InstallLayout } from './cli/spelling.mts';
+import { detectEnvironment, resolveConfigDir, resolveHostHome, type DetectedEnv } from './setup/detect.mts';
 import { askHidden } from './setup/ownerCheck.mts';
 import { writeMergedPlatformConfig } from './setup/platformConfig.mts';
 import {
@@ -196,7 +196,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.2.1',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.0',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -275,7 +275,16 @@ function printBanner() {
 
 // ── Detection Phase ────────────────────────────────────────────
 
-function printDetection(env: DetectedEnv) {
+/** How each install layout reads in the detection summary. */
+const LAYOUT_LABEL: Record<InstallLayout, string> = {
+  monorepo: 'git clone (development)',
+  folder: 'npm install folder',
+  clone: 'public host clone',
+  container: 'Docker image',
+  'host-tree': 'host package',
+};
+
+function printDetection(env: DetectedEnv, layout: InstallLayout) {
   heading('Detecting environment');
 
   const platformNames: Record<string, string> = {
@@ -305,8 +314,55 @@ function printDetection(env: DetectedEnv) {
   }
 
   info(`Data dir: ${c.bold}${env.neuralisHome}${c.reset}${env.existingSetup ? ` ${c.dim}(existing setup found)${c.reset}` : ''}`);
-  info(`Mode: ${c.bold}${env.isClone ? 'git clone (development)' : 'npm install'}${c.reset}`);
+  info(`Mode: ${c.bold}${LAYOUT_LABEL[layout]}${c.reset}`);
 }
+
+/** The image's own data home (`ENV NEURALIS_HOME` in the Dockerfile): a bind target, never a host path. */
+const IMAGE_DATA_HOME = '/.neuralis';
+
+/** The fix lines every image-channel refusal ends with. */
+function imageFix(version: string, composeOnly: boolean): string[] {
+  return ['Run it from the image like this (Linux or WSL2):', ...imageSetupCommand(version, composeOnly).map((line) => `  ${line}`), 'Nothing was written.'];
+}
+
+/**
+ * Setup inside the image writes an install folder for the HOST, so before any
+ * prompt or write it needs what the host alone can say: where the data home is
+ * on the host (an absolute `NEURALIS_HOST_HOME`, unless the home is bound at its
+ * own host path) and a reachable Docker (the socket). Write access is the data
+ * root check (`ensureWritableOrExplain`). Null when nothing is missing or this
+ * is not the image.
+ */
+export function imageSetupRefusal(input: {
+  layout: InstallLayout;
+  neuralisHome: string;
+  hostHome: string | undefined;
+  docker: boolean;
+  version: string;
+  composeOnly: boolean;
+}): CliExit | null {
+  if (input.layout !== 'container') return null;
+  const fix = imageFix(input.version, input.composeOnly);
+  if (input.hostHome && !isAbsolute(input.hostHome)) {
+    return new CliExit(1, `NEURALIS_HOST_HOME must be the absolute host path of the data home, not "${input.hostHome}".`, fix);
+  }
+  if (!input.hostHome && input.neuralisHome === IMAGE_DATA_HOME) {
+    return new CliExit(1, 'NEURALIS_HOST_HOME is not set, so this container cannot tell where its data home lives on the host.', [
+      `The compose file setup writes binds the data home by its host path; inside the image it is only ${IMAGE_DATA_HOME}.`,
+      ...fix,
+    ]);
+  }
+  if (!input.docker) {
+    return new CliExit(1, 'Docker is not reachable from this container: the socket is not bound, or this user may not open it.', [
+      'Setup uses it to detect Docker, to read the vector store\'s volume and to pre-pull the desktop image.',
+      ...fix,
+    ]);
+  }
+  return null;
+}
+
+/** The image channel's half of a data-root refusal: the host path and the command, never a prompt. */
+type ImageRun = { hostHome: string; fix: string[] };
 
 function ownershipFixCommand(root: string, platform: import('./setup/detect.mts').Platform): string {
   if (platform === 'windows') {
@@ -325,7 +381,14 @@ function isRootOwned(details: import('node:fs').Stats, platform: import('./setup
   return details.uid === 0 && process.getuid?.() !== 0;
 }
 
-async function tryAutoFixOwnership(root: string, platform: import('./setup/detect.mts').Platform): Promise<void> {
+async function tryAutoFixOwnership(root: string, platform: import('./setup/detect.mts').Platform, image: ImageRun | null): Promise<void> {
+  if (image) {
+    // A sudo inside the image cannot reach the host folder Docker created.
+    throw new CliExit(1, `Data root ${image.hostHome} is owned by root: Docker created it because it did not exist before \`docker run\`.`, [
+      `On the host: ${ownershipFixCommand(image.hostHome, platform)}`,
+      ...image.fix,
+    ]);
+  }
   const fixCmd = ownershipFixCommand(root, platform);
   fail(`Data root ${root} is owned by root (Docker likely created it).`);
   console.log(`  ${sym.arrow} Fix: ${c.bold}${fixCmd}${c.reset}`);
@@ -349,12 +412,13 @@ async function ensureWritableOrExplain(
   target: string,
   root: string,
   platform: import('./setup/detect.mts').Platform,
+  image: ImageRun | null,
 ): Promise<void> {
   const details = await stat(target).catch(() => null);
 
   // Check root ownership first — offer auto-fix
   if (details && isRootOwned(details, platform)) {
-    await tryAutoFixOwnership(root, platform);
+    await tryAutoFixOwnership(root, platform, image);
     return; // Re-check not needed — chown -R covers everything
   }
 
@@ -362,6 +426,13 @@ async function ensureWritableOrExplain(
     await access(target, fsConstants.W_OK);
   } catch {
     const owner = details ? `${details.uid}:${details.gid}` : 'unknown';
+    if (image) {
+      // Never a uid test: the image user's id can be the host user's own.
+      throw new CliExit(1, `Data root is not writable: ${target} (owner ${owner}).`, [
+        'The image runs as its own user unless it is given yours: --user "$(id -u):$(id -g)".',
+        ...image.fix,
+      ]);
+    }
     throw new Error(
       `Data root is not writable: ${target} (owner ${owner}). ` +
       `Fix ownership first, then re-run setup:\n  ${ownershipFixCommand(root, platform)}`,
@@ -369,14 +440,14 @@ async function ensureWritableOrExplain(
   }
 }
 
-async function preflightDataRoot(env: DetectedEnv): Promise<void> {
+async function preflightDataRoot(env: DetectedEnv, image: ImageRun | null): Promise<void> {
   const root = env.neuralisHome;
 
   try {
     await access(root);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      await ensureWritableOrExplain(root, root, env.platform);
+      await ensureWritableOrExplain(root, root, env.platform, image);
       return;
     }
     try {
@@ -393,7 +464,7 @@ async function preflightDataRoot(env: DetectedEnv): Promise<void> {
   // Root exists — check ownership on the root dir itself first
   const rootStats = await stat(root).catch(() => null);
   if (rootStats && isRootOwned(rootStats, env.platform)) {
-    await tryAutoFixOwnership(root, env.platform);
+    await tryAutoFixOwnership(root, env.platform, image);
     // After fix, all children are fixed too — skip per-path checks
     return;
   }
@@ -410,7 +481,7 @@ async function preflightDataRoot(env: DetectedEnv): Promise<void> {
   for (const path of criticalPaths) {
     try {
       await access(path);
-      await ensureWritableOrExplain(path, root, env.platform);
+      await ensureWritableOrExplain(path, root, env.platform, image);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw err;
@@ -1575,7 +1646,7 @@ async function chooseMachineVariant(env: DetectedEnv): Promise<MachineChoice> {
   if (!skipPrefetch) {
     step(`Starting background pull of ${c.bold}${variant.derivativeImage}${c.reset}…`);
     try {
-      await backgroundPullMachineImage(variant.derivativeImage);
+      await backgroundPullMachineImage(variant.derivativeImage, env.neuralisHome);
       info('Background pull kicked off — the first desktop open may still wait for the download or need a retry.');
     } catch (err) {
       warn(`Background pull failed (continuing anyway): ${err instanceof Error ? err.message : String(err)}`);
@@ -1587,12 +1658,12 @@ async function chooseMachineVariant(env: DetectedEnv): Promise<MachineChoice> {
   return { variant, skipPrefetch };
 }
 
-async function backgroundPullMachineImage(image: string): Promise<void> {
+async function backgroundPullMachineImage(image: string, dataHome: string): Promise<void> {
   // Spawn an independent `docker pull` process and detach so the setup CLI
   // exits without waiting. Errors become log output — we don't block setup
   // on a slow/failed pull.
   const { spawn } = await import('node:child_process');
-  const logDir = join(process.env.HOME ?? '.', '.neuralis', 'app', 'logs');
+  const logDir = join(dataHome, 'app', 'logs');
   await mkdir(logDir, { recursive: true, mode: 0o700 }).catch(() => { /* ignore — best-effort */ });
   const logPath = join(logDir, 'machine-image-prefetch.log');
   const { openSync } = await import('node:fs');
@@ -1626,22 +1697,6 @@ async function probeComposeProjects(): Promise<ComposeProjectRow[] | null> {
     child.on('error', () => resolve(null));
     child.on('close', (code) => resolve(code === 0 ? parseComposeLs(out) : null));
   });
-}
-
-/**
- * Whether an MCP API key already exists in the credential store.
- *
- * Every configured MCP client authenticates with that key, so a re-run must
- * not mint a new one — the clients would all break with nothing saying why.
- * Existence is enough: the file is left in place and never decrypted here.
- */
-async function mcpApiKeyExists(neuralisHome: string): Promise<boolean> {
-  try {
-    await access(join(neuralisHome, 'app', 'credentials', 'global', 'mcp.communityApiKey.enc.json'));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // ── Three-store write: .env + platform.json + CredentialStore ─
@@ -1687,13 +1742,6 @@ async function writeCredentials(
     const credId = LLM_CREDENTIAL_MAP[envVar];
     if (!credId || !value.trim()) continue;
     await writeCredentialFile(config.neuralisHome, masterKey, salt, credId, value);
-    count++;
-  }
-
-  // MCP community API key — preserve-if-exists. Rotating it silently breaks
-  // every MCP client already configured against this deployment.
-  if (config.mcpApiKey && !(await mcpApiKeyExists(config.neuralisHome))) {
-    await writeCredentialFile(config.neuralisHome, masterKey, salt, 'mcp.communityApiKey', config.mcpApiKey);
     count++;
   }
 
@@ -1902,7 +1950,7 @@ async function readNeuralisVersion(packageDir: string): Promise<string> {
 async function generateComposeFile(
   base: ComposeEmitInput,
   configDir: string,
-  opts: { askOverwrite: boolean; version: string; installDir: string; packageDir: string },
+  opts: { askOverwrite: boolean; version: string; installDir: string; packageDir: string; dataHome: string },
 ): Promise<void> {
   const input: ComposeEmitInput = { ...base, operatorImage: operatorImageFor(base, configDir, opts) };
   const composePath = join(configDir, 'docker-compose.yml');
@@ -1927,7 +1975,7 @@ async function generateComposeFile(
   if (shouldWrite) {
     // The compose file binds `<home>/checkpoints`; created here, by the setup
     // user, so Docker never creates the bind source root-owned.
-    await mkdir(join(input.neuralisHome, 'checkpoints'), { recursive: true, mode: 0o700 });
+    await mkdir(join(opts.dataHome, 'checkpoints'), { recursive: true, mode: 0o700 });
     await writeFile(composePath, content, 'utf-8');
     info(`docker-compose.yml written to ${c.bold}${composePath}${c.reset}`);
     if (input.operatorImage) {
@@ -1960,6 +2008,7 @@ function operatorImageFor(input: ComposeEmitInput, configDir: string, dirs: { in
 }
 
 function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImage: string | null): ComposeEmitInput {
+  const hostHome = resolveHostHome(config.neuralisHome);
   return {
     uid: config.uid,
     gid: config.gid,
@@ -1978,7 +2027,7 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     qdrantDashboard: true,
     codexLoopbackPublish: config.codexLoopback,
     composeOllama: config.localLLMs.some((e) => e.baseUrl.startsWith('http://ollama:')),
-    neuralisHome: config.neuralisHome,
+    neuralisHome: hostHome,
     machine: {
       desktopVariant: config.machine.variant.key,
       image: config.machine.variant.derivativeImage,
@@ -2000,7 +2049,7 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     // Emitted only when the operator has actually provisioned the broker —
     // `pnpm neuralis:host-broker init` writes the secret + ceiling and prints
     // the unit. Setup never turns the host plane on by itself.
-    hostBroker: hostBrokerEmitInput(config.neuralisHome),
+    hostBroker: hostBrokerEmitInput(config.neuralisHome, hostHome),
   };
 }
 
@@ -2038,11 +2087,13 @@ function buildInputsFor(env: DetectedEnv, npmrcPath: string | undefined): BuildI
  * compose emit the binds. Nothing here creates them — `pnpm neuralis:host-broker
  * init` does, deliberately as a separate, explicit operator act.
  */
-function hostBrokerEmitInput(neuralisHome: string): ComposeEmitInput['hostBroker'] {
-  const dir = join(neuralisHome, 'host-broker');
-  const socketPath = join(dir, 'host-broker.sock');
-  const secretFile = join(dir, 'secret');
-  return { enabled: existsSync(secretFile), socketPath, secretFile };
+function hostBrokerEmitInput(neuralisHome: string, hostHome: string): ComposeEmitInput['hostBroker'] {
+  const hostDir = join(hostHome, 'host-broker');
+  return {
+    enabled: existsSync(join(neuralisHome, 'host-broker', 'secret')),
+    socketPath: join(hostDir, 'host-broker.sock'),
+    secretFile: join(hostDir, 'secret'),
+  };
 }
 
 /**
@@ -2081,12 +2132,13 @@ function composeInputFromExisting(
   );
 
   const machineEnv = (key: string, fallback: string): string => envVars[key] ?? fallback;
+  const hostHome = resolveHostHome(env.neuralisHome);
 
   return {
     // Read back, never re-decided: --compose-only must regenerate the SAME
     // project name, or the regenerated file points at different volumes.
     composeProject: envVars.NEURALIS_COMPOSE_PROJECT?.trim() || 'neuralis',
-    // Detection is wrong inside a container — the flags win when given.
+    // Host facts, detected; the flags win when given.
     uid: hostIdentity.uid ?? env.uid,
     gid: hostIdentity.gid ?? env.gid,
     dockerGid: hostIdentity.dockerGid ?? env.dockerGid,
@@ -2103,10 +2155,10 @@ function composeInputFromExisting(
     qdrantDashboard: envVars.QDRANT_DASHBOARD?.trim().toLowerCase() !== 'off',
     codexLoopbackPublish: codexLoopbackOptIn(envVars.NEURALIS_CODEX_LOOPBACK),
     composeOllama,
-    neuralisHome: env.neuralisHome,
+    neuralisHome: hostHome,
     machine: {
       desktopVariant: machineEnv('NEURALIS_MACHINE_DESKTOP_VARIANT', 'ubuntu-xfce'),
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.2.1'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.0'),
       containerScope: machineEnv('NEURALIS_MACHINE_CONTAINER_SCOPE', 'user'),
       idleMinutes: Number(envVars.NEURALIS_MACHINE_IDLE_MINUTES) || 30,
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
@@ -2122,7 +2174,7 @@ function composeInputFromExisting(
     operatorImage: null,
     // Re-detected on every regeneration, so `--compose-only` picks up a broker
     // provisioned (or removed) since the last run.
-    hostBroker: hostBrokerEmitInput(env.neuralisHome),
+    hostBroker: hostBrokerEmitInput(env.neuralisHome, hostHome),
   };
 }
 
@@ -2144,7 +2196,20 @@ function parseEnvContent(content: string): Record<string, string> {
   return parsed;
 }
 
-/** Host identity the wizard cannot detect from inside a container. */
+/**
+ * The image channel's refusals, before any prompt or write; on the image its
+ * data-root context, elsewhere null.
+ */
+async function imageChannelPreflight(ctx: CliContext, env: DetectedEnv, version: string, composeOnly: boolean): Promise<ImageRun | null> {
+  const layout = installLayout(ctx.installDir, ctx.packageDir);
+  const refusal = imageSetupRefusal({
+    layout, neuralisHome: env.neuralisHome, hostHome: process.env.NEURALIS_HOST_HOME, docker: env.docker, version, composeOnly,
+  });
+  if (refusal) throw refusal;
+  return layout === 'container' ? { hostHome: resolveHostHome(env.neuralisHome), fix: imageFix(version, composeOnly) } : null;
+}
+
+/** Host identity overrides for the generated compose (`--uid`, `--gid`, `--docker-gid`). */
 type HostIdentityOverrides = { uid: number | null; gid: number | null; dockerGid: number | null };
 
 async function runComposeOnly(
@@ -2153,6 +2218,9 @@ async function runComposeOnly(
   hostIdentity: HostIdentityOverrides = { uid: null, gid: null, dockerGid: null },
 ): Promise<void> {
   const env = await detectEnvironment(ctx.installDir);
+  const version = await readNeuralisVersion(ctx.packageDir);
+  const image = await imageChannelPreflight(ctx, env, version, true);
+  if (image) await ensureWritableOrExplain(env.neuralisHome, env.neuralisHome, env.platform, image);
   const configDir = resolveConfigDir(env, outputOverride);
   const envPath = join(configDir, '.env');
 
@@ -2202,7 +2270,7 @@ async function runComposeOnly(
     ));
   }
 
-  await generateComposeFile(input, configDir, { askOverwrite: false, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir });
+  await generateComposeFile(input, configDir, { askOverwrite: false, version, installDir: ctx.installDir, packageDir: ctx.packageDir, dataHome: env.neuralisHome });
 }
 
 // ── Existing Setup Check ───────────────────────────────────────
@@ -2306,13 +2374,11 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
   };
   const outputOverride = flagValue('--output');
 
-  // Host identity overrides for the one-shot container flow. Inside a
-  // container the wizard CANNOT detect these: it runs as its own user, and the
-  // host's /var/run/docker.sock GID is not visible through the bind. They are
-  // baked into the generated compose (user/group and the docker supplementary
-  // group), so a wrong value produces a stack that cannot write its own data
-  // directory. The operator reads them on the host with:
-  //   id -u ; id -g ; stat -c %g /var/run/docker.sock
+  // Host identity overrides for the generated compose (user/group and the
+  // docker supplementary group). Detection reads the running process and the
+  // socket, so the image run as the host user with the socket bound already
+  // sees the host's; a wrong value produces a stack that cannot write its own
+  // data directory.
   const numericFlag = (flag: string): number | null => {
     const raw = flagValue(flag);
     if (raw === null) return null;
@@ -2336,8 +2402,9 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
   try {
     // 1. Auto-detect
     const env = await detectEnvironment(ctx.installDir);
-    printDetection(env);
-    await preflightDataRoot(env);
+    printDetection(env, installLayout(ctx.installDir, ctx.packageDir));
+    const image = await imageChannelPreflight(ctx, env, await readNeuralisVersion(ctx.packageDir), false);
+    await preflightDataRoot(env, image);
 
     // 2. Check existing setup
     const proceed = await handleExistingSetup(env);
@@ -2519,10 +2586,8 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       neuralisHome: env.neuralisHome,
       projectId,
       projectName,
-      // Preserve-if-exists: regenerating the session secret logs every user
-      // out, and regenerating the MCP key breaks every configured MCP client.
+      // Preserve-if-exists: regenerating the session secret logs every user out.
       nextAuthSecret: carried.nextAuthSecret ?? randomBytes(32).toString('base64'),
-      mcpApiKey: randomBytes(32).toString('hex'),
       publicOrigin,
       ports: carried.ports,
       composeProject: composeProject.name,
@@ -2629,7 +2694,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // 13b. Generate docker-compose.yml (machine-specific topology — same
     // artifact family as .env; see docs/architect/setup-and-update.md).
     await generateComposeFile(composeInputFromSetup(config, env, qdrantImage), configDir, {
-      askOverwrite: true, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir,
+      askOverwrite: true, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir, dataHome: env.neuralisHome,
     });
 
     // 14. Summary

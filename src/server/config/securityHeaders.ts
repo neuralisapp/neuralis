@@ -119,16 +119,23 @@ const GLOBAL_CSP = [
  */
 const PACKAGE_ROUTE_CSP = 'sandbox';
 
+/**
+ * The global `/:path*` rule's values. Exported because the request proxy's own
+ * responses (the setup-required 503s) set them directly instead of relying on
+ * how `headers()` composes with a proxy-made response.
+ */
+export const GLOBAL_SECURITY_HEADERS: ReadonlyArray<{ key: string; value: string }> = [
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  { key: 'Content-Security-Policy', value: GLOBAL_CSP },
+];
+
 export function buildSecurityHeaders(): SecurityHeaderRule[] {
   return [
     {
       source: '/:path*',
-      headers: [
-        { key: 'X-Content-Type-Options', value: 'nosniff' },
-        { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
-        { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-        { key: 'Content-Security-Policy', value: GLOBAL_CSP },
-      ],
+      headers: GLOBAL_SECURITY_HEADERS.map((header) => ({ ...header })),
     },
     {
       // The package-route anti-navigation floor. AFTER the global rule so it

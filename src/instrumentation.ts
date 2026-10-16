@@ -11,6 +11,12 @@
  *    turn is worthless if its registration sits behind a config branch or a
  *    bootstrap that can reject. See `server/host/shutdown.ts` for the two holes
  *    this ordering closes.
+ * 1b. Reads the setup state (`server/init.ts`). Without the session secret
+ *    nothing below can succeed before a restart, so ONE log line names the fix
+ *    and the hook returns (the request proxy answers every request 503
+ *    `setup_required`). With the secret but no owner account yet, the boot
+ *    continues — `:3101` opens and authenticates nobody, since no user exists —
+ *    and one info line says so.
  * 2. Pre-warms the in-process package-runtime bootstrap so the warm-up
  *    (discovery, the runtime provider's boot: every package's init/start)
  *    begins at container boot instead of lazily on the first user request.
@@ -56,13 +62,25 @@ export async function register(): Promise<void> {
   const { installShutdownHandlers, addShutdownStep } = await import('./server/host/shutdown');
   installShutdownHandlers();
 
+  // 1b. Setup state — before anything that reads the session secret.
+  const [{ getSetupState }, { getLogger }] = await Promise.all([
+    import('./server/init'),
+    import('./server/logging/setup'),
+  ]);
+  const setup = await getSetupState();
+  if (!setup.configured) {
+    const setupLogger = getLogger().child('setup');
+    if (setup.reason === 'secret_missing') {
+      setupLogger.error('Neuralis is not set up: NEXTAUTH_SECRET is not set. Run setup (https://docs.neuralisapp.com/getting-started/installation), then start the stack it writes. Every request answers 503 setup_required until then.');
+      return;
+    }
+    setupLogger.info('Neuralis has no owner account yet: run setup. Every request answers 503 setup_required until it has.');
+  }
+
   // 2. Fire bootstrap warm-up immediately, non-blocking. Errors are flagged in
   // the bootstrap status (phase='error', surfaced by /api/health) and logged
   // here; they must not crash the instrumentation hook.
-  const [{ getRuntime }, { getLogger }] = await Promise.all([
-    import('./server/host/bootstrap'),
-    import('./server/logging/setup'),
-  ]);
+  const { getRuntime } = await import('./server/host/bootstrap');
   const prewarmLogger = getLogger().child('bootstrap-prewarm');
   void getRuntime().then(() => {
     // Core ready: initialize the manager before its synchronous registry getter.

@@ -229,6 +229,7 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
       'neuralis/project', 'agent-core/agent', 'agent-core/workflow-entry', 'agent-core/conversation-meta',
       'agent-core/pending-interactions', 'agent-core/delegate-run', 'brain-core/source-config', 'brain-core/embedding-lock',
       'agent-core/package-data-zone', 'agent-core/conversation-summary', 'brain-core/vector-proof', 'neuralis/credential',
+      'agent-core/oauth-tokens',
     ]));
     // The zone module sorts AFTER the identity module: it moves the zones that one writes.
     expect(modules.map(({ file }) => file).indexOf('package-zone-v1.mts')).toBeGreaterThan(modules.map(({ file }) => file).indexOf('package-identity-v2.mts'));

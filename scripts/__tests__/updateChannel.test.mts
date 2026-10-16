@@ -18,11 +18,11 @@ import { fileURLToPath } from 'node:url';
 import { compareReleaseVersions, parseReleaseManifest } from '@neuralis/package-system/contracts';
 import { detectChannel, discoverBuiltinDeps } from '../setup/discoverPackages.mts';
 import { imageTagAfterUpdate, upsertEnvValue } from '../setup/envFile.mts';
-import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, npmInvocation, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack } from '../update.mts';
+import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, npmInvocation, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, refuseLayout, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack } from '../update.mts';
 import { applyStack, HEALTH_TIMEOUT_MS, outsideComposeRefusal, stackCommands, type HealthAnswer, type StackPorts } from '../update/stack.mts';
 import { checkpointTakenLine } from '../upgrade.mts';
 import { mergePlatformConfig, platformConfigPath } from '../setup/platformConfig.mts';
-import type { CliContext } from '../cli/registry.mts';
+import type { CliContext, CliExit } from '../cli/registry.mts';
 import { installLayout, spell, spellOn } from '../cli/spelling.mts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -272,6 +272,15 @@ describe('the update command refuses rather than half-working', () => {
     const run = runUpdateVerb(['--version', '0.2.0'], cliContext({ installDir: tree, packageDir: tree }));
     // Not in a container here: a bare host-package folder that is no clone is told to convert.
     await expect(run).rejects.toThrow(/not an npm install folder or a git clone/);
+    let refusal: unknown = null;
+    try { refuseLayout('container', parseUpdateArgs(['--version', '0.3.0'])); } catch (error) { refusal = error; }
+    const detail = (refusal as CliExit).detail.join('\n');
+    expect(detail).toContain('NEURALIS_IMAGE_TAG=0.3.0');
+    expect(detail).toContain('NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:0.3.0');
+    expect(detail).toContain('mcpSidecarImage');
+    // The compose file pins the tag, so the new image regenerates it before the stack steps.
+    expect(detail).toContain('neuralisapp/neuralis:0.3.0 node bin/neuralis.mjs setup --compose-only --output "$PWD"');
+    expect(detail.indexOf('setup --compose-only')).toBeLessThan(detail.indexOf('docker compose stop neuralis'));
   });
 
   it('a folder plans the host package and the @neuralis packages it pins; operator packages are not in a line', async () => {

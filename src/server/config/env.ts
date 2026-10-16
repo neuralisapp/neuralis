@@ -79,6 +79,13 @@ function requireEnv(name: string, hint: string): string {
   return value;
 }
 
+const SESSION_SECRET_VAR = 'NEXTAUTH_SECRET';
+
+/** Whether the session secret is set — never generated here; setup writes it. */
+export function hasSessionSecret(): boolean {
+  return Boolean(process.env[SESSION_SECRET_VAR]?.trim());
+}
+
 let cached: Env | null = null;
 
 export function getEnv(): Env {
@@ -105,7 +112,7 @@ export function getEnv(): Env {
     },
 
     auth: {
-      secret: requireEnv('NEXTAUTH_SECRET', 'Required for session security. Generate with: openssl rand -base64 32'),
+      secret: requireEnv(SESSION_SECRET_VAR, 'Required for session security. Generate with: openssl rand -base64 32'),
       nextAuthUrl: process.env.NEXTAUTH_URL || 'http://localhost:3100',
       adminEmail: process.env.NEURALIS_ADMIN_EMAIL?.trim() || null,
     },

@@ -174,4 +174,13 @@ describe('one dispatch path', () => {
     }
     expect(readFileSync(join(hostRoot, '..', 'create-neuralis', 'index.mjs'), 'utf-8')).toContain(`const NODE_MAJOR_FLOOR = ${floor};`);
   });
+
+  it('both Node-floor refusals name the installation help anchor and the issue form', () => {
+    const scaffolder = readFileSync(join(hostRoot, '..', 'create-neuralis', 'index.mjs'), 'utf-8');
+    for (const text of [readFileSync(join(hostRoot, 'bin', 'neuralis.mjs'), 'utf-8'), scaffolder]) {
+      expect(text).toContain("'https://docs.neuralisapp.com/getting-started/installation#if-something-fails'");
+      expect(text).toContain('https://github.com/neuralisapp/neuralis/issues/new');
+    }
+    expect(scaffolder).toMatch(/fail\(`Neuralis needs Node\.js [^\n]*\$\{HELP_LINE\}`\)/);
+  });
 });

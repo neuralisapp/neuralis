@@ -204,7 +204,7 @@ export async function dispatch(argv: string[], ctx: CliContext): Promise<number>
       return 0;
     }
     if ((RESERVED_VERBS as readonly string[]).includes(name)) {
-      throw new CliExit(1, `"${name}" is reserved for a later release`, ['`neuralis --help` lists the commands this release has.']);
+      throw new CliExit(1, `"${name}" is reserved for a later release`, ['`neuralis --help` lists the commands this release has.', 'Signing in from your own machine, `request`, `skill`, `mcp`, `plugin` and `launch` are the separate client: `npm i -g @neuralis/cli`.']);
     }
     const command = OPS_COMMANDS.find((m) => m.name === name);
     if (!command) throw new CliExit(1, `unknown command "${name}"`, ['`neuralis --help` lists the commands.']);

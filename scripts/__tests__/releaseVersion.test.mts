@@ -41,7 +41,10 @@ function fixtureTree(version = '0.1.0', localDep = LOCAL_DEP_LINE): string {
         .join('\n') +
       `\n    "zod": "^4.0.0"\n  }\n}\n`,
   );
-  for (const name of ['package-system', 'brain-core', 'admin']) write(`packages/${name}/package.json`, manifest(`@neuralis/${name}`, version));
+  for (const name of ['package-system', 'brain-core', 'admin', 'cli']) write(`packages/${name}/package.json`, manifest(`@neuralis/${name}`, version));
+  for (const file of ['neuralis/.claude-plugin/marketplace.json', 'neuralis/.agents/plugins/marketplace.json']) {
+    write(file, `{ "plugins": [{ "name": "neuralis", "source": { "source": "npm", "package": "@neuralis/cli", "version": "${version}" } }] }\n`);
+  }
   write(
     'packages/agent-core/package.json',
     manifest('@neuralis/agent-core', version, `,\n  "neuralis": {\n    "configSettings": [\n      { "key": "mcpSidecarImage", "default": "neuralisapp/mcp-sidecar:${version}", "version": "nested-not-a-site" }\n    ]\n  }`),
@@ -80,7 +83,7 @@ describe('release:version --check', () => {
     const root = fixtureTree();
     const result = run('--check', '--root', root);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('20 site(s) coherent');
+    expect(result.stdout).toContain('23 site(s) coherent');
     expect(result.stdout).toContain('neuralis/README.md:3');
   });
 
@@ -123,7 +126,7 @@ describe('release:version <semver>', () => {
     const before = new Map(['neuralis/package.json', 'packages/agent-core/package.json', 'neuralis/scripts/setup.mts', 'neuralis/scripts/rebuild.mts', 'neuralis/README.md', 'neuralis/.env.example', 'web/docs/app/(home)/widgets.tsx'].map((f) => [f, read(root, f)]));
     const { written, problems } = bumpVersion(root, '0.2.0-rc.1');
     expect(problems).toEqual([]);
-    expect(written).toHaveLength(12); // 8 manifests + config.ts + setup.mts + .env.example + widgets.tsx; rebuild.mts is derived
+    expect(written).toHaveLength(15); // 9 manifests + 2 marketplaces + config.ts + setup.mts + .env.example + widgets.tsx; rebuild.mts is derived
     expect(checkCoherence(root)).toMatchObject({ version: '0.2.0-rc.1', drift: [] });
     // Exactly the version literals moved: the `file:` line, the nested key, the
     // derived site and the prose are byte-identical once the old version is mapped.
@@ -184,6 +187,7 @@ describe('release:version --manifest', () => {
         '@neuralis/brain-core': '0.3.0',
         '@neuralis/admin': '0.3.0',
         '@neuralis/machine-core': '0.3.0',
+        '@neuralis/cli': '0.3.0',
       },
       images: {
         'neuralisapp/neuralis': '0.3.0',

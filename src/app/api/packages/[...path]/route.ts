@@ -10,6 +10,7 @@
 import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/server/auth/session';
 import { tryResolveSessionTicket } from '@/server/auth/sessionTicketAuth';
+import { packageApiChallenge, tryResolvePackageOAuth } from '@/server/auth/packageOAuthAuth';
 import { resolveProjectRoleContext } from '@/server/auth/resolveSessionContext';
 import { resolveAgentAxis } from '@/server/auth/resolveVerifiedAgentScope';
 import { getRuntime } from '@/server/host/bootstrap';
@@ -37,15 +38,22 @@ async function handleRequest(
   // Auth precedence (one identity type — the canonical SessionContext):
   //   1. Cookie session — normal logged-in user.
   //   2. `nrs1.` session-ticket (W4G) — real identity carried by a skill
-  //      script's child-shell curl. The verifier looks up the live stream
+  //      shell's `neuralis request`. The verifier looks up the live stream
   //      scope; project-id-bind + membership re-verify happen below. This is
   //      the SINGLE auth path for every internal skill (admin/system skills
   //      included) — there is no separate platform-bearer route.
+  //   3. An external client's OAuth bearer for the host API resource (the
+  //      `neuralis` CLI) — one real user/project/agent from that user's own
+  //      consent, verified by the `route-token-verifier` service; it then
+  //      passes the COOKIE arm's account gates below, never the ticket's.
+  //      Reached only when no cookie and no ticket header is present.
   let user = await getSessionUser();
   // W4G — verified session-ticket callers carry the canonical SessionContext
   // recovered from the live stream scope. `ticketSkillId` is audit-only.
   let ticketSession: SessionContext | null = null;
   let ticketSkillId: string | undefined;
+  // The OAuth-bearer arm's verified grant (null on the cookie and ticket arms).
+  let oauth: { session: SessionContext; clientId: string; scope: string } | null = null;
 
   if (!user) {
     const ticketResolve = await tryResolveSessionTicket(req);
@@ -70,7 +78,26 @@ async function handleRequest(
       ticketSkillId = ticketResolve.skillId;
       user = { id: ticketSession.userId, email: '', name: 'skill-session' };
     } else {
-      return new Response('Unauthorized', { status: 401 });
+      const oauthResolve = await tryResolvePackageOAuth(req);
+      if (oauthResolve?.kind === 'reject') {
+        writeAuditLog({
+          userId: '__cli__',
+          action: 'cli.session_rejected',
+          details: { code: oauthResolve.code, method, path: params.path.join('/') },
+        });
+        return Response.json(
+          { error: 'Access token refused', code: oauthResolve.code },
+          {
+            status: 401,
+            headers: { 'WWW-Authenticate': packageApiChallenge(oauthResolve.code === 'insufficient_scope' ? 'insufficient_scope' : 'invalid_token') },
+          },
+        );
+      }
+      if (oauthResolve?.kind !== 'match') {
+        return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': packageApiChallenge() } });
+      }
+      oauth = { session: oauthResolve.session, clientId: oauthResolve.clientId, scope: oauthResolve.scope };
+      user = { id: oauth.session.userId, email: '', name: 'cli-session' };
     }
   }
 
@@ -94,7 +121,9 @@ async function handleRequest(
   if (!ticketSession && userRecord.mustChangePassword) {
     // The password change rides the host route `/api/admin/users/[id]`, never
     // this catch-all. Skill-session calls bypass this gate — the user is
-    // operating via an in-progress agent stream, not a fresh login.
+    // operating via an in-progress agent stream, not a fresh login. An OAuth
+    // bearer does NOT: it is a credential held outside any stream, so it gets
+    // the cookie arm's gate.
     return Response.json(
       { error: 'Password change required', code: 'PASSWORD_CHANGE_REQUIRED' },
       { status: 403 },
@@ -140,10 +169,23 @@ async function handleRequest(
 
   // W4G — session tickets are project-bound: the verified scope already
   // carries the stream's projectId. When the caller supplies none, that's the
-  // authoritative source — a skill script's curl no longer has to pass
+  // authoritative source — a skill's `neuralis request` call does not have to pass
   // `?projectId=` at all.
   if (!projectId && ticketSession) {
     projectId = ticketSession.projectId;
+  }
+  // The OAuth arm is bound to the token's project the same way: a supplied id
+  // may only agree with it.
+  if (oauth) {
+    if (suppliedProjectId && suppliedProjectId !== oauth.session.projectId) {
+      writeAuditLog({
+        userId: oauth.session.userId,
+        action: 'cli.session_rejected',
+        details: { code: 'project_mismatch', method, path: params.path.join('/') },
+      });
+      return Response.json({ error: 'projectId mismatch with the access token', code: 'project_mismatch' }, { status: 403 });
+    }
+    projectId = oauth.session.projectId;
   }
 
   if (!projectId) {
@@ -290,10 +332,18 @@ async function handleRequest(
   }
 
   // Extract optional agentId (agent name — not UUID). Like projectId, a
-  // session-ticket caller inherits the stream's agent when the script's curl
+  // session-ticket caller inherits the stream's agent when the skill's call
   // doesn't pass one explicitly — the ticket already carries the real agentId.
   const requestedAgentId = req.headers.get('x-agent-id') || query.agentId || undefined;
   let agentId = requestedAgentId || ticketSession?.agentId || undefined;
+  // OAuth arm: the token's agent, already access-checked by the verifier; a
+  // header or query may only agree with it.
+  if (oauth) {
+    if (requestedAgentId && requestedAgentId !== oauth.session.agentId) {
+      return Response.json({ error: 'agentId mismatch with the access token', code: 'agent_mismatch' }, { status: 403 });
+    }
+    agentId = oauth.session.agentId;
+  }
 
   // SystemSession sentinel IDs must NEVER be accepted from external input.
   // Reject any caller that somehow presents one (defense-in-depth; normal
@@ -318,7 +368,7 @@ async function handleRequest(
   // away to "no agent" would serve the request against a different object set
   // than the one asked for. The store is read only when an id was named. The
   // TICKET plane keeps its header-over-ticket order (a separate contract).
-  if (!ticketSession && requestedAgentId) {
+  if (!ticketSession && !oauth && requestedAgentId) {
     const axis = await resolveAgentAxis(
       { userId: user.id, projectId, role, grantedFeatures, agentAccess, agentOwnership },
       requestedAgentId,
@@ -346,6 +396,17 @@ async function handleRequest(
         skillId: ticketSkillId,
         requestId: ticketSession.requestId,
       },
+    });
+  }
+
+  if (oauth) {
+    // External-client call: the real user/project/agent of the grant, the
+    // client id and the granted scope — never the token.
+    writeAuditLog({
+      userId: oauth.session.userId,
+      action: 'cli.session_call',
+      target: `${method} /${params.path.join('/')}`,
+      details: { projectId, agentId, role, clientId: oauth.clientId, scope: oauth.scope },
     });
   }
 
@@ -377,11 +438,12 @@ async function handleRequest(
       },
       rawRequest: req,
       // Auth-CHANNEL marker (NOT identity): a browser cookie session is
-      // interactive (a human), a skill session ticket is an agent. Lets a package
-      // route grant a human an immediate committed structural op while an agent's
-      // identical call stays governed (`pending_review`). `!ticketSession` — cookie
-      // ⇒ true, ticket ⇒ false. Never forgeable by the request body.
-      interactive: !ticketSession,
+      // interactive (a human), a skill session ticket is an agent, and so is an
+      // external client's OAuth bearer. Lets a package route grant a human an
+      // immediate committed structural op while an agent's identical call stays
+      // governed (`pending_review`), and keeps the human-only arms human. Cookie
+      // ⇒ true; ticket and OAuth ⇒ false. Never forgeable by the request body.
+      interactive: !ticketSession && !oauth,
     });
   } catch (err: unknown) {
     const status = (err as { status?: number }).status;

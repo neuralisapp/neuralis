@@ -24,7 +24,7 @@ folder's channel does:
 | `npm create neuralis <dir>` | `<dir>` — an npm project the operator owns: its `package.json` depends on one exact `neuralis` | `npx neuralis <verb>` |
 | `git clone` of the public host repo | the clone root — the repo *is* the host package (run with Docker it cannot carry operator packages) | `npx neuralis <verb>` (npx runs the package's own bin) |
 | the private monorepo | `neuralis/` inside the checkout | `pnpm neuralis:<verb>` |
-| `docker pull` only | **there is no install folder** | the container form below |
+| the image alone (Docker, no Node.js) | the folder setup wrote from the image — `.env` and the compose files, **no `package.json`** | the image forms below |
 
 This page writes every command in the first form. Confirm you are in the right folder before
 running anything: its `package.json` either depends on `neuralis` (an npm install folder — the
@@ -33,19 +33,23 @@ code itself is `node_modules/neuralis`) or is the host package itself, named `ne
 `upgrade`, `user` and `update --apply` read the folder's `package.json` from the directory you
 typed them in. Relative paths in arguments are read from the folder you typed the command
 in. The verbs `login`, `logout`, `whoami`, `device`, `mcp`, `plugin`, `skill`, `fs`, `agent`,
-`workflow`, `shells`, `git`, `source`, `connect`, `up`, `down` and `tunnel` are reserved for a
-later release and answer so.
+`workflow`, `shells`, `git`, `source`, `connect`, `up`, `down` and `tunnel` are reserved here and
+answer so; signing in from a person's own machine, `request`, `skill`, `mcp`, `plugin` and
+`launch` belong to the separate `@neuralis/cli` client (`npm install -g @neuralis/cli`), which
+hands the operator verbs above to this command when run inside an install folder.
 
-With a pulled image and no install folder, the same command line is **baked into the image** at
-`/neuralis/bin/neuralis.mjs`, and runs inside the container:
+In an image-only folder the same command line is **baked into the image** at
+`/neuralis/bin/neuralis.mjs`. In the RUNNING app container it inspects:
 
 ```bash
 docker compose exec neuralis node bin/neuralis.mjs mount list   # in the folder that holds the compose file
 ```
 
-That form is read-friendly and mutation-hostile: it can inspect, but anything that
-writes compose files, rebuilds an image or restarts the stack has to act on the host,
-because the container cannot recreate itself. Say so plainly rather than trying.
+That form is read-friendly and mutation-hostile: anything that writes compose files,
+rebuilds an image or restarts the stack has to act on the host, because the container
+cannot recreate itself. Say so plainly rather than trying. Writing goes through a
+one-shot container of the image instead — setup and its `--compose-only` (below), and
+`upgrade` / `checkpoint restore` with the app stopped.
 
 **Running these yourself requires the host-access plane** — `exec.host`, an
 operator-provisioned broker, and the target path inside the broker's allowlist. None of
@@ -62,6 +66,24 @@ npx neuralis setup                 # wizard: data dirs, .env, compose file
 npx neuralis setup --compose-only  # regenerate docker-compose.yml only
 ```
 
+With Docker and no Node.js (Linux or WSL2), setup runs from the image into a folder
+of your own, as your user, through the Docker socket:
+
+```bash
+mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis
+docker run -it --rm --user "$(id -u):$(id -g)" \
+  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
+  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
+  -v "$PWD:$PWD" \
+  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --output "$PWD"
+docker compose up -d
+```
+
+In the image it refuses before any prompt or write — printing that command — when
+`NEURALIS_HOST_HOME` is missing, Docker does not answer through the socket, or the data
+home is not writable by the user it runs as. The `--compose-only` form is the same
+`docker run` without `-it`. Why each flag: `references/setup-and-compose.md`.
+
 Run it **before** the first `docker compose up`, or Docker creates the data
 directories first and they end up root-owned. It writes `~/.neuralis/{app,projects}`,
 the `.env` (including `NEXTAUTH_SECRET` and — in docker/binary Qdrant modes — a minted
@@ -72,9 +94,9 @@ and project, and **generates `docker-compose.yml`** for this machine.
 change (ports, public origin, vector backend, desktop variant). What a re-run does
 NOT do: overwrite settings changed in the admin UI (platform config is merged; of the
 package-declared tunables setup seeds only the embedding target and, for a no-embedding
-choice, `embeddingEnabled: false`), rotate the session secret, the
-MCP API key or the Qdrant API key (all preserved — rotating them logs everyone out /
-breaks every MCP client / locks the running Qdrant out until a recreate), rewrite
+choice, `embeddingEnabled: false`), rotate the session secret or the Qdrant API key
+(both preserved — rotating them logs everyone out / locks the running Qdrant out until
+a recreate), rewrite
 source configs you have edited (only a missing one is seeded) — one edge: the "key already stored"
 probe reads the GLOBAL credential directory only, so a key kept at another scope plus an empty
 answer on a re-run seeds `embeddingEnabled: false` (re-enable it in Admin → Config) — or create a second
@@ -204,7 +226,7 @@ What moves depends on the channel:
 |---|---|---|
 | npm install folder | `npm install neuralis@<version> --save-exact` — the `@neuralis/*` packages come with it, exact-pinned by the host's own manifest; the packages you registered are other lines of the folder's `package.json` and are never touched | the command (`--apply`) |
 | public clone | `git fetch --tags && git checkout v<version> && npm install` | you — the command prints it and never writes into a checkout |
-| `docker pull` only | the image tag | you — the two `.env` lines below |
+| image-only folder | the image tag | you — the five commands below |
 | development checkout | `git pull`, `pnpm install`, `pnpm neuralis:rebuild` | the command refuses |
 
 `npm update` cannot do this job: the folder pins `neuralis` exactly (so `npm update` is a
@@ -239,13 +261,25 @@ the app answers on its port but no compose service of the folder runs it (a proc
 compose would keep serving the old code). The `-V` is load-bearing — without it the anonymous
 volumes mask the new image-built runtime and the update appears to do nothing.
 
-**A clone or a pulled image runs those steps by hand**: `npx neuralis setup --compose-only`,
-`docker compose stop neuralis`, the upgrade, `docker compose up -d -V`. With no install folder
-(`docker pull` only) the update itself is a hand edit of `.env` in the folder that holds
-`docker-compose.yml` — `NEURALIS_IMAGE_TAG=<version>` and
-`NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:<version>`; a pinned `mcpSidecarImage` is
-changed in Admin → Config only (setup never writes it) — and the upgrade runs in its container
-form (below). The way back, which the command prints:
+**A clone runs those steps by hand**: `npx neuralis setup --compose-only`,
+`docker compose stop neuralis`, the upgrade, `docker compose up -d -V`. An image-only folder
+runs them from the NEW image, in the folder that holds `docker-compose.yml`, after a hand edit
+of two `.env` lines (`NEURALIS_IMAGE_TAG=<version>`,
+`NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:<version>`; a pinned `mcpSidecarImage`
+is changed in Admin → Config only — setup never writes it):
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
+  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
+  -v "$PWD:$PWD" \
+  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --compose-only --output "$PWD"
+docker compose stop neuralis
+docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply
+docker compose up -d -V
+```
+
+The way back, which the command prints:
 
 - **code** — `npm install neuralis@<previous> --save-exact` (a clone: `git checkout v<previous> &&
   npm install`). A published version is immutable, so the previous one is always installable;
@@ -290,7 +324,10 @@ to start and names this command (`upgrade_required`). The order after an update 
 (on an npm install folder `update --apply` runs it), and "nothing to do" is a
 normal answer. The move from 0.1.0 to this release raises `neuralis/credential` (a check: it
 names every credential the key file cannot open and writes nothing) and `brain-core/vector-proof`,
-which reads Qdrant — so Qdrant must be RUNNING while the app is stopped: stop only the app
+which reads Qdrant — so Qdrant must be RUNNING while the app is stopped; the release that adds
+the `@neuralis/cli` sign-in raises `agent-core/oauth-tokens` (`oauth-resource-v1`: every stored
+OAuth grant is stamped with the MCP resource it was issued for, none is dropped, so connected MCP
+clients keep their sign-in — skip it and the app refuses to start with `upgrade_required`): stop only the app
 (`docker compose stop neuralis`), never `down`. The vector-proof step marks every vector point
 once with its embedding proof (no re-embed); the vector database is busy for a few minutes on a
 large index, and the command prints `<marked> / <total>` every 10 000 points. Both modes refuse while the app answers on its port (on a native install that loopback health
@@ -313,7 +350,7 @@ first); a zone with no identity marker and no installed package of its name, or 
 `projects/{agent-core,brain-core,terminal,_installed}` folder with no such project, blocks — move it
 out of the data root (the backup folder keeps it). An apply refuses while anything blocks; a
 finished delegate run's record and a removed builtin's provenance never block (they pass through
-verbatim). With a pulled image and no install folder, the command is baked in:
+verbatim). In an image-only folder, the command is baked in:
 
 ```bash
 docker compose stop neuralis
@@ -525,8 +562,8 @@ versions, the newest checkpoint and this command.
 
 `restore` refuses while the app answers on its port or `docker compose ps` shows the
 `neuralis` service running — stop it first (`docker compose stop neuralis`). Everything
-written after the checkpoint is lost, which is why it asks for the id again. With a pulled
-image and no install folder, the command is baked in:
+written after the checkpoint is lost, which is why it asks for the id again. In an image-only
+folder, the command is baked in:
 
 ```bash
 docker compose stop neuralis
@@ -611,10 +648,11 @@ the `.env` and the override to `*.before-restore` — it never deletes, and refu
 earlier rescue copy sits in any of those places. A failure half-way names every step already done
 and where each rescue copy is. `--home` + `--volume` restore into a throwaway home and a cloned
 volume and never touch the live ones. Afterwards always run `npx neuralis setup --compose-only`
-(the restored `.env` names the image tag and the Qdrant mode the backup was taken on), then
-`docker compose up -d -V`. Never `down -v` on the way.
+(the restored `.env` names the image tag and the Qdrant mode the backup was taken on; in an
+image-only folder its image form under §Update), then `docker compose up -d -V`. Never `down -v`
+on the way.
 
-With a pulled image and no install folder, do it by hand from the compose folder:
+In an image-only folder, do it by hand from the compose folder:
 `docker compose stop neuralis qdrant`;
 `tar -C <home> -cpf <dir>/home.tar .` as a user that can read every file (the master key is 0400);
 `docker run --rm --network none -v <project>_qdrant-data:/from:ro -v <dir>:/to alpine:3.24 sh -c "tar -C /from -cf /to/qdrant-data.tar . && chown $(id -u):$(id -g) /to/qdrant-data.tar"`

@@ -12,8 +12,8 @@
  * ## The rule this loop must never break
  *
  * The mounts do NOT share an auth policy:
- *   - agent-core (MCP + OAuth AS): OAuth JWT / agent API key / community API
- *     key, re-resolved through the ONE member resolver before any dispatch.
+ *   - agent-core (MCP + OAuth AS): OAuth JWT / agent API key, re-resolved
+ *     through the ONE member resolver before any dispatch.
  *   - agent-core (terminal): session cookie → membership. No feature gate at
  *     the upgrade; write access is decided from `core.execute` inside the WS
  *     server (absent ⇒ read-only session, not a rejection).
@@ -51,7 +51,7 @@ export type CompanionMountHandle = {
 export type CompanionMountPorts = {
   resolveSessionUser: (input: {
     headers: Record<string, string | string[] | undefined>;
-  }) => Promise<{ userId: string; email?: string; name?: string; sessionEpoch?: number } | null>;
+  }) => Promise<{ userId: string; email?: string; name?: string; sessionEpoch?: number; mustChangePassword?: boolean } | null>;
   getProjectById: (projectId: string) => Promise<CompanionProject | null>;
   /** The user's non-archived projects with their names — the OAuth consent picker. */
   listProjects: (userId: string) => Promise<Array<{ id: string; name: string }>>;

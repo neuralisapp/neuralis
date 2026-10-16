@@ -1,0 +1,12 @@
+{
+  "name": "neuralis",
+  "owner": { "name": "Neuralis" },
+  "description": "The Neuralis command line as a Claude Code plugin: sign in to your Neuralis host, use your agent's skills and tools.",
+  "plugins": [
+    {
+      "name": "neuralis",
+      "description": "Sign in to a Neuralis host, call package routes, read the agent's skills and serve its tools over MCP.",
+      "source": { "source": "npm", "package": "@neuralis/cli", "version": "0.3.0" }
+    }
+  ]
+}

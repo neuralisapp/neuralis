@@ -9,6 +9,8 @@ import { DataFormatClaimError, DataFormatNewerError } from '@neuralis/package-sy
 const claim = vi.hoisted(() => vi.fn<() => Promise<never>>());
 // A temp root, never the live home: the claim rejects before any store reads it.
 vi.mock('../../config/env', () => ({ getEnv: () => ({ appRoot: '/nonexistent-neuralis-test/app', projectsRoot: '/nonexistent-neuralis-test/projects' }) }));
+// A configured instance: the route's setup arm is not what this file measures.
+vi.mock('../../init', () => ({ getSetupState: async () => ({ configured: true }) }));
 vi.mock('../../store/dataFormats', async (original) => ({
   ...(await original<typeof import('../../store/dataFormats')>()),
   claimAllDeclaredDataFormats: claim,

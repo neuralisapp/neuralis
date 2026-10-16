@@ -23,8 +23,9 @@
  *     `git fetch --tags && git checkout v<v>`, which this command PRINTS and
  *     never runs — a checkout is the operator's working tree.
  *   - the development checkout: refused; the update there is `git pull`.
- *   - inside the container: refused; a pulled image has no folder to move —
- *     its update is the two `.env` lines on the host.
+ *   - inside the container: refused; an image-only folder has no package to
+ *     move — its update is two `.env` lines, then the new image's
+ *     `setup --compose-only` and the stack steps, all printed.
  *
  * THE STACK (an npm install folder, `--apply`): after the moves below the
  * command runs the rest itself — regenerate compose, stop THIS install's app
@@ -54,7 +55,7 @@ import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { compareReleaseVersions, MANIFEST_VERSION, parseReleaseManifest, type ReleaseManifest } from '@neuralis/package-system/contracts';
 import { appPort } from './checkpoint.mts';
 import { CliExit, type CliContext } from './cli/registry.mts';
-import { installLayout, spellOn, type InstallLayout } from './cli/spelling.mts';
+import { imageSetupCommand, installLayout, spellOn, type InstallLayout } from './cli/spelling.mts';
 import { composeProjectOf } from './host-broker/helper.mts';
 import { operatorDependencies } from './setup/compose.mts';
 import { loadHostEnv, resolveConfigDir } from './setup/detect.mts';
@@ -317,7 +318,7 @@ export function recreateStep(installDir: string, layout: InstallLayout): string 
   return `docker compose up -d -V ${c.dim}(-V is load-bearing: it renews the anonymous volumes that would otherwise mask the new image-built runtime)${c.reset}`;
 }
 
-function refuseLayout(layout: InstallLayout, args: UpdateArgs): never {
+export function refuseLayout(layout: InstallLayout, args: UpdateArgs): never {
   if (layout === 'monorepo') {
     throw new CliExit(1, 'this is the development checkout — there is nothing to update from a registry', [
       'The packages here are the source. Update it with `git pull`, then `pnpm install`',
@@ -325,10 +326,13 @@ function refuseLayout(layout: InstallLayout, args: UpdateArgs): never {
     ]);
   }
   if (layout === 'container') {
-    throw new CliExit(1, 'this runs inside the container — a pulled image has no install folder to move', [
-      'On the host, in the folder that holds .env and docker-compose.yml: set NEURALIS_IMAGE_TAG=<version>',
-      'and NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:<version> in .env (a pinned',
-      'mcpSidecarImage is an Admin → Config edit), then `docker compose stop neuralis`,',
+    const version = args.targetVersion ?? '<version>';
+    throw new CliExit(1, 'this runs inside the container — an image-only folder has no package to move', [
+      `On the host, in the folder that holds .env and docker-compose.yml: set NEURALIS_IMAGE_TAG=${version}`,
+      `and NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:${version} in .env (a pinned`,
+      'mcpSidecarImage is an Admin → Config edit), then regenerate the compose file from the new image:',
+      ...imageSetupCommand(version, true).slice(1).map((line) => `  ${line}`),
+      'then `docker compose stop neuralis`,',
       '`docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply`, `docker compose up -d -V`.',
     ]);
   }

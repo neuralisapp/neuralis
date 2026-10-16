@@ -7,9 +7,9 @@
 // the working directory), then hands the arguments to the one registry.
 //
 // Node.js 26 or newer, refused by name below it (npm only WARNS on `engines`):
-// the alias hook below is a synchronous `module.registerHooks` resolver, and on
-// the Node 22 line its result does not reach tsx's asynchronous load chain, so
-// every aliased import breaks (measured). Lowering the floor needs a new proof.
+// the release's floor, the same in both packages' `engines`. It is a decision,
+// not a measured break — the verbs tried run on Node 22 and 24 — and lowering it
+// needs a suite run on the lower line as its proof.
 //
 // The ESM hook is taken from tsx's ESM build (`import.meta.resolve`): resolving
 // it with `require.resolve` picks the CommonJS build. Both hooks are registered
@@ -32,9 +32,12 @@ import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const NODE_MAJOR_FLOOR = 26;
+const INSTALL_HELP = 'https://docs.neuralisapp.com/getting-started/installation#if-something-fails';
+const REPORT_ISSUE = 'https://github.com/neuralisapp/neuralis/issues/new';
 const major = Number(process.versions.node.split('.')[0]);
 if (!(major >= NODE_MAJOR_FLOOR)) {
   console.error(`✗ Neuralis needs Node.js ${NODE_MAJOR_FLOOR} or newer (found ${process.versions.node}).`);
+  console.error(`  Help: ${INSTALL_HELP} · report a failed install: ${REPORT_ISSUE}`);
   process.exit(1);
 }
 

@@ -17,7 +17,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..',
 const script = join(repoRoot, 'neuralis', 'scripts', 'build', 'audit-publish-tarballs.mjs');
 const PUBLISHABLE = [
   'packages/package-system', 'packages/agent-core', 'packages/brain-core', 'packages/admin',
-  'packages/machine-core', 'neuralis', 'create-neuralis',
+  'packages/machine-core', 'neuralis', 'create-neuralis', 'packages/cli',
 ];
 const DEV_ROOT = '/opt/dev-machine/work';
 

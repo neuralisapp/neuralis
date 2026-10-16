@@ -9,18 +9,31 @@ This directory exposes the host HTTP surface for Neuralis packages.
 Dispatch awaits the runtime’s kernel `whenReady()` contract; a startup failure
 returns a service-unavailable response and never falls through to dispatch.
 
-Authentication order (exactly two arms — there is no synthetic-owner /
+Authentication order (exactly three arms — there is no synthetic-owner /
 platform-bearer path):
 
 1. NextAuth cookie session (always wins when present).
 2. `Authorization: Bearer nrs1.<requestId>.<secret>` — the per-stream session
    ticket, injected into the in-container shell env as `NEURALIS_SESSION_TOKEN`
-   and forwarded by skill scripts. It is tried **only as a fallback when no
+   and sent by a skill's `neuralis request` calls. It is tried **only when no
    cookie session resolved**. `src/server/auth/sessionTicketAuth.ts`
    (`tryResolveSessionTicket` → runtime `session-ticket-verifier` service) recovers the
    real `SessionContext` from the live stream scope — the route uses its
    `userId`/`projectId`/`role`/`grantedFeatures` directly (no caller-supplied
    identity). A successful call is audited `audit.action: 'skill.session_call'`.
+3. An external client's OAuth bearer for the host API resource
+   (`<canonical app origin>/api`, scope `routes:call` — the `@neuralis/cli`), tried
+   only when neither a cookie nor a ticket header is present.
+   `src/server/auth/packageOAuthAuth.ts` (`tryResolvePackageOAuth` → the kernel
+   `route-token-verifier` service, absent ⇒ deny) answers one real
+   user/project/agent from that user's own consent; the request then passes the
+   COOKIE arm's account gates — an active account, `mustChangePassword` ⇒ 403,
+   live membership — never the ticket's, a supplied project or agent id may only
+   agree with the token's, and `interactive` is false. A refusal is `401` with an
+   RFC 9728 `WWW-Authenticate` challenge (`resource_metadata` points at
+   `/.well-known/oauth-protected-resource/api` on the MCP port) and audits
+   `cli.session_rejected` with a code; a successful call audits
+   `cli.session_call` with the client id and scope — never the token.
 
 Deny-by-default: a ticket that **is present but fails verification never falls
 through** to the cookie/anonymous path — the route returns **401** and audits

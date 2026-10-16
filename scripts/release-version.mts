@@ -72,6 +72,7 @@ const WORKSPACE_MANIFESTS = [
   'packages/brain-core/package.json',
   'packages/admin/package.json',
   'packages/machine-core/package.json',
+  'packages/cli/package.json',
 ] as const;
 
 const HOST_PINS = ['admin', 'agent-core', 'brain-core', 'machine-core', 'package-system'] as const;
@@ -105,6 +106,14 @@ export const SITES: readonly Site[] = [
   { file: 'neuralis/.env.example', kind: 'companion', label: `template ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 1 },
   { file: 'web/docs/app/(home)/widgets.tsx', kind: 'image', label: `install command ${HOST_IMAGE}`, pattern: tagPattern(HOST_IMAGE), expected: 1 },
   { file: 'neuralis/scripts/rebuild.mts', kind: 'companion', label: `derived ${SIDECAR}`, pattern: tagPattern(SIDECAR), expected: 0 },
+  // The plugin marketplaces the host tree publishes install `@neuralis/cli` at the release's version.
+  ...['neuralis/.claude-plugin/marketplace.json', 'neuralis/.agents/plugins/marketplace.json'].map((file): Site => ({
+    file,
+    kind: 'pin',
+    label: 'marketplace @neuralis/cli',
+    pattern: /"package": "@neuralis\/cli", "version": "([^"]+)"/g,
+    expected: 1,
+  })),
 ];
 
 /** The manifests whose version a release publishes (the private workspace root is not one). */

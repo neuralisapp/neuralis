@@ -7,13 +7,13 @@
  * rewrite all three source configs over the admin's edits, and — when answered
  * with a different project name — write a whole orphan tree.
  *
- * These assert the extracted modules directly. The wizard module itself
- * exports nothing and runs `main()` at load, which is exactly why the file-IO
- * halves were extracted (F3 INC-S1).
+ * These assert the extracted modules directly; the wizard's `run` is driven
+ * in process only for the image channel's `--compose-only` and its refusals,
+ * which write or refuse before any prompt.
  */
 
-import { describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +29,11 @@ import {
   writeSourceConfigsPreserving,
 } from '../setup/records.mts';
 import { projectIdFromName } from '../../src/lib/utils';
-import { detectDocker, resolveConfigDir } from '../setup/detect.mts';
+import { detectDocker, resolveConfigDir, resolveHostHome } from '../setup/detect.mts';
+import { imageSetupRefusal, run as runSetup } from '../setup.mts';
+import { imageSetupCommand } from '../cli/spelling.mts';
+import { CliExit, type CliContext } from '../cli/registry.mts';
+import { DOCKER_SETUP_COMMAND } from '../../src/server/setupRequiredPage';
 import {
   buildOriginLines,
   carryOverEnv,
@@ -48,6 +52,15 @@ import { parseComposeLs, resolveComposeProject, sanitizeComposeProject } from '.
 import type { SetupConfig } from '../setup/types.mts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// Whether `/.dockerenv` exists is the one container signal (`installLayout`,
+// `resolveConfigDir`, `resolveHostHome`); a row turns it on, every other read
+// passes through.
+const container = vi.hoisted(() => ({ value: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, existsSync: (path: import('node:fs').PathLike) => (path === '/.dockerenv' ? container.value : actual.existsSync(path)) };
+});
 
 function scratchHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'neuralis-setup-'));
@@ -633,5 +646,147 @@ describe('compose project name', () => {
     expect(sanitizeComposeProject('---')).toBe('neuralis');
     expect(parseComposeLs('not json')).toBeNull();
     expect(parseComposeLs('[{"Name":"a","ConfigFiles":"/x.yml"}]')).toEqual([{ name: 'a', configFiles: '/x.yml' }]);
+  });
+});
+
+describe('setup run from the image writes an install folder the HOST runs', () => {
+  const VERSION = '9.9.9';
+  const HOST_HOME = '/home/op/.neuralis';
+
+  it('the host path of the data home: NEURALIS_HOST_HOME inside a container, the home itself anywhere else', () => {
+    expect(resolveHostHome('/.neuralis', true, HOST_HOME)).toBe(HOST_HOME);
+    expect(resolveHostHome('/srv/neuralis', true, undefined)).toBe('/srv/neuralis');
+    expect(resolveHostHome('/.neuralis', true, 'relative/home')).toBe('/.neuralis');
+    expect(resolveHostHome('/home/op/.neuralis', false, '/elsewhere')).toBe('/home/op/.neuralis');
+  });
+
+  it('the refusal command is the documented one, byte for byte (the setup-required page carries it too)', () => {
+    expect(imageSetupCommand(VERSION).join('\n')).toBe(DOCKER_SETUP_COMMAND.replace('<version>', VERSION));
+    const update = imageSetupCommand(VERSION, true);
+    expect(update.at(-1)).toBe(`  neuralisapp/neuralis:${VERSION} node bin/neuralis.mjs setup --compose-only --output "$PWD"`);
+    expect(update.join('\n')).not.toContain('-it ');
+  });
+
+  it('refuses in the image without the host home or a reachable Docker; a host layout and a same-path bind pass', () => {
+    const base = { layout: 'container' as const, neuralisHome: '/.neuralis', hostHome: HOST_HOME, docker: true, version: VERSION, composeOnly: false };
+    expect(imageSetupRefusal(base)).toBeNull();
+    expect(imageSetupRefusal({ ...base, hostHome: undefined })?.message).toMatch(/NEURALIS_HOST_HOME is not set/);
+    expect(imageSetupRefusal({ ...base, hostHome: '.neuralis' })?.message).toMatch(/must be the absolute host path/);
+    const noDocker = imageSetupRefusal({ ...base, docker: false });
+    expect(noDocker?.message).toMatch(/Docker is not reachable/);
+    expect(noDocker?.detail.join('\n')).toContain('-v /var/run/docker.sock:/var/run/docker.sock');
+    expect(noDocker?.detail.at(-1)).toBe('Nothing was written.');
+    // The home bound at its own host path needs no NEURALIS_HOST_HOME.
+    expect(imageSetupRefusal({ ...base, neuralisHome: '/home/op/.neuralis', hostHome: undefined })).toBeNull();
+    for (const layout of ['folder', 'clone', 'monorepo', 'host-tree'] as const) {
+      expect(imageSetupRefusal({ ...base, layout, hostHome: undefined, docker: false })).toBeNull();
+    }
+  });
+
+  // The wiring, in process: a host package copy outside any workspace (the image's
+  // layout), a fake `docker` on PATH, and `/.dockerenv` switched per row.
+  function imageRun(opts: { docker: boolean }) {
+    const root = mkdtempSync(join(tmpdir(), 'neuralis-image-setup-'));
+    const host = join(root, 'host');
+    const home = join(root, 'home');
+    const out = join(root, 'out');
+    const bin = join(root, 'bin');
+    for (const dir of [host, join(home, 'app', 'config'), out, bin]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', version: VERSION, bin: { neuralis: 'bin/neuralis.mjs' } }));
+    const env = 'NEURALIS_IMAGE_TAG=9.9.9\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n';
+    writeFileSync(join(out, '.env'), env);
+    writeFileSync(join(bin, 'docker'), opts.docker ? "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Docker version 29.8.2, build fake'\nexit 0\n" : '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const ctx = { packageDir: host, installDir: host, cwd: host, stdout: () => {}, stderr: () => {}, env: process.env, stdin: process.stdin } as CliContext;
+    return { root, host, home, out, bin, env, ctx };
+  }
+
+  async function inImage<T>(fixture: ReturnType<typeof imageRun>, vars: Record<string, string | undefined>, fn: () => Promise<T>, inContainer = true): Promise<T> {
+    const saved = new Map(Object.keys({ PATH: '', ...vars }).map((k) => [k, process.env[k]]));
+    const set = (k: string, v: string | undefined) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+    set('PATH', `${fixture.bin}:${process.env.PATH ?? ''}`);
+    for (const [k, v] of Object.entries(vars)) set(k, v);
+    container.value = inContainer;
+    try {
+      return await fn();
+    } finally {
+      container.value = false;
+      for (const [k, v] of saved) set(k, v);
+    }
+  }
+
+  const probes = { QDRANT_URL: 'http://127.0.0.1:9', OLLAMA_URL: 'http://127.0.0.1:9' };
+
+  it.skipIf(process.platform === 'win32')('--compose-only in the image binds the HOST home and passes it on; the data stays at the container path', async () => {
+    const f = imageRun({ docker: true });
+    try {
+      const code = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME }, () => runSetup(['--compose-only', '--output', f.out], f.ctx));
+      expect(code).toBe(0);
+      const compose = readFileSync(join(f.out, 'docker-compose.yml'), 'utf8');
+      expect(compose).toContain(`      - ${HOST_HOME}/app:/.neuralis/app\n`);
+      expect(compose).toContain(`      - ${HOST_HOME}/checkpoints:/.neuralis/checkpoints\n`);
+      expect(compose).toContain(`      - NEURALIS_HOST_HOME=${HOST_HOME}\n`);
+      expect(compose).not.toContain(f.home);
+      expect(existsSync(join(f.home, 'checkpoints'))).toBe(true);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('control: on the host the same run binds the data home itself, NEURALIS_HOST_HOME notwithstanding', async () => {
+    const f = imageRun({ docker: true });
+    try {
+      const code = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME }, () => runSetup(['--compose-only', '--output', f.out], f.ctx), false);
+      expect(code).toBe(0);
+      const compose = readFileSync(join(f.out, 'docker-compose.yml'), 'utf8');
+      expect(compose).toContain(`      - ${f.home}/app:/.neuralis/app\n`);
+      expect(compose).toContain(`      - NEURALIS_HOST_HOME=${f.home}\n`);
+      expect(compose).not.toContain(HOST_HOME);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  /** Runs `args` in the image expecting a refusal; asserts it wrote nothing. */
+  async function refused(f: ReturnType<typeof imageRun>, args: string[], vars: Record<string, string | undefined>): Promise<CliExit> {
+    const before = readdirSync(f.home, { recursive: true }).sort();
+    let thrown: unknown = null;
+    await inImage(f, { ...probes, ...vars }, async () => {
+      try { await runSetup(args, f.ctx); } catch (error) { thrown = error; }
+    });
+    expect(thrown).toBeInstanceOf(CliExit);
+    expect(readdirSync(f.out)).toEqual(['.env']);
+    expect(readFileSync(join(f.out, '.env'), 'utf8')).toBe(f.env);
+    expect(readdirSync(f.home, { recursive: true }).sort()).toEqual(before);
+    return thrown as unknown as CliExit;
+  }
+
+  it.skipIf(process.platform === 'win32')('the three refusals write nothing: no host home, no Docker, a home the image user cannot write', async () => {
+    const f = imageRun({ docker: true });
+    try {
+      // (a) the image default home with no host path: nothing is even read from it.
+      const noHome = await refused(f, ['--output', f.out], { NEURALIS_HOME: '/.neuralis', NEURALIS_HOST_HOME: undefined });
+      expect(noHome.message).toMatch(/NEURALIS_HOST_HOME is not set/);
+      expect(noHome.detail).toContain(`  ${imageSetupCommand(VERSION).at(-2)}`);
+      expect(existsSync('/.neuralis')).toBe(false);
+      // (b) no Docker answering through the socket, on --compose-only too.
+      writeFileSync(join(f.bin, 'docker'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const noDocker = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
+      expect(noDocker.message).toMatch(/Docker is not reachable/);
+      // (c) the home not writable by this user: the --user fix, never a prompt and never a uid literal.
+      if (process.getuid?.() !== 0) {
+        writeFileSync(join(f.bin, 'docker'), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Docker version 29.8.2, build fake'\nexit 0\n", { mode: 0o755 });
+        chmodSync(f.home, 0o555);
+        try {
+          const readOnly = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
+          expect(readOnly.message).toMatch(/Data root is not writable/);
+          expect(readOnly.detail[0]).toContain('--user "$(id -u):$(id -g)"');
+          expect(readOnly.detail.join('\n')).not.toMatch(/\b1001\b/);
+        } finally {
+          chmodSync(f.home, 0o755);
+        }
+      }
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
   });
 });
