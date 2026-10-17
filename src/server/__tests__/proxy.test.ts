@@ -143,7 +143,8 @@ describe('proxy — the setup-state fence', () => {
       expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(8 * 1024);
       expect(body).toContain('data-neuralis-state="setup-required"');
       expect(body).toContain(FROZEN_DOCKER_RUN_LINE);
-      expect(body).toContain('neuralisapp/neuralis:&lt;version&gt; node bin/neuralis.mjs setup --output "$PWD"');
+      expect(body).toContain('neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --output "$PWD"');
+      expect(body).toContain('<pre>NEURALIS_TAG=latest   # or a release tag');
       expect(body).toContain('npx neuralis setup');
       expect(body).toContain('https://docs.neuralisapp.com/getting-started/installation#if-something-fails');
       expect(body).toContain('session secret');
@@ -153,7 +154,7 @@ describe('proxy — the setup-state fence', () => {
       expect(body).not.toMatch(/\b\d+\.\d+\.\d+\b/);
       expect(body).not.toMatch(/<script|<link|src=/i);
       // The data home is named only inside the documented command block, never as this instance's path.
-      const outsideCommand = body.replace(/<pre>mkdir -p[\s\S]*?<\/pre>/, '');
+      const outsideCommand = body.replace(/<pre>NEURALIS_TAG=latest[\s\S]*?<\/pre>/, '');
       expect(outsideCommand).not.toBe(body);
       expect(outsideCommand).not.toContain('/.neuralis');
     } finally {

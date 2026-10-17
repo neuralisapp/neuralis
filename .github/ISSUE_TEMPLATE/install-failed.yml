@@ -23,7 +23,7 @@ body:
     id: version
     attributes:
       label: Neuralis version
-      description: The release you install, e.g. the `<version>` in `neuralisapp/neuralis:<version>`.
+      description: The release you install — `NEURALIS_IMAGE_TAG` in the install folder's `.env`, or `npx neuralis --version`.
     validations:
       required: true
   - type: input

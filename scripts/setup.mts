@@ -28,7 +28,7 @@ import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import { randomBytes, randomUUID, createCipheriv, createHash, hkdf } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import bcrypt from 'bcryptjs';
 // The app's own slug + project-id derivation (`src/lib/utils.ts`, dependency-free).
 import { slugify } from '../src/lib/utils';
@@ -36,8 +36,12 @@ import { slugify } from '../src/lib/utils';
 // `./setup/records.mts`.
 
 import { CliExit, type CliContext } from './cli/registry.mts';
-import { imageSetupCommand, installLayout, spell, type InstallLayout } from './cli/spelling.mts';
-import { detectEnvironment, resolveConfigDir, resolveHostHome, type DetectedEnv } from './setup/detect.mts';
+import { installLayout, spell, type InstallLayout } from './cli/spelling.mts';
+import {
+  PORT_ROLES, answeringQdrant, bindMountOf, busyPortRefusal, detectEnvironment, detectQdrant, findBusyPorts, imageFix, nextFreePorts, portCheck, portClaims,
+  resolveConfigDir, resolveHostHome, setupRefusal,
+  type DetectedEnv, type Platform, type PortCheck, type PortClaim, type QdrantAnswer,
+} from './setup/detect.mts';
 import { askHidden } from './setup/ownerCheck.mts';
 import { writeMergedPlatformConfig } from './setup/platformConfig.mts';
 import {
@@ -56,10 +60,12 @@ import {
   codexLoopbackOptIn, codexLoopbackQuestion,
   normalizeTrustedProxies, trustedProxiesLines, buildNpmrcLines,
   imageTagLines, initialImageTag, resolveImageTag,
+  DEFAULT_QDRANT_PORT, hostQdrantUrl, originDefault, qdrantHostPort,
   normalizePublicOrigin,
   readEnvFile,
   resolveQdrantApiKey,
   parseEnvContent as parseEnvContentShared,
+  type CarriedOverEnv, type PortTriple,
 } from './setup/envFile.mts';
 import { parseComposeLs, resolveComposeProject, type ComposeProjectRow } from './setup/composeProject.mts';
 import type {
@@ -196,7 +202,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.0',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.1',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -293,9 +299,10 @@ function printDetection(env: DetectedEnv, layout: InstallLayout) {
   info(`Platform: ${c.bold}${platformNames[env.platform] ?? env.platform}${c.reset}`);
 
   if (env.docker) {
-    info(`Docker: ${c.bold}available${c.reset} ${c.dim}(${env.dockerVersion})${c.reset}`);
+    info(`Docker: ${c.bold}available${c.reset} ${c.dim}(${env.dockerVersion}${env.dockerCompose ? '' : ', no Compose v2'})${c.reset}`);
   } else {
-    step(`Docker: ${c.dim}not available${c.reset}`);
+    const why = { missing: 'not installed', daemon: 'its daemon does not answer', permission: 'this user may not open its socket' }[env.dockerCause ?? 'daemon'];
+    step(`Docker: ${c.dim}not available (${why})${env.dockerCompose ? '' : ', no Compose v2'}${c.reset}`);
   }
 
   if (env.qdrant.running) {
@@ -315,50 +322,6 @@ function printDetection(env: DetectedEnv, layout: InstallLayout) {
 
   info(`Data dir: ${c.bold}${env.neuralisHome}${c.reset}${env.existingSetup ? ` ${c.dim}(existing setup found)${c.reset}` : ''}`);
   info(`Mode: ${c.bold}${LAYOUT_LABEL[layout]}${c.reset}`);
-}
-
-/** The image's own data home (`ENV NEURALIS_HOME` in the Dockerfile): a bind target, never a host path. */
-const IMAGE_DATA_HOME = '/.neuralis';
-
-/** The fix lines every image-channel refusal ends with. */
-function imageFix(version: string, composeOnly: boolean): string[] {
-  return ['Run it from the image like this (Linux or WSL2):', ...imageSetupCommand(version, composeOnly).map((line) => `  ${line}`), 'Nothing was written.'];
-}
-
-/**
- * Setup inside the image writes an install folder for the HOST, so before any
- * prompt or write it needs what the host alone can say: where the data home is
- * on the host (an absolute `NEURALIS_HOST_HOME`, unless the home is bound at its
- * own host path) and a reachable Docker (the socket). Write access is the data
- * root check (`ensureWritableOrExplain`). Null when nothing is missing or this
- * is not the image.
- */
-export function imageSetupRefusal(input: {
-  layout: InstallLayout;
-  neuralisHome: string;
-  hostHome: string | undefined;
-  docker: boolean;
-  version: string;
-  composeOnly: boolean;
-}): CliExit | null {
-  if (input.layout !== 'container') return null;
-  const fix = imageFix(input.version, input.composeOnly);
-  if (input.hostHome && !isAbsolute(input.hostHome)) {
-    return new CliExit(1, `NEURALIS_HOST_HOME must be the absolute host path of the data home, not "${input.hostHome}".`, fix);
-  }
-  if (!input.hostHome && input.neuralisHome === IMAGE_DATA_HOME) {
-    return new CliExit(1, 'NEURALIS_HOST_HOME is not set, so this container cannot tell where its data home lives on the host.', [
-      `The compose file setup writes binds the data home by its host path; inside the image it is only ${IMAGE_DATA_HOME}.`,
-      ...fix,
-    ]);
-  }
-  if (!input.docker) {
-    return new CliExit(1, 'Docker is not reachable from this container: the socket is not bound, or this user may not open it.', [
-      'Setup uses it to detect Docker, to read the vector store\'s volume and to pre-pull the desktop image.',
-      ...fix,
-    ]);
-  }
-  return null;
 }
 
 /** The image channel's half of a data-root refusal: the host path and the command, never a prompt. */
@@ -977,9 +940,13 @@ async function resolveInstallQdrantVersion(probe: QdrantInstallProbe, neuralisHo
 
 async function ensureQdrant(
   env: DetectedEnv,
-  carriedKey: string | null,
-): Promise<{ url: string; mode: 'docker' | 'binary' | 'external' | 'skip'; apiKey: string | null }> {
+  carried: CarriedOverEnv,
+  answer: QdrantAnswer,
+  freePortAbove: (port: number) => Promise<number>,
+): Promise<SetupConfig['qdrant'] & { runningVersion: string | null }> {
   heading('Vector Search (Qdrant)');
+  const carriedKey = carried.qdrantApiKey;
+  const port = carried.qdrantPort;
 
   // The self-provisioned modes resolve carry ?? mint; the mint is hex on
   // purpose (an HTTP header value — no `+`/`=` surprises). Never printed.
@@ -992,11 +959,38 @@ async function ensureQdrant(
     }
   };
 
-  // Already running → use it
-  if (env.qdrant.running) {
-    info(`Qdrant already running on ${c.bold}${env.qdrant.url}${c.reset}`);
-    const apiKey = await askExternalQdrantKey(carriedKey);
-    return { url: env.qdrant.url, mode: 'external', apiKey };
+  // This install's own server answers: a re-run keeps its mode and never asks again.
+  if (answer?.owner === 'own') {
+    info(`Qdrant: this install's own (${carried.qdrantMode}) answers on ${c.bold}${answer.url}${c.reset}`);
+    if (carried.qdrantMode === 'docker') {
+      const apiKey = resolveQdrantApiKey('docker', carriedKey, mintKey);
+      reportKey(apiKey);
+      return { url: `http://localhost:${port}`, mode: 'docker', apiKey, port, runningVersion: answer.version };
+    }
+    // A running binary serves with the key it was started with — never a new one.
+    if (carried.qdrantMode === 'binary') return { url: answer.url, mode: 'binary', apiKey: carriedKey, port, runningVersion: answer.version };
+    return { url: answer.url, mode: 'external', apiKey: await askExternalQdrantKey(carriedKey), port, runningVersion: null };
+  }
+  // Someone else's server: offered, never adopted.
+  if (answer) {
+    warn(`A Qdrant this install did not set up answers on ${c.bold}${answer.url}${c.reset}.`);
+    const free = env.docker ? await freePortAbove(Number(new URL(answer.url).port || 80)) : null;
+    const idx = await askChoice('Which Qdrant should this install use?', [
+      ...(free !== null ? [`Its own, started with the stack on port ${free} ${c.dim}(recommended)${c.reset}`] : []),
+      `The one at ${answer.url}, as an external server`,
+      ...(free === null ? ['None for now (in-memory only)'] : []),
+    ], 0);
+    if (free !== null && idx === 0) {
+      const apiKey = resolveQdrantApiKey('docker', carriedKey, mintKey);
+      reportKey(apiKey);
+      info(`Qdrant will be managed by the ${c.bold}app stack${c.reset} on port ${c.bold}${free}${c.reset}.`);
+      return { url: `http://localhost:${free}`, mode: 'docker', apiKey, port: free, runningVersion: null };
+    }
+    if (free === null && idx === 1) {
+      warn('Qdrant skipped. Using in-memory mode (data lost on restart).');
+      return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
+    }
+    return { url: answer.url, mode: 'external', apiKey: await askExternalQdrantKey(carriedKey), port, runningVersion: null };
   }
 
   console.log(`  ${c.dim}Qdrant provides persistent memory and semantic search.${c.reset}`);
@@ -1012,7 +1006,7 @@ async function ensureQdrant(
     ]);
 
     if (choice === 1) {
-      const url = await ask('Qdrant URL', 'http://localhost:6333');
+      const url = await ask('Qdrant URL', `http://localhost:${DEFAULT_QDRANT_PORT}`);
       step('Testing connection...');
       const healthy = await waitForQdrant(url, 3, 1000);
       if (healthy) {
@@ -1021,12 +1015,12 @@ async function ensureQdrant(
         warn('Could not reach Qdrant right now. Neuralis will try that URL at runtime.');
       }
       const apiKey = await askExternalQdrantKey(carriedKey);
-      return { url, mode: 'external', apiKey };
+      return { url, mode: 'external', apiKey, port, runningVersion: null };
     }
 
     if (choice === 2) {
       warn('Qdrant skipped. Using in-memory mode (data lost on restart).');
-      return { url: '', mode: 'skip', apiKey: null };
+      return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
     }
 
     info(`Qdrant will be managed by the ${c.bold}app stack${c.reset}, not by setup.`);
@@ -1037,7 +1031,7 @@ async function ensureQdrant(
     }
     const apiKey = resolveQdrantApiKey('docker', carriedKey, mintKey);
     reportKey(apiKey);
-    return { url: 'http://localhost:6333', mode: 'docker', apiKey };
+    return { url: `http://localhost:${port}`, mode: 'docker', apiKey, port, runningVersion: null };
   }
 
   // No Docker → offer binary download or skip
@@ -1062,7 +1056,7 @@ async function ensureQdrant(
     if (!binaryPath) {
       fail('Qdrant binary not available for this platform.');
       warn('Install Qdrant manually or use Docker.');
-      return { url: '', mode: 'skip', apiKey: null };
+      return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
     }
     info('Qdrant binary installed');
 
@@ -1083,11 +1077,11 @@ async function ensureQdrant(
     } else {
       warn('Qdrant started but health check timed out.');
     }
-    return { url: 'http://localhost:6333', mode: 'binary', apiKey };
+    return { url: 'http://localhost:6333', mode: 'binary', apiKey, port, runningVersion: null };
   }
 
   if (choice === 1) {
-    const url = await ask('Qdrant URL', 'http://localhost:6333');
+    const url = await ask('Qdrant URL', `http://localhost:${DEFAULT_QDRANT_PORT}`);
     step('Testing connection...');
     const healthy = await waitForQdrant(url, 3, 1000);
     if (healthy) {
@@ -1096,11 +1090,47 @@ async function ensureQdrant(
       warn('Could not reach Qdrant. Verify the URL and try again.');
     }
     const apiKey = await askExternalQdrantKey(carriedKey);
-    return { url, mode: 'external', apiKey };
+    return { url, mode: 'external', apiKey, port, runningVersion: null };
   }
 
   warn('Qdrant skipped. Using in-memory mode (data lost on restart).');
-  return { url: '', mode: 'skip', apiKey: null };
+  return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
+}
+
+// ── Host ports ─────────────────────────────────────────────────
+
+/**
+ * Every busy port named with its holder, the next free one offered — Enter
+ * accepts, another answer is checked too. The callback port cannot move: its
+ * holder is handed to the callback question instead.
+ */
+async function settlePorts(claims: PortClaim[], check: PortCheck, ownProject: string): Promise<{ ports: PortTriple; qdrantPort: number | null; codexHolder: string | null | undefined }> {
+  const busy = await findBusyPorts(claims, { ownProject, ...check });
+  const chosen = new Map(claims.map((claim) => [claim.key, claim.port]));
+  const movable = busy.filter((b) => b.key !== 'codex');
+  if (movable.length > 0) {
+    heading('Ports');
+    const offered = await nextFreePorts(movable, claims.map((claim) => claim.port), { probe: check.probe, published: await check.published() });
+    for (const b of movable) {
+      const role = PORT_ROLES[b.key]!;
+      warn(`Port ${b.port} (${role.label}) is in use${b.holder ? ` — held by ${b.holder}` : ''}.`);
+      for (;;) {
+        const port = Number(await ask(`Use port for ${role.label}`, String(offered.get(b.key))));
+        const clash = [...chosen].some(([key, other]) => key !== b.key && other === port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535 || clash) { fail('Not a free port number for this install.'); continue; }
+        if (port !== offered.get(b.key) && (await check.probe([{ ...b, port }])).length > 0) { fail(`Port ${port} is in use too.`); continue; }
+        chosen.set(b.key, port);
+        info(`${role.label}: port ${c.bold}${port}${c.reset}`);
+        break;
+      }
+    }
+  }
+  const codex = busy.find((b) => b.key === 'codex');
+  return {
+    ports: { app: chosen.get('app')!, mcp: chosen.get('mcp')!, sandbox: chosen.get('sandbox')! },
+    qdrantPort: chosen.get('qdrant') ?? null,
+    codexHolder: codex ? codex.holder : undefined,
+  };
 }
 
 // ── Vector (embeddings) Interactive Choice ─────────────────────
@@ -1815,8 +1845,7 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
   ];
 
   if (config.qdrant.mode !== 'skip') {
-    const hostQdrantUrl = config.qdrant.url || 'http://localhost:6333';
-    lines.push(`QDRANT_URL=${hostQdrantUrl}`);
+    lines.push(`QDRANT_URL=${config.qdrant.url || `http://localhost:${DEFAULT_QDRANT_PORT}`}`);
   } else {
     lines.push('# QDRANT_URL=http://localhost:6333');
   }
@@ -1846,7 +1875,10 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
   }
   if (config.qdrant.mode === 'docker') {
     lines.push(
-      '# Qdrant web dashboard (static SPA at 127.0.0.1:6333/dashboard). Set to',
+      '# The host loopback port the bundled Qdrant is published on (its container',
+      '# side stays 6333). Change it, then `neuralis setup --compose-only && docker compose up -d`.',
+      `NEURALIS_QDRANT_PORT=${config.qdrant.port}`,
+      `# Qdrant web dashboard (static SPA at 127.0.0.1:${config.qdrant.port}/dashboard). Set to`,
       "# 'off' to disable the static UI entirely, then regenerate + recreate:",
       '# `neuralis setup --compose-only && docker compose up -d`.',
       'QDRANT_DASHBOARD=on',
@@ -2021,6 +2053,7 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     brainInfraMode: config.qdrant.mode === 'skip' ? 'inmemory' : 'local',
     qdrantMode: config.qdrant.mode,
     qdrantUrl: config.qdrant.url,
+    qdrantPort: config.qdrant.port,
     qdrantImage,
     // A full setup writes QDRANT_DASHBOARD=on into .env; the off-switch is an
     // operator .env edit picked up by the --compose-only read-back.
@@ -2149,6 +2182,7 @@ function composeInputFromExisting(
     brainInfraMode,
     qdrantMode,
     qdrantUrl: envVars.QDRANT_URL ?? '',
+    qdrantPort: qdrantHostPort(envVars),
     // Resolved by the caller from the recorded state (docker mode only).
     qdrantImage: null,
     // Anything but an explicit 'off' keeps the dashboard (default-on switch).
@@ -2158,7 +2192,7 @@ function composeInputFromExisting(
     neuralisHome: hostHome,
     machine: {
       desktopVariant: machineEnv('NEURALIS_MACHINE_DESKTOP_VARIANT', 'ubuntu-xfce'),
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.0'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.1'),
       containerScope: machineEnv('NEURALIS_MACHINE_CONTAINER_SCOPE', 'user'),
       idleMinutes: Number(envVars.NEURALIS_MACHINE_IDLE_MINUTES) || 30,
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
@@ -2197,16 +2231,30 @@ function parseEnvContent(content: string): Record<string, string> {
 }
 
 /**
- * The image channel's refusals, before any prompt or write; on the image its
- * data-root context, elsewhere null.
+ * The refusals a layout can see before any prompt or write (`setupRefusal`);
+ * on the image its data-root context, elsewhere null.
  */
-async function imageChannelPreflight(ctx: CliContext, env: DetectedEnv, version: string, composeOnly: boolean): Promise<ImageRun | null> {
+async function setupPreflight(ctx: CliContext, env: DetectedEnv, version: string, composeOnly: boolean, outputOverride: string | null): Promise<ImageRun | null> {
   const layout = installLayout(ctx.installDir, ctx.packageDir);
-  const refusal = imageSetupRefusal({
-    layout, neuralisHome: env.neuralisHome, hostHome: process.env.NEURALIS_HOST_HOME, docker: env.docker, version, composeOnly,
+  const dir = resolveConfigDir(env, outputOverride);
+  const container = layout === 'container';
+  const refusal = setupRefusal({
+    layout,
+    platform: env.platform,
+    neuralisHome: env.neuralisHome,
+    hostHome: process.env.NEURALIS_HOST_HOME,
+    docker: { available: env.docker, cause: env.dockerCause, compose: env.dockerCompose },
+    version,
+    composeOnly,
+    output: {
+      dir,
+      // One read of the mount table, in the image only.
+      bound: container && bindMountOf(dir, await readFile('/proc/self/mountinfo', 'utf-8').catch(() => '')) !== null,
+      writable: container && await access(dir, fsConstants.W_OK).then(() => true, () => false),
+    },
   });
   if (refusal) throw refusal;
-  return layout === 'container' ? { hostHome: resolveHostHome(env.neuralisHome), fix: imageFix(version, composeOnly) } : null;
+  return container ? { hostHome: resolveHostHome(env.neuralisHome), fix: imageFix(version, composeOnly, composeOnly ? dir : null) } : null;
 }
 
 /** Host identity overrides for the generated compose (`--uid`, `--gid`, `--docker-gid`). */
@@ -2219,7 +2267,7 @@ async function runComposeOnly(
 ): Promise<void> {
   const env = await detectEnvironment(ctx.installDir);
   const version = await readNeuralisVersion(ctx.packageDir);
-  const image = await imageChannelPreflight(ctx, env, version, true);
+  const image = await setupPreflight(ctx, env, version, true, outputOverride);
   if (image) await ensureWritableOrExplain(env.neuralisHome, env.neuralisHome, env.platform, image);
   const configDir = resolveConfigDir(env, outputOverride);
   const envPath = join(configDir, '.env');
@@ -2259,12 +2307,28 @@ async function runComposeOnly(
   // line is refused (writing nothing), never re-derived or defaulted.
   input.imageTag = resolveImageTag(envVars, input.monorepo);
 
+  // Every port the file publishes is free or this install's own (a regeneration
+  // beside the running stack is the normal case); a busy one is refused, named.
+  const check = portCheck(installLayout(ctx.installDir, ctx.packageDir), env.docker);
+  const claims = portClaims({
+    ports: { app: input.appPort, mcp: input.mcpPort, sandbox: input.sandboxPort },
+    qdrantPort: input.qdrantMode === 'docker' ? input.qdrantPort : null,
+    codex: input.codexLoopbackPublish,
+  });
+  const busy = await findBusyPorts(claims, { ownProject: input.composeProject, ...check });
+  if (busy.length > 0) {
+    const movable = busy.filter((b) => b.key !== 'codex');
+    throw busyPortRefusal(busy, await nextFreePorts(movable, claims.map((claim) => claim.port), { probe: check.probe, published: await check.published() }));
+  }
+
   if (input.qdrantMode === 'docker') {
+    // The recorded port, not detection's default one: a moved Qdrant still reports its version.
+    const live = await detectQdrant(hostQdrantUrl(envVars));
     input.qdrantImage = qdrantImageRef(await resolveInstallQdrantVersion(
       dockerInstallProbe({
         composeProject: input.composeProject,
         composeFilePath: join(configDir, 'docker-compose.yml'),
-        runningVersion: env.qdrant.running ? env.qdrant.version : null,
+        runningVersion: live.running ? live.version : null,
       }),
       env.neuralisHome,
     ));
@@ -2402,8 +2466,9 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
   try {
     // 1. Auto-detect
     const env = await detectEnvironment(ctx.installDir);
-    printDetection(env, installLayout(ctx.installDir, ctx.packageDir));
-    const image = await imageChannelPreflight(ctx, env, await readNeuralisVersion(ctx.packageDir), false);
+    const layout = installLayout(ctx.installDir, ctx.packageDir);
+    printDetection(env, layout);
+    const image = await setupPreflight(ctx, env, await readNeuralisVersion(ctx.packageDir), false, outputOverride);
     await preflightDataRoot(env, image);
 
     // 2. Check existing setup
@@ -2415,6 +2480,18 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // origin, the ports, the session secret or the compose project name.
     const configDir = resolveConfigDir(env, outputOverride);
     const carried = carryOverEnv(await readEnvFile(configDir));
+
+    // 2b-2. Compose project name — preserved on an existing install, because it
+    // prefixes the named volumes and every container name. Whatever this name
+    // publishes is this install's own: never a busy port, never a foreign Qdrant.
+    const composeFilePath = join(configDir, 'docker-compose.yml');
+    const composeProject = resolveComposeProject({ existingName: carried.composeProject, composeFilePath, projects: await probeComposeProjects() });
+    if (composeProject.reason === 'derived') {
+      warn(`Another Compose project already answers to "neuralis" on this daemon.`);
+      info(`Using project name ${c.bold}${composeProject.name}${c.reset} for this install.`);
+    }
+    const ports = portCheck(layout, env.docker);
+    const qdrantAnswer = await answeringQdrant(env, carried, composeProject.name, ports);
 
     // 2c. The project gate runs BEFORE any credential is collected: on an
     // existing install the wizard maintains a project already on disk — named
@@ -2455,8 +2532,10 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
 
     // 3b. Deployment mode — determines how loopback URLs are stored. Must
     // run before any step that writes service URLs (chooseVectorConfig,
-    // configureLocalLLMs).
-    const deploymentMode = await askDeploymentMode(env);
+    // configureLocalLLMs). An npm install folder and the image write a folder
+    // that runs the published image, so they are Docker only; native runs from
+    // a source clone (or the host package itself).
+    const deploymentMode = layout === 'folder' || layout === 'container' ? 'docker' : await askDeploymentMode(env);
 
     // 4. LLM keys (excl. OpenAI) + OpenAI via API-key / ChatGPT OAuth / both.
     const llmKeys = await askLlmKeys();
@@ -2466,7 +2545,10 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // 5. Qdrant — the carried key rides in so the MODE decides mint/ask/none,
     // and the binary path can hand the resolved key to the spawn env BEFORE
     // the server starts (a keyless server under keyed clients is an outage).
-    const qdrant = await ensureQdrant(env, carried.qdrantApiKey);
+    const qdrant = await ensureQdrant(env, carried, qdrantAnswer, async (port) => {
+      const claim: PortClaim = { key: 'qdrant', port, address: '127.0.0.1' };
+      return (await nextFreePorts([claim], [], { probe: ports.probe, published: await ports.published() })).get('qdrant')!;
+    });
 
     // 6. Custom LLM endpoints — probe the standard ports, let the user add
     // any reachable one. Runs BEFORE chooseVectorConfig so the embedding
@@ -2492,6 +2574,14 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     const { projectId, projectName } = maintained;
     info(`Project: ${c.bold}${projectName}${c.reset} ${c.dim}(id: ${projectId})${c.reset}`);
 
+    // 7a. Host ports — every busy one named with its holder and a free one
+    // offered, before anything is written. Docker shape only: the compose file
+    // publishes them (a native server names its own clash when it starts).
+    const settled = deploymentMode === 'docker'
+      ? await settlePorts(portClaims({ ports: carried.ports, qdrantPort: qdrant.mode === 'docker' ? qdrant.port : null, codex: true }), ports, composeProject.name)
+      : { ports: carried.ports, qdrantPort: null, codexHolder: undefined };
+    if (settled.qdrantPort !== null) Object.assign(qdrant, { port: settled.qdrantPort, url: `http://localhost:${settled.qdrantPort}` });
+
     // 7b. The public origin — the one value the wizard cannot detect. It is
     // what NEXTAUTH_URL, APP_URL and the compose environment block all become,
     // and a stale localhost value breaks the login round-trip for every user
@@ -2499,10 +2589,9 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     heading('Public origin');
     step('The origin users will actually reach this deployment on.');
     step(`${c.dim}Leave as-is for a single-machine install; use the LAN IP or domain otherwise.${c.reset}`);
-    const originDefault = carried.publicOrigin ?? `http://localhost:${carried.ports.app}`;
     let publicOrigin: string | null = null;
     while (publicOrigin === null) {
-      const answered = await ask('Public origin', originDefault);
+      const answered = await ask('Public origin', originDefault(carried.publicOrigin, carried.ports.app, settled.ports.app));
       publicOrigin = normalizePublicOrigin(answered);
       if (publicOrigin === null) fail('Not a usable origin — expected something like http://192.168.1.20:3100');
     }
@@ -2516,19 +2605,24 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       carried: carried.codexLoopback,
       publicOrigin,
     });
-    let codexLoopback = codexQuestion.ask ? codexQuestion.defaultOn : codexQuestion.value;
+    // A held callback port is named, and the default turns to "no": the stack would not start.
+    const codexDefault = codexQuestion.ask && codexQuestion.defaultOn && settled.codexHolder === undefined;
+    let codexLoopback = codexQuestion.ask ? codexDefault : codexQuestion.value;
     if (codexQuestion.ask) {
       heading('ChatGPT sign-in callback');
       step('Publish port 1455 on this machine\'s loopback so a browser ON this machine can finish a ChatGPT sign-in by itself.');
       step(`${c.dim}The price: Docker holds 127.0.0.1:1455 for as long as the stack runs — \`codex login\` (and this wizard's own ChatGPT sign-in on a later re-run) cannot use that port meanwhile, and the stack will not start while another program holds it.${c.reset}`);
       step(`${c.dim}Without it the sign-in still works: you paste the final callback URL into the Credentials tab.${c.reset}`);
+      if (settled.codexHolder !== undefined) {
+        warn(`127.0.0.1:1455 is in use${settled.codexHolder ? ` — held by ${settled.codexHolder}` : ''}: publishing it would keep the stack from starting.`);
+      }
       if (!codexQuestion.effective) {
         warn(`${publicOrigin} is not a loopback origin — browsers reach this deployment by another name, so the publish has no effect for them.`);
       }
       const idx = await askChoice(
         'Publish the ChatGPT sign-in callback?',
         ['No — finish sign-ins by pasting the callback URL', 'Yes — publish 127.0.0.1:1455 while the stack runs'],
-        codexQuestion.defaultOn ? 1 : 0,
+        codexDefault ? 1 : 0,
       );
       codexLoopback = idx === 1;
       info(`ChatGPT sign-in callback: ${c.bold}${codexLoopback ? 'published on 127.0.0.1:1455' : 'paste the callback URL'}${c.reset}`);
@@ -2546,21 +2640,6 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     }
     info(`Trusted proxies: ${c.bold}${trustedProxies || 'none'}${c.reset}`);
 
-    // 7c. Compose project name — preserved on an existing install, because it
-    // prefixes the named volumes and every container name.
-    const composeFilePath = join(resolveConfigDir(env, outputOverride), 'docker-compose.yml');
-    const composeProbe = await probeComposeProjects();
-    const composeProject = resolveComposeProject({
-      existingName: carried.composeProject,
-      composeFilePath,
-      installDir: env.neuralisHome,
-      projects: composeProbe,
-    });
-    if (composeProject.reason === 'derived') {
-      warn(`Another Compose project already answers to "neuralis" on this daemon.`);
-      info(`Using project name ${c.bold}${composeProject.name}${c.reset} for this install.`);
-    }
-
     // 7d. The Qdrant image is the version this install's storage is on — decided
     // BEFORE anything below writes, so a refusal leaves the install untouched.
     const qdrantImage = qdrant.mode === 'docker'
@@ -2568,7 +2647,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
         dockerInstallProbe({
           composeProject: composeProject.name,
           composeFilePath,
-          runningVersion: env.qdrant.running ? env.qdrant.version : null,
+          runningVersion: qdrant.runningVersion,
         }),
         env.neuralisHome,
       ))
@@ -2589,7 +2668,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       // Preserve-if-exists: regenerating the session secret logs every user out.
       nextAuthSecret: carried.nextAuthSecret ?? randomBytes(32).toString('base64'),
       publicOrigin,
-      ports: carried.ports,
+      ports: settled.ports,
       composeProject: composeProject.name,
       deploymentMode,
       codexLoopback,

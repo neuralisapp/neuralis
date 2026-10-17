@@ -26,7 +26,8 @@
  * how `--compose-only` reads it back — the same channel `QDRANT_MODE` uses.
  */
 
-import { basename } from 'node:path';
+import { createHash } from 'node:crypto';
+import { basename, dirname } from 'node:path';
 
 export const DEFAULT_COMPOSE_PROJECT = 'neuralis';
 
@@ -44,6 +45,15 @@ export type ComposeProjectRow = { name: string; configFiles: string };
 /**
  * Resolve the project name for this install.
  *
+ * On a real collision the name comes from the INSTALL folder (the one holding
+ * the compose file — never the data home, which every image install shares):
+ * its basename, prefixed `neuralis-` unless it already starts so; when another
+ * folder's project answers to that too, a 6-hex hash of this folder's absolute
+ * path is appended. Deterministic per folder and zero exec: two installs
+ * written before either is started still get different names (a counter could
+ * only see started stacks). Named residual: on a clean daemon every install is
+ * `neuralis`, and two same-named folders both unstarted share `neuralis-<folder>`.
+ *
  * @param existingName  what a previous run recorded (preserve wins)
  * @param composeFilePath  the compose file this run will write
  * @param projects  what Docker reports (`docker compose ls -a --format json`),
@@ -52,7 +62,6 @@ export type ComposeProjectRow = { name: string; configFiles: string };
 export function resolveComposeProject(params: {
   existingName: string | null;
   composeFilePath: string;
-  installDir: string;
   projects: ComposeProjectRow[] | null;
 }): { name: string; reason: 'preserved' | 'default' | 'derived' | 'unprobed' } {
   if (params.existingName) {
@@ -64,18 +73,18 @@ export function resolveComposeProject(params: {
     return { name: DEFAULT_COMPOSE_PROJECT, reason: 'unprobed' };
   }
 
-  const collision = params.projects.some(
+  const elsewhere = (name: string) => params.projects!.some(
     (row) =>
-      sanitizeComposeProject(row.name) === DEFAULT_COMPOSE_PROJECT &&
+      sanitizeComposeProject(row.name) === name &&
       !row.configFiles.split(',').some((file) => file.trim() === params.composeFilePath),
   );
-  if (!collision) return { name: DEFAULT_COMPOSE_PROJECT, reason: 'default' };
+  if (!elsewhere(DEFAULT_COMPOSE_PROJECT)) return { name: DEFAULT_COMPOSE_PROJECT, reason: 'default' };
 
-  const derived = sanitizeComposeProject(`${DEFAULT_COMPOSE_PROJECT}-${basename(params.installDir)}`);
-  return {
-    name: derived === DEFAULT_COMPOSE_PROJECT ? `${DEFAULT_COMPOSE_PROJECT}-2` : derived,
-    reason: 'derived',
-  };
+  const folder = sanitizeComposeProject(basename(dirname(params.composeFilePath)));
+  const base = folder.startsWith(DEFAULT_COMPOSE_PROJECT) ? folder : `${DEFAULT_COMPOSE_PROJECT}-${folder}`;
+  if (!elsewhere(base)) return { name: base, reason: 'derived' };
+  const folderHash = createHash('sha256').update(dirname(params.composeFilePath)).digest('hex').slice(0, 6);
+  return { name: `${base}-${folderHash}`, reason: 'derived' };
 }
 
 /** Parse `docker compose ls -a --format json` output; null on anything unexpected. */

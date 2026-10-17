@@ -53,7 +53,7 @@ describe('the pinned release table', () => {
     expect(QDRANT_RELEASES.at(-1)?.version).toBe(QDRANT_TARGET_VERSION);
     for (const release of QDRANT_RELEASES) {
       expect(release.imageDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
-      expect(release.binarySha256['x86_64-unknown-linux-gnu']).toMatch(/^[0-9a-f]{64}$/);
+      expect(release.binarySha256['x86_64-unknown-linux-musl']).toMatch(/^[0-9a-f]{64}$/);
       expect(release.binarySha256['aarch64-unknown-linux-musl']).toMatch(/^[0-9a-f]{64}$/);
     }
   });
@@ -65,12 +65,12 @@ describe('the pinned release table', () => {
     expect(() => qdrantImageRef('1.19.0')).toThrow(/not a pinned release/);
   });
 
-  it('names the published asset per arch — arm64 is musl, never the gnu name that 404s', () => {
+  it('names the published asset per arch — both musl (static: the x86_64 gnu build needs glibc 2.38), never the arm64 gnu name that 404s', () => {
     const x64 = qdrantBinaryAsset('1.19.1', 'linux', 'x64');
     expect(x64).toEqual({
-      url: 'https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-unknown-linux-gnu.tar.gz',
-      filename: 'qdrant-x86_64-unknown-linux-gnu.tar.gz',
-      sha256: 'eef986e769d4d3e806dd2d546e1b4ecdd416211e54d34b4ed764fac7c58e1085',
+      url: 'https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-unknown-linux-musl.tar.gz',
+      filename: 'qdrant-x86_64-unknown-linux-musl.tar.gz',
+      sha256: '70a40529e2ebe0a2787d574d3a2e28437cfe94f26f24fa419f6ac57b4ae817c9',
     });
     const arm = qdrantBinaryAsset('1.19.1', 'linux', 'arm64');
     expect(arm?.filename).toBe('qdrant-aarch64-unknown-linux-musl.tar.gz');

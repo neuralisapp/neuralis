@@ -17,8 +17,9 @@
  * exact `@neuralis/*` pins in the host manifest, the companion-image defaults
  * (`neuralisapp/mcp-sidecar` and `neuralisapp/webtop-ubuntu-xfce` tagged with
  * the release's own version, so a pinned host never pulls a companion that
- * moved under it — the shipped `.env.example` included), and the docs site's
- * `docker pull neuralisapp/neuralis:<version>` install command. `scripts/rebuild.mts` DERIVES the sidecar tag
+ * moved under it — the shipped `.env.example` included), the docs site's
+ * `docker pull neuralisapp/neuralis:<version>` install command, and the
+ * `NEURALIS_TAG=<version>` line of the documented image-only update. `scripts/rebuild.mts` DERIVES the sidecar tag
  * from the host manifest and must carry no companion tag literal — a site that
  * expects zero occurrences pins that. Every site also states how many
  * occurrences it expects, so a site that vanished is drift, never silence.
@@ -105,6 +106,23 @@ export const SITES: readonly Site[] = [
   { file: 'neuralis/scripts/setup.mts', kind: 'companion', label: `default ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 2 },
   { file: 'neuralis/.env.example', kind: 'companion', label: `template ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 1 },
   { file: 'web/docs/app/(home)/widgets.tsx', kind: 'image', label: `install command ${HOST_IMAGE}`, pattern: tagPattern(HOST_IMAGE), expected: 1 },
+  // An image-only folder's documented update names its target on its own first
+  // line; the first-install block says `latest` there, which this never matches.
+  ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/enterprise/deployment.mdx'].map((file): Site => ({
+    file,
+    kind: 'image',
+    label: `update command ${HOST_IMAGE}`,
+    pattern: /^NEURALIS_TAG=(\d[0-9A-Za-z._-]*)/gm,
+    expected: 1,
+  })),
+  // The same pages' one-time 0.1.0-folder conversion runs the release's own scaffolder.
+  ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/enterprise/deployment.mdx'].map((file): Site => ({
+    file,
+    kind: 'pin',
+    label: 'convert command create-neuralis',
+    pattern: /^npx --yes create-neuralis@(\d[0-9A-Za-z._-]*) convert/gm,
+    expected: 1,
+  })),
   { file: 'neuralis/scripts/rebuild.mts', kind: 'companion', label: `derived ${SIDECAR}`, pattern: tagPattern(SIDECAR), expected: 0 },
   // The plugin marketplaces the host tree publishes install `@neuralis/cli` at the release's version.
   ...['neuralis/.claude-plugin/marketplace.json', 'neuralis/.agents/plugins/marketplace.json'].map((file): Site => ({

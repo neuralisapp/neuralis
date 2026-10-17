@@ -5,15 +5,19 @@ import type { SetupIncompleteReason } from './init';
  * request proxy answers it with a 503). It is static content: fixed text, inline
  * CSS, no script, no asset — and no path, version or environment value
  * (security invariant 9; the image's anonymous surfaces carry no version).
- * The Docker command is the documented Docker-only setup, byte for byte.
+ * The Docker command is the documented Docker-only setup, byte for byte: it
+ * pulls `latest` because this page may not name a version, and setup records
+ * the exact release it ran from, so the stack it writes never runs a moving tag.
+ * A literal on purpose — this file never imports the operator scripts.
  */
 export const DOCKER_SETUP_COMMAND = [
+  'NEURALIS_TAG=latest   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags',
   'mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis',
   'docker run -it --rm --user "$(id -u):$(id -g)" \\',
   '  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \\',
   '  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \\',
   '  -v "$PWD:$PWD" \\',
-  '  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --output "$PWD"',
+  '  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --output "$PWD"',
   'docker compose up -d',
 ].join('\n');
 
@@ -54,7 +58,7 @@ a{color:#7cc4ff}
 <h1>Neuralis is not set up yet</h1>
 <p>${escapeHtml(REASON_TEXT[reason])} Until setup has run, every page shows this notice.</p>
 <h2>Docker image (Linux or WSL2)</h2>
-<p>Run setup from the image into a folder of your own, then start the stack it writes. Replace <code>&lt;version&gt;</code> with the release you pulled.</p>
+<p>Run setup from the image into a folder of your own, then start the stack it writes. The first line picks the release: <code>latest</code>, or a release tag. Setup records the exact release in <code>.env</code>.</p>
 <pre>${escapeHtml(DOCKER_SETUP_COMMAND)}</pre>
 <p>If you started this container by hand, stop and remove it: the stack runs from the folder setup wrote.</p>
 <h2>npm install folder or git clone</h2>

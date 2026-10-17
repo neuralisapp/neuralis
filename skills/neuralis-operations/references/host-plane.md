@@ -19,7 +19,7 @@ npx neuralis host-broker install   # the confinement helper, copied from the bui
 npx neuralis host-broker upgrade   # install + unit refresh + broker restart (after every rebuild)
 npx neuralis host-broker run       # run it in the foreground (or install the unit)
 npx neuralis host-broker status    # readiness: secret, ceiling, helper + drift, transport, confinement mode, detached runs, pending requests
-npx neuralis host-broker grant --exec|--read|--write <dir>   # answer a recorded request: atomic ceiling write + reload
+npx neuralis host-broker grant --exec|--read|--write DIR   # answer a recorded request: atomic ceiling write + reload
 npx neuralis host-broker attach    # write a host-plane source config for a project
 npx neuralis setup --compose-only  # regenerate compose with the broker binds
 ```

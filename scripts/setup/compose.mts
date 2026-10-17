@@ -43,6 +43,8 @@ export type ComposeEmitInput = {
   qdrantMode: 'docker' | 'binary' | 'external' | 'skip';
   /** Host-side Qdrant URL (used for binary/external modes). */
   qdrantUrl: string;
+  /** Docker mode: the host loopback port Qdrant is published on (`.env` `NEURALIS_QDRANT_PORT`); the container side stays 6333. */
+  qdrantPort: number;
   /**
    * Docker mode: the digest-pinned image of the version this install's storage
    * is ON (`qdrantImageRef(state.version)`, `setup/qdrantVersion.mts`) — never
@@ -579,7 +581,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
       '  qdrant:',
       `    image: ${input.qdrantImage}`,
       '    ports:',
-      '      - "127.0.0.1:6333:6333"',
+      `      - "127.0.0.1:${input.qdrantPort}:6333"`,
       '    volumes:',
       '      - qdrant-data:/qdrant/storage',
       '      # Snapshots outside the container layer, so one survives a recreate.',

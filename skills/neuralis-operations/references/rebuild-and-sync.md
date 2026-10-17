@@ -77,8 +77,8 @@ Then **prove** the rebuild landed. `docker compose ps` reporting `healthy` says 
 health endpoint answered, not that your change is in there. Check the artifact:
 
 ```bash
-docker compose exec neuralis grep -rl '<a string from your change>' \
-  /neuralis/node_modules/<name>/dist/
+docker compose exec neuralis grep -rl 'A STRING FROM YOUR CHANGE' \
+  /neuralis/node_modules/PACKAGE_NAME/dist/
 ```
 
 And read the end of the rebuild's output: it names every UI module and package the build

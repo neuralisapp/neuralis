@@ -6,7 +6,7 @@
     {
       "name": "neuralis",
       "description": "Sign in to a Neuralis host, call package routes, read the agent's skills and serve its tools over MCP.",
-      "source": { "source": "npm", "package": "@neuralis/cli", "version": "0.3.0" }
+      "source": { "source": "npm", "package": "@neuralis/cli", "version": "0.3.1" }
     }
   ]
 }

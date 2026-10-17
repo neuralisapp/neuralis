@@ -191,6 +191,7 @@ const NON_SHIPPING = [
   { prefix: 'host-broker/', why: 'runs on the HOST, not in the container — restart the broker unit' },
   { prefix: 'docker/', why: 'builds a SEPARATE image (mcp-sidecar) — rebuild that image' },
   { prefix: 'sidecar/', why: 'baked into the WEBTOP image — rebuild that image' },
+  { prefix: 'scripts/check-build-tools.mjs', why: 'the npm install preinstall — never loaded by the running app' },
 ];
 
 function assertSyncable(pkg: SyncablePackage): void {

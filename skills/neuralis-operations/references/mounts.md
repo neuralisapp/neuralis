@@ -27,7 +27,7 @@ override survives. That is the entire reason for the split.
 ## The `--neuralis` overlay
 
 ```bash
-npx neuralis mount add <host-folder> --neuralis [--with-docker]
+npx neuralis mount add HOST_FOLDER --neuralis [--with-docker]
 ```
 
 Binds the host's own Neuralis folder onto `/neuralis` inside the container. The
@@ -62,7 +62,7 @@ capability: anything that can reach the socket can control the daemon.
 ## Package folders
 
 ```bash
-npx neuralis mount add <dir> --pkg <name>
+npx neuralis mount add DIR --pkg PACKAGE_NAME
 ```
 
 The live-edit lane for a package already registered and installed. The folder is BOUND
@@ -84,9 +84,9 @@ its bind.
 
 ```bash
 npx neuralis mount list
-npx neuralis mount remove <slug>
+npx neuralis mount remove SLUG
 npx neuralis mount remove --neuralis
-npx neuralis mount remove --pkg <name>
+npx neuralis mount remove --pkg PACKAGE_NAME
 ```
 
 Removing the last machine-local mount deletes the override file entirely (the tool

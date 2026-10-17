@@ -86,7 +86,8 @@ export type SetupConfig = {
    * self-provisioned modes (`docker`/`binary`) it is always set — carried from
    * an existing .env or minted (never re-minted over a live value).
    */
-  qdrant: { url: string; mode: 'docker' | 'binary' | 'external' | 'skip'; apiKey: string | null };
+  /** `port`: the host port a docker-mode Qdrant is published on (`NEURALIS_QDRANT_PORT`). */
+  qdrant: { url: string; mode: 'docker' | 'binary' | 'external' | 'skip'; apiKey: string | null; port: number };
   vector: VectorChoice;
   machine: MachineChoice;
   neuralisHome: string;

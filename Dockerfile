@@ -99,17 +99,21 @@ RUN gcc -static -O2 -Wall -Wextra -o /tmp/nrs-sandboxer /tmp/landlock-sandboxer.
     ( /tmp/nrs-sandboxer --selftest || [ $? -eq 91 ] )
 
 # ── Workspace manifests ─────────────────────────────────────
-# Every packages/<dir>/package.json at its own path, and nothing else — the
-# install layer below needs exactly these. Derived from the tree instead of one
-# COPY per package, so a package that lands or leaves needs no edit here. The
-# COPY of the whole tree re-runs on any package edit, but its OUTPUT is content-
-# addressed: the builder's `COPY --from=manifests` (and the install after it)
-# stays cached until a manifest itself changes.
+# Every packages/<dir>/package.json at its own path, plus the one file a
+# `"preinstall": "node <file>"` names (pnpm runs a workspace package's own
+# preinstall during the install below) — and nothing else: the install layer
+# needs exactly these. Derived from the tree instead of one COPY per package,
+# so a package that lands or leaves needs no edit here. The COPY of the whole
+# tree re-runs on any package edit, but its OUTPUT is content-addressed: the
+# builder's `COPY --from=manifests` (and the install after it) stays cached
+# until a manifest or such a script itself changes.
 FROM base AS manifests
 WORKDIR /src
 COPY packages packages
 RUN mkdir -p /out/packages && cd packages && for manifest in */package.json; do \
-      mkdir -p "/out/packages/${manifest%/package.json}" && cp "$manifest" "/out/packages/$manifest"; \
+      dir="${manifest%/package.json}" && mkdir -p "/out/packages/$dir" && cp "$manifest" "/out/packages/$manifest" && \
+      pre="$(node -p "/^node ([^ ]+)\$/.exec(require('./$manifest').scripts?.preinstall ?? '')?.[1] ?? ''")" && \
+      if [ -n "$pre" ]; then mkdir -p "/out/packages/$dir/$(dirname "$pre")" && cp "$dir/$pre" "/out/packages/$dir/$pre"; fi || exit 1; \
     done
 
 # ── Local package sources ───────────────────────────────────

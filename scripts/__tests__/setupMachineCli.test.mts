@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +9,19 @@ const host = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const roots: string[] = [];
 /** The bundled derivative is tagged with the release's own version (the host package.json). */
 const image = `neuralisapp/webtop-ubuntu-xfce:${(JSON.parse(readFileSync(join(host, 'package.json'), 'utf8')) as { version: string }).version}`;
+/** Ports nothing on this machine holds now: the wizard's port check must find them free wherever the suite runs. */
+async function freePorts(): Promise<{ app: number; mcp: number; sandbox: number }> {
+  const servers = await Promise.all([0, 1, 2].map(() => new Promise<ReturnType<typeof createServer>>((ready) => { const s = createServer(); s.listen(0, '0.0.0.0', () => ready(s)); })));
+  const [app, mcp, sandbox] = servers.map((s) => (s.address() as AddressInfo).port) as [number, number, number];
+  await Promise.all(servers.map((s) => new Promise((closed) => s.close(closed))));
+  return { app, mcp, sandbox };
+}
+const portLines = (p: { app: number; mcp: number; sandbox: number }) => `NEURALIS_APP_PORT=${p.app}\nMCP_HTTP_PORT=${p.mcp}\nNEURALIS_MCP_SANDBOX_PORT=${p.sandbox}\n`;
 function fixture(docker: boolean): { root: string; env: NodeJS.ProcessEnv; output: string; transcript: string } {
   const root = mkdtempSync(join('/tmp', 'neuralis-machine-setup-')); roots.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin); mkdirSync(join(root, 'out'));
   const transcript = join(root, 'docker.log');
-  writeFileSync(join(bin, 'docker'), `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nfs.appendFileSync(${JSON.stringify(transcript)}, JSON.stringify(args)+'\\n');\nif (${!docker}) process.exit(1);\nif (args[0] === '--version') console.log('Docker version 29.0.0');\nif (args[0] === 'compose') console.log('[]');\n`, { mode: 0o700 });
+  writeFileSync(join(bin, 'docker'), `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nfs.appendFileSync(${JSON.stringify(transcript)}, JSON.stringify(args)+'\\n');\nif (${!docker}) process.exit(1);\nif (args[0] === 'info') console.log('[{"Name":"compose"}]|29.0.0');\nif (args[0] === 'compose') console.log('[]');\n`, { mode: 0o700 });
   const preload = join(root, 'offline.mjs');
   // Reject every service probe before network IO, including provider discovery.
   writeFileSync(preload, `import http from 'node:http';\nimport { EventEmitter } from 'node:events';\nhttp.get = () => { const req = new EventEmitter(); req.destroy = () => {}; queueMicrotask(() => req.emit('error', new Error('offline fixture'))); return req; };\nglobalThis.fetch = async () => { throw new Error('offline fixture'); };\n`);
@@ -42,6 +51,9 @@ async function run(f: ReturnType<typeof fixture>, args: string[], questions: [st
   });
 }
 async function wizard(f: ReturnType<typeof fixture>, docker: boolean, prefetch: boolean): Promise<string> {
+  // A carried .env with free ports: the run re-decides nothing the port check would ask about.
+  const ports = await freePorts();
+  writeFileSync(join(f.output, '.env'), portLines(ports));
   const questions: [string, string][] = [
     ['Email:', 'owner@example.test'], ['Password (min 8 chars, hidden):', 'disposable-password'],
     ['Name [owner]:', 'Owner'], ['Pick a deployment mode', '1'],
@@ -50,8 +62,8 @@ async function wizard(f: ReturnType<typeof fixture>, docker: boolean, prefetch: 
     [docker ? 'How to run Qdrant?' : 'Qdrant is not running. Options:', '3'],
     ['Where is Ollama (your local LLM runtime) running?', '4'], ['Add a custom LLM endpoint?', 'n'],
     ...(docker ? [['Pre-pull the Neuralis desktop image now (background)?', prefetch ? 'y' : 'n'] as [string, string]] : []),
-    ['Project name', 'Desktop fixture'], ['Public origin [http://localhost:3100]:', ''],
-    ['Publish the ChatGPT sign-in callback?', '1'], ['Trusted proxies:', ''],
+    ['Project name', 'Desktop fixture'], [`Public origin [http://localhost:${ports.app}]:`, ''],
+    ['Publish the ChatGPT sign-in callback?', '1'], ['Trusted proxies:', ''], ['Overwrite?', 'y'],
   ];
   return run(f, [], questions);
 }
@@ -83,7 +95,7 @@ describe('bundled desktop setup through the real CLI', () => {
     const configDir = join(f.root, 'data/app/config'); mkdirSync(configDir, { recursive: true });
     const admin = '{"machineImage":"private.example/admin-desktop:v7","machineDesktopVariant":"admin-special"}';
     writeFileSync(join(configDir, 'platform.json'), admin);
-    writeFileSync(join(f.output, '.env'), 'NEXTAUTH_SECRET=fixture-only\nNEURALIS_IMAGE_TAG=0.1.0\nQDRANT_MODE=skip\nNEURALIS_MACHINE_IMAGE=private.example/custom-desktop:v9\nNEURALIS_MACHINE_DESKTOP_VARIANT=custom-special\n');
+    writeFileSync(join(f.output, '.env'), `NEXTAUTH_SECRET=fixture-only\nNEURALIS_IMAGE_TAG=0.1.0\nQDRANT_MODE=skip\nNEURALIS_MACHINE_IMAGE=private.example/custom-desktop:v9\nNEURALIS_MACHINE_DESKTOP_VARIANT=custom-special\n${portLines(await freePorts())}`);
     await run(f, ['--compose-only']);
     const compose = readFileSync(join(f.output, 'docker-compose.yml'), 'utf8');
     expect(compose).toContain('NEURALIS_MACHINE_IMAGE=private.example/custom-desktop:v9');

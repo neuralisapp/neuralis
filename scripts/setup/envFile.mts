@@ -68,6 +68,10 @@ export type CarriedOverEnv = {
   /** Existing compose project name — renaming it orphans the named volumes. */
   composeProject: string | null;
   qdrantMode: string | null;
+  /** `QDRANT_URL` as recorded — where a binary or external Qdrant answers. */
+  qdrantUrl: string | null;
+  /** `NEURALIS_QDRANT_PORT` — the host port a docker-mode Qdrant is published on. */
+  qdrantPort: number;
   /**
    * Existing Qdrant API key — regenerating it locks the running Qdrant server
    * out from every client until the next container recreate. NEXTAUTH_SECRET
@@ -173,6 +177,41 @@ function port(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
 }
 
+export const DEFAULT_QDRANT_PORT = 6333;
+
+/** The host port a docker-mode Qdrant is published on; its container side is always 6333. */
+export function qdrantHostPort(envVars: Record<string, string | undefined>): number {
+  return port(envVars.NEURALIS_QDRANT_PORT, DEFAULT_QDRANT_PORT);
+}
+
+/**
+ * Where the HOST reaches this install's Qdrant — the one answer for every
+ * host-side tool. Docker mode publishes it on the loopback at
+ * `NEURALIS_QDRANT_PORT`; binary and external mode record their URL.
+ */
+export function hostQdrantUrl(envVars: Record<string, string | undefined>): string {
+  if (envVars.QDRANT_MODE?.trim() === 'docker') return `http://127.0.0.1:${qdrantHostPort(envVars)}`;
+  return envVars.QDRANT_URL?.trim() || `http://localhost:${DEFAULT_QDRANT_PORT}`;
+}
+
+/**
+ * The public-origin default once the app port is settled: a carried origin
+ * that pointed at the OLD app port follows it to the new one; any other origin
+ * (a domain, a proxy port) is the operator's and stays.
+ */
+export function originDefault(carried: string | null, oldAppPort: number, appPort: number): string {
+  if (!carried) return `http://localhost:${appPort}`;
+  try {
+    const url = new URL(carried);
+    const effective = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+    if (effective !== oldAppPort || oldAppPort === appPort) return carried;
+    url.port = String(appPort);
+    return url.origin;
+  } catch {
+    return carried;
+  }
+}
+
 /** What a re-run must carry over from the existing `.env` rather than re-decide. */
 export function carryOverEnv(existing: Record<string, string>): CarriedOverEnv {
   return {
@@ -185,6 +224,8 @@ export function carryOverEnv(existing: Record<string, string>): CarriedOverEnv {
     nextAuthSecret: existing.NEXTAUTH_SECRET?.trim() || null,
     composeProject: existing.NEURALIS_COMPOSE_PROJECT?.trim() || null,
     qdrantMode: existing.QDRANT_MODE?.trim() || null,
+    qdrantUrl: existing.QDRANT_URL?.trim() || null,
+    qdrantPort: qdrantHostPort(existing),
     qdrantApiKey: existing.QDRANT_API_KEY?.trim() || null,
     codexLoopback: codexLoopbackOptIn(existing.NEURALIS_CODEX_LOOPBACK),
     trustedProxies: normalizeTrustedProxies(existing.NEURALIS_TRUSTED_PROXIES ?? '') ?? '',

@@ -243,9 +243,15 @@ describe('the update command refuses rather than half-working', () => {
     expect(installLayout(folder.installDir, folder.packageDir, false)).toBe('folder');
     const clone = fakeInstall({ next: '16.3.8' });
     expect(installLayout(clone, clone, false)).toBe('host-tree');
+    // No checkout inside a container: the image's own /neuralis.
+    expect(installLayout(clone, clone, true)).toBe('container');
     mkdirSync(join(clone, '.git'));
     expect(installLayout(clone, clone, false)).toBe('clone');
-    expect(installLayout(clone, clone, true)).toBe('container');
+    // A clone inside a devcontainer / CI image stays a clone — never "the Docker image".
+    expect(installLayout(clone, clone, true)).toBe('clone');
+    // An npm install folder wins over both markers.
+    mkdirSync(join(folder.installDir, '.git'));
+    expect(installLayout(folder.installDir, folder.packageDir, true)).toBe('folder');
     expect(installLayout(join(HERE, '..', '..'), join(HERE, '..', '..'), false)).toBe('monorepo');
   });
 
@@ -273,14 +279,22 @@ describe('the update command refuses rather than half-working', () => {
     // Not in a container here: a bare host-package folder that is no clone is told to convert.
     await expect(run).rejects.toThrow(/not an npm install folder or a git clone/);
     let refusal: unknown = null;
-    try { refuseLayout('container', parseUpdateArgs(['--version', '0.3.0'])); } catch (error) { refusal = error; }
+    try { refuseLayout('container', parseUpdateArgs(['--version', '0.3.0']), '0.2.0'); } catch (error) { refusal = error; }
     const detail = (refusal as CliExit).detail.join('\n');
     expect(detail).toContain('NEURALIS_IMAGE_TAG=0.3.0');
     expect(detail).toContain('NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:0.3.0');
     expect(detail).toContain('mcpSidecarImage');
     // The compose file pins the tag, so the new image regenerates it before the stack steps.
-    expect(detail).toContain('neuralisapp/neuralis:0.3.0 node bin/neuralis.mjs setup --compose-only --output "$PWD"');
+    expect(detail).toContain('  NEURALIS_TAG=0.3.0   # the release in .env NEURALIS_IMAGE_TAG\n');
+    expect(detail).toContain('neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --compose-only --output "$PWD"');
     expect(detail.indexOf('setup --compose-only')).toBeLessThan(detail.indexOf('docker compose stop neuralis'));
+    // Without --version the refusal names the running code's own release — never a `<version>` placeholder.
+    let own: unknown = null;
+    try { refuseLayout('container', parseUpdateArgs([]), '0.2.0'); } catch (error) { own = error; }
+    expect((own as CliExit).detail.join('\n')).toContain('NEURALIS_TAG=0.2.0 ');
+    expect((own as CliExit).detail.join('\n')).not.toMatch(/<[a-z]/);
+    try { refuseLayout('host-tree', parseUpdateArgs([]), '0.2.0'); } catch (error) { own = error; }
+    expect((own as CliExit).detail.join('\n')).toContain('create-neuralis@0.2.0 convert .');
   });
 
   it('a folder plans the host package and the @neuralis packages it pins; operator packages are not in a line', async () => {

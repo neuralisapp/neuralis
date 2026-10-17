@@ -31,8 +31,10 @@ export function installLayout(installDir: string, packageDir: string, inContaine
     // No readable manifest: not a folder; the checks below decide.
   }
   if (typeof deps.neuralis === 'string') return 'folder';
-  if (inContainer) return 'container';
-  return existsSync(join(installDir, '.git')) ? 'clone' : 'host-tree';
+  // A checkout before the container marker: a clone inside a devcontainer, CI
+  // job or any image is still a clone; the image's own /neuralis has no `.git`.
+  if (existsSync(join(installDir, '.git'))) return 'clone';
+  return inContainer ? 'container' : 'host-tree';
 }
 
 /** `verb` is the verb and its arguments, e.g. `pkg remove <name>`. */
@@ -72,21 +74,33 @@ export function spell(verb: string, at?: Pick<CliContext, 'installDir' | 'packag
   return spellOn(installLayout(installDir, at.packageDir), verb);
 }
 
+/** A path as one shell word: single-quoted, an embedded quote closed and escaped. */
+function shellWord(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
- * The documented Docker-only setup, with the image's version: the image writes
- * an install folder the host runs, as the host user, through the bound socket.
- * The setup form is the installation guide's command byte for byte (a test holds
- * it against the setup-required page); the `--compose-only` form is the first
- * command of an image-only folder's update.
+ * The documented Docker-only setup: the image writes an install folder the host
+ * runs, as the host user, through the bound socket. Every line runs verbatim —
+ * the tag is a shell variable on its own first line, so pinning a release is
+ * editing that line. `imageSetupCommand('latest')` is the installation guide's
+ * first-install block byte for byte (a test holds it against the setup-required
+ * page and every documented copy); a refusal prints the image's own version
+ * there. The `--compose-only` form is the first command of an image-only
+ * folder's update: `folder` is the install folder when the caller knows it.
  */
-export function imageSetupCommand(version: string, composeOnly = false): string[] {
+export function imageSetupCommand(version: string, composeOnly = false, folder: string | null = null): string[] {
+  const enter = folder ? `cd ${shellWord(folder)}` : 'cd ~/neuralis   # the folder that holds docker-compose.yml';
   return [
-    composeOnly ? 'cd <the folder that holds docker-compose.yml>' : 'mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis',
+    composeOnly
+      ? `NEURALIS_TAG=${version}   # the release in .env NEURALIS_IMAGE_TAG`
+      : `NEURALIS_TAG=${version}   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags`,
+    composeOnly ? enter : 'mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis',
     `docker run ${composeOnly ? '' : '-it '}--rm --user "$(id -u):$(id -g)" \\`,
     '  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \\',
     '  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \\',
     '  -v "$PWD:$PWD" \\',
-    `  neuralisapp/neuralis:${version} node bin/neuralis.mjs setup${composeOnly ? ' --compose-only' : ''} --output "$PWD"`,
+    `  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup${composeOnly ? ' --compose-only' : ''} --output "$PWD"`,
     ...(composeOnly ? [] : ['docker compose up -d']),
   ];
 }

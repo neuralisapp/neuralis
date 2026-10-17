@@ -19,6 +19,7 @@ import { readLock, resetOwnedCollections, StoreResetPartialError } from '@neural
 import { appPort, checkOffline, composeProbe, httpProbe, type OfflineProbes } from './checkpoint.mts';
 import type { CliContext } from './cli/registry.mts';
 import { loadHostEnv } from './setup/detect.mts';
+import { hostQdrantUrl } from './setup/envFile.mts';
 import { askLine, promptOwnerCredentials, verifyOwnerCredentials, type OwnerRecord } from './setup/ownerCheck.mts';
 // EVERY Qdrant call below goes through this helper: `/collections` and
 // `DELETE /collections/<name>` both require the `api-key` header on an
@@ -86,8 +87,9 @@ async function qdrantDeleteCollection(url: string, name: string): Promise<void> 
   }
 }
 
+/** In the app container its own environment names Qdrant; on the host, the install's published port. */
 function resolveQdrantUrl(): string {
-  return process.env.QDRANT_URL || 'http://localhost:6333';
+  return existsSync('/.dockerenv') ? process.env.QDRANT_URL || 'http://localhost:6333' : hostQdrantUrl(process.env);
 }
 
 function resolveCollectionPrefix(): string {

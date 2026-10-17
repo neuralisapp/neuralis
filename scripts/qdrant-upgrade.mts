@@ -13,8 +13,8 @@ import { join } from 'node:path';
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import type { CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
-import { detectIsClone, resolveConfigDir } from './setup/detect.mts';
-import { readEnvFile } from './setup/envFile.mts';
+import { resolveConfigDir } from './setup/detect.mts';
+import { hostQdrantUrl, readEnvFile } from './setup/envFile.mts';
 import { askLine, promptOwnerCredentials, verifyOwnerCredentials } from './setup/ownerCheck.mts';
 import {
   binaryInstallProbe,
@@ -108,7 +108,7 @@ async function upgradeQdrant(argv: string[], cliCtx: CliContext): Promise<number
   /** The install folder — the compose cwd (never `-f`). */
   const neuralisDir = cliCtx.installDir;
   const neuralisHome = resolveNeuralisHome().home;
-  const configDir = resolveConfigDir({ isClone: await detectIsClone(neuralisDir), projectRoot: neuralisDir, neuralisHome }, null);
+  const configDir = resolveConfigDir({ projectRoot: neuralisDir, neuralisHome }, null);
   const env = await readEnvFile(configDir);
   const mode = env.QDRANT_MODE;
   if (mode !== 'docker' && mode !== 'binary') {
@@ -117,7 +117,7 @@ async function upgradeQdrant(argv: string[], cliCtx: CliContext): Promise<number
   const apiKey = env.QDRANT_API_KEY?.trim();
   if (!apiKey) throw new Error(`${join(configDir, '.env')} has no QDRANT_API_KEY; re-run \`${spell('setup')}\` first.`);
   const composeProject = env.NEURALIS_COMPOSE_PROJECT?.trim() || 'neuralis';
-  const liveUrl = mode === 'docker' ? 'http://127.0.0.1:6333' : env.QDRANT_URL || 'http://localhost:6333';
+  const liveUrl = hostQdrantUrl(env);
   const binDir = join(neuralisHome, 'bin');
   const storageDir = join(neuralisHome, 'qdrant-storage');
 

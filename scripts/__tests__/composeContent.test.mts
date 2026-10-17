@@ -14,6 +14,7 @@
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { createServer, type AddressInfo } from 'node:net';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -38,6 +39,7 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
     brainInfraMode: 'local',
     qdrantMode: 'docker',
     qdrantUrl: 'http://localhost:6333',
+    qdrantPort: 6333,
     qdrantImage: qdrantImageRef('1.13.6'),
     qdrantDashboard: true,
     codexLoopbackPublish: false,
@@ -82,6 +84,17 @@ function serviceBlock(content: string, name: string): string {
   const next = rest.slice(rest.indexOf('\n')).search(/\n {2}[a-z][\w-]*:\n|\n[a-z]/);
   return next === -1 ? rest : rest.slice(0, next + rest.indexOf('\n'));
 }
+
+describe('the Qdrant host port (NEURALIS_QDRANT_PORT)', () => {
+  it('publishes the chosen loopback port onto the fixed container port; the app still reaches it inside', () => {
+    const content = buildComposeContent(baseInput({ qdrantPort: 6334 }), STAMP);
+    expect(serviceBlock(content, 'qdrant')).toContain('      - "127.0.0.1:6334:6333"\n');
+    expect(content).not.toContain('127.0.0.1:6333:6333');
+    expect(content).toContain('      - QDRANT_URL=http://qdrant:6333\n');
+    expect(serviceBlock(content, 'qdrant')).toContain("/dev/tcp/localhost/6333'");
+    expect(buildComposeContent(baseInput(), STAMP)).toContain('      - "127.0.0.1:6333:6333"\n');
+  });
+});
 
 describe('Qdrant API key — interpolation, never a value', () => {
   it('hands the key to the qdrant service via ${QDRANT_API_KEY:?} (docker mode)', () => {
@@ -475,7 +488,15 @@ describe('resolveBuildInputs — derived from the host manifest, checked before 
 describe('setup --compose-only in an npm install folder writes the derived image and its context (the wiring)', () => {
   const realHost = join(dirname(new URL(import.meta.url).pathname), '..', '..');
 
-  function installFolder(deps: Record<string, string>): { folder: string; home: string; bin: string } {
+  /** Three ports nothing holds now — the regeneration's port check must find them free on any machine. */
+  async function freePortLines(): Promise<string> {
+    const servers = await Promise.all([0, 1, 2].map(() => new Promise<ReturnType<typeof createServer>>((ready) => { const s = createServer(); s.listen(0, '0.0.0.0', () => ready(s)); })));
+    const [app, mcp, sandbox] = servers.map((s) => (s.address() as AddressInfo).port);
+    await Promise.all(servers.map((s) => new Promise((closed) => s.close(closed))));
+    return `NEURALIS_APP_PORT=${app}\nMCP_HTTP_PORT=${mcp}\nNEURALIS_MCP_SANDBOX_PORT=${sandbox}\n`;
+  }
+
+  async function installFolder(deps: Record<string, string>): Promise<{ folder: string; home: string; bin: string }> {
     const root = mkdtempSync(join(tmpdir(), 'neuralis-derived-'));
     const host = join(root, 'host');
     mkdirSync(host, { recursive: true });
@@ -487,11 +508,12 @@ describe('setup --compose-only in an npm install folder writes the derived image
     const folder = join(host, 'install');
     mkdirSync(folder);
     writeFileSync(join(folder, 'package.json'), JSON.stringify({ private: true, dependencies: { neuralis: '0.2.0', ...deps } }, null, 2));
-    writeFileSync(join(folder, '.env'), 'NEURALIS_IMAGE_TAG=0.2.0\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n');
-    // A docker that is never there: the environment probe must not reach this machine's daemon.
+    writeFileSync(join(folder, '.env'), `NEURALIS_IMAGE_TAG=0.2.0\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n${await freePortLines()}`);
+    // A CLI with its Compose plugin and no daemon: the environment probe must not reach this
+    // machine's daemon, and an offline regeneration needs only the CLI and the plugin.
     const bin = join(root, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\necho \'[{"Name":"compose"}]|\'\necho \'Cannot connect to the Docker daemon\' >&2\nexit 1\n', { mode: 0o755 });
     return { folder, home: join(root, 'home'), bin };
   }
 
@@ -503,8 +525,8 @@ describe('setup --compose-only in an npm install folder writes the derived image
     });
   }
 
-  it('operator packages ⇒ a build block over the generated context, the derived name, and the three context files', () => {
-    const dirs = installFolder({ '@acme/x': '1.0.0' });
+  it('operator packages ⇒ a build block over the generated context, the derived name, and the three context files', async () => {
+    const dirs = await installFolder({ '@acme/x': '1.0.0' });
     const res = composeOnly(dirs);
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
     const block = serviceBlock(readFileSync(join(dirs.folder, 'docker-compose.yml'), 'utf8'), 'neuralis');
@@ -514,8 +536,8 @@ describe('setup --compose-only in an npm install folder writes the derived image
     expect(readFileSync(join(dirs.folder, 'operator-image', 'build-workspace.mjs'), 'utf8')).toBe(readFileSync(join(realHost, 'scripts', 'build', 'build-workspace.mjs'), 'utf8'));
   });
 
-  it('control: no operator package ⇒ no context folder and the release image line, unchanged', () => {
-    const dirs = installFolder({});
+  it('control: no operator package ⇒ no context folder and the release image line, unchanged', async () => {
+    const dirs = await installFolder({});
     const res = composeOnly(dirs);
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
     const block = serviceBlock(readFileSync(join(dirs.folder, 'docker-compose.yml'), 'utf8'), 'neuralis');

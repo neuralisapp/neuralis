@@ -11,16 +11,17 @@ An agent has a persistent identity, memory, access to a scoped filesystem and a 
 Setup runs from the image itself: it writes the session secret, the data folders, the first owner account and a `docker-compose.yml` into a folder of your own, and the stack runs from that folder. You need Docker Engine with Compose v2 (`docker compose version`) on Linux or Windows with WSL2; Node.js is not needed, and macOS has not been tested yet.
 
 ```bash
+NEURALIS_TAG=latest   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags
 mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis
 docker run -it --rm --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
   -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
   -v "$PWD:$PWD" \
-  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --output "$PWD"
+  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --output "$PWD"
 docker compose up -d
 ```
 
-Replace `<version>` with the release you pull. Neuralis then answers on http://localhost:3100 with Qdrant beside it; sign in with the owner account setup created.
+The first line picks the release: `latest`, or the tag of the release you want. Setup records the exact release it ran from in `.env` (`NEURALIS_IMAGE_TAG`), so the stack never runs a moving tag. Neuralis then answers on http://localhost:3100 with Qdrant beside it — when a port is already taken, setup names it and offers a free one; sign in with the owner account setup created.
 
 An instance that has not been set up yet (no `NEXTAUTH_SECRET`, or no owner account) answers every page with a static "Neuralis is not set up yet" page (HTTP 503) that names the setup commands. Every other API call gets `503 {"error":"setup_required"}`, and `/api/health` answers `503 {"status":"setup_required","code":"secret_missing"}` (or `"setup_incomplete"`). `/api/health` answers 200 only on a configured instance whose runtime is ready. The image carries a `HEALTHCHECK` on `/api/health` (`wget` every 30 s after a 50 s start period, 3 retries), so a container started without setup turns `unhealthy`. The compose file setup writes defines its own healthcheck, which takes precedence.
 

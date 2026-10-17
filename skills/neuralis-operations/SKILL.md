@@ -59,6 +59,8 @@ of attempting it.
 
 ## The commands
 
+In the command blocks, UPPERCASE words are the values you supply.
+
 ### Install and configure — `npx neuralis setup`
 
 ```bash
@@ -70,18 +72,20 @@ With Docker and no Node.js (Linux or WSL2), setup runs from the image into a fol
 of your own, as your user, through the Docker socket:
 
 ```bash
+NEURALIS_TAG=latest   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags
 mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis
 docker run -it --rm --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
   -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
   -v "$PWD:$PWD" \
-  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --output "$PWD"
+  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --output "$PWD"
 docker compose up -d
 ```
 
-In the image it refuses before any prompt or write — printing that command — when
-`NEURALIS_HOST_HOME` is missing, Docker does not answer through the socket, or the data
-home is not writable by the user it runs as. The `--compose-only` form is the same
+The first line picks the release (`latest`, or a release tag); setup records the exact one in
+`.env`. In the image it refuses before any prompt or write — printing that command — when
+`NEURALIS_HOST_HOME` is missing, Docker does not answer through the socket, the install
+folder is not bound from the host, or the data home is not writable by the user it runs as. The `--compose-only` form is the same
 `docker run` without `-it`. Why each flag: `references/setup-and-compose.md`.
 
 Run it **before** the first `docker compose up`, or Docker creates the data
@@ -204,8 +208,8 @@ never work around it.
 npx neuralis update                          # plan against the latest published release line
 npx neuralis update --apply                  # move to that line
 npx neuralis update --version 0.2.0 --apply  # move the whole line to that version
-npx neuralis update --manifest <https-url|file> --apply   # a named release line
-npx neuralis update <package> --version <x> --apply      # one package you registered from a registry
+npx neuralis update --manifest URL_OR_FILE --apply   # a named release line
+npx neuralis update PACKAGE --version VERSION --apply      # one package you registered from a registry
 npx neuralis update --json
 ```
 
@@ -269,11 +273,13 @@ of two `.env` lines (`NEURALIS_IMAGE_TAG=<version>`,
 is changed in Admin → Config only — setup never writes it):
 
 ```bash
+NEURALIS_TAG=0.3.1   # the release in .env NEURALIS_IMAGE_TAG
+cd ~/neuralis   # the folder that holds docker-compose.yml
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
   -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \
   -v "$PWD:$PWD" \
-  neuralisapp/neuralis:<version> node bin/neuralis.mjs setup --compose-only --output "$PWD"
+  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --compose-only --output "$PWD"
 docker compose stop neuralis
 docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply
 docker compose up -d -V
@@ -293,8 +299,8 @@ stopped:
 
 ```bash
 docker compose stop neuralis
-npx --yes create-neuralis@<version> convert .   # the new layout; your .env, compose files and package lines stay
-npx neuralis update --version <version> --apply # image tag + companions, then the stack steps above
+npx --yes create-neuralis@0.3.1 convert .   # the new layout; your .env, compose files and package lines stay
+npx neuralis update --apply                 # the latest release: image tag + companions, then the stack steps above
 ```
 
 `convert` records the old manifest, lock and tarball file list, writes the new `package.json`
@@ -366,13 +372,13 @@ the host>/checkpoints:/.neuralis/checkpoints`.
 ### Expose a host folder — `npx neuralis mount`
 
 ```bash
-npx neuralis mount add <host-path> [--slug <name>] [--project <id>]   # a data source
-npx neuralis mount add <host-path> --neuralis [--with-docker]         # the /neuralis overlay
-npx neuralis mount add <host-path> --pkg <package-name>               # a package folder
-npx neuralis mount list [--project <id>]
-npx neuralis mount remove <slug> [--project <id>]
+npx neuralis mount add HOST_PATH [--slug NAME] [--project ID]   # a data source
+npx neuralis mount add HOST_PATH --neuralis [--with-docker]         # the /neuralis overlay
+npx neuralis mount add HOST_PATH --pkg PACKAGE_NAME               # a package folder
+npx neuralis mount list [--project ID]
+npx neuralis mount remove SLUG [--project ID]
 npx neuralis mount remove --neuralis
-npx neuralis mount remove --pkg <package-name>
+npx neuralis mount remove --pkg PACKAGE_NAME
 ```
 
 Without `--project`, `list` shows every project's attachments and `remove` checks every
@@ -437,10 +443,10 @@ regenerating the base compose file. The two have opposite lifecycles on purpose 
 
 ```bash
 npx neuralis pkg list                                  # builtin-class deps
-npx neuralis pkg add <name> --path <abs-host-dir>   # a folder you are developing — the image build builds it (ABSOLUTE path: a relative one resolves from the shell's cwd)
-npx neuralis pkg add <name> --tarball <x.tgz>       # a packed package, installed as packed
-npx neuralis pkg add <name> --version <x.y.z>       # a registry package at an EXACT version, public or private
-npx neuralis pkg remove <name>                      # line + mount out; default role grants revoked at the next start
+npx neuralis pkg add NAME --path ABS_HOST_DIR   # a folder you are developing — the image build builds it (ABSOLUTE path: a relative one resolves from the shell's cwd)
+npx neuralis pkg add NAME --tarball TARBALL       # a packed package, installed as packed
+npx neuralis pkg add NAME --version VERSION       # a registry package at an EXACT version, public or private
+npx neuralis pkg remove NAME                      # line + mount out; default role grants revoked at the next start
 npx neuralis rebuild                                 # after either: this install's image installs or drops it
 ```
 
@@ -490,7 +496,7 @@ npx neuralis host-broker install   # the confinement helper: copied from the bui
 npx neuralis host-broker upgrade   # install + unit refresh + broker restart — run it after every rebuild
 npx neuralis host-broker run       # run the broker in the foreground
 npx neuralis host-broker status    # readiness: secret, ceiling, helper + drift, transport, confinement mode, detached runs, pending requests
-npx neuralis host-broker grant --exec|--read|--write <dir>   # widen the ceiling for a recorded request; atomic + SIGHUP
+npx neuralis host-broker grant --exec|--read|--write DIR   # widen the ceiling for a recorded request; atomic + SIGHUP
 npx neuralis host-broker attach    # write a host-plane source config for a project
 npx neuralis setup --compose-only  # regenerate compose with the broker binds
 ```
@@ -512,8 +518,8 @@ stays dark until then. The ceiling has two modes — sandboxed (default) and the
 
 ```bash
 npx neuralis user list                     # every account and its status
-npx neuralis user enable <email>           # re-enable a disabled account
-npx neuralis user reset-password <email>   # print a one-time temporary password
+npx neuralis user enable EMAIL           # re-enable a disabled account
+npx neuralis user reset-password EMAIL   # print a one-time temporary password
 ```
 
 For when nobody can do it in the app: every owner disabled, or the only owner's
@@ -548,7 +554,7 @@ command-line form — say so rather than improvising one.
 
 ```bash
 npx neuralis checkpoint list            # checkpoints, newest first, and the data-format ledger
-npx neuralis checkpoint restore <id>    # app STOPPED; asks for the id again
+npx neuralis checkpoint restore ID    # app STOPPED; asks for the id again
 ```
 
 Every build records which on-disk format of each record kind it reads and writes, in
@@ -567,7 +573,7 @@ folder, the command is baked in:
 
 ```bash
 docker compose stop neuralis
-docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore <id>
+docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore ID
 ```
 
 A missing `credential-master.key` or `credential-salt.bin` beside encrypted credentials stops
@@ -581,9 +587,9 @@ back one build, not a backup.
 
 ```bash
 npx neuralis qdrant-upgrade --dry-run            # the hop chain; changes nothing
-npx neuralis qdrant-upgrade --rehearse <volume>  # the whole chain on a CLONED volume
+npx neuralis qdrant-upgrade --rehearse VOLUME  # the whole chain on a CLONED volume
 npx neuralis qdrant-upgrade                      # the real run: stops the stack
-npx neuralis qdrant-upgrade --rollback <dir>     # restore a run's cold backup
+npx neuralis qdrant-upgrade --rollback DIR     # restore a run's cold backup
 ```
 
 Qdrant's on-disk format is **forward-only** and upgrades **one minor at a time**, so
@@ -618,11 +624,11 @@ it with a throwaway container, then `--rehearse <clone>`.
 
 ```bash
 npx neuralis backup                              # stops the app + Qdrant, copies, starts them again
-npx neuralis backup --out <dir>                  # default: <home>-backups/<time>, beside the home
-npx neuralis backup --include-volume <name>      # also a snapshot / desktop-profile / Ollama volume
+npx neuralis backup --out DIR                  # default: HOME_DIR-backups/TIME, beside the home
+npx neuralis backup --include-volume NAME      # also a snapshot / desktop-profile / Ollama volume
 npx neuralis backup list                         # complete backups, newest first
-npx neuralis restore <dir>                       # app STOPPED; asks for the folder name again
-npx neuralis restore <dir> --home <tmp> --volume <clone>   # into a throwaway target
+npx neuralis restore DIR                       # app STOPPED; asks for the folder name again
+npx neuralis restore DIR --home TMP_HOME --volume CLONED_VOLUME   # into a throwaway target
 ```
 
 A backup is one consistent point: `<NEURALIS_HOME>` (`app/` with the credential master key,

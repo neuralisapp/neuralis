@@ -25,7 +25,7 @@ import { spell } from '../cli/spelling.mts';
 /** The version this release of the host is built and tested against. */
 export const QDRANT_TARGET_VERSION = '1.19.1';
 
-export type QdrantBinaryTarget = 'x86_64-unknown-linux-gnu' | 'aarch64-unknown-linux-musl';
+export type QdrantBinaryTarget = 'x86_64-unknown-linux-musl' | 'aarch64-unknown-linux-musl';
 
 export type QdrantRelease = {
   version: string;
@@ -41,15 +41,18 @@ export type QdrantRelease = {
  * no hop may start before the previous one has settled.
  * Refresh: `docker buildx imagetools inspect qdrant/qdrant:v<ver>` for the
  * digest; the release's asset digests (or `sha256sum` of the tarball where the
- * release publishes none) for the binaries. Upstream publishes arm64 as musl
- * only — a `aarch64-unknown-linux-gnu` asset does not exist.
+ * release publishes none) for the binaries. Both targets are musl, static: the
+ * x86_64 gnu build needs glibc 2.38 and does not start on Debian 12 or Ubuntu
+ * 22.04, and upstream publishes arm64 as musl only (a `aarch64-unknown-linux-gnu`
+ * asset does not exist). A gnu binary already installed keeps running — same
+ * storage format; the next download (an upgrade hop) takes the musl one.
  */
 export const QDRANT_RELEASES: readonly QdrantRelease[] = [
   {
     version: '1.13.6',
     imageDigest: 'sha256:bd67306b6cc77c98122cada2321eb60b20d00b19d26cb61c86681e7bd5951498',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': 'ee2cdd6eca8c7d041639256cc3db95e7e2e447ffd94165dde92e98160177f4cf',
+      'x86_64-unknown-linux-musl': 'ba5bcd1a0947c15c0ee49d10e6f07477af1c8a0c0cd8ed2b535ca9a072c429f1',
       'aarch64-unknown-linux-musl': 'b0b915dcc78fa7a1e52aa2225453a1dddef5e187f24b83af03e647858843425d',
     },
   },
@@ -57,7 +60,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.14.1',
     imageDigest: 'sha256:419d72603f5346ee22ffc4606bdb7beb52fcb63077766fab678e6622ba247366',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': '7d43068cce7477061a7bd91fd5e5e139e35cfacb09d0dcdc4f4a33ace7d782d8',
+      'x86_64-unknown-linux-musl': '1c1f514efac9c39250d63b88bf4b6073d7af08a80ee83ef10b3fef02b0713911',
       'aarch64-unknown-linux-musl': 'ed221c141e240d1443535ba44e71c965f1d2d5e702f01c52c5ad4b7fc64bb604',
     },
   },
@@ -65,7 +68,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.15.5',
     imageDigest: 'sha256:0fb8897412abc81d1c0430a899b9a81eb8328aa634e7242d1bc804c1fe8fe863',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': '56b41911cc0f891ef47d1a4c5cb1f62a423db654ab3694f83cfd37643fea082d',
+      'x86_64-unknown-linux-musl': 'a6d36c60efda2872494f44b727796c811c3e9f307a2dd9c0054ee43d995d14ad',
       'aarch64-unknown-linux-musl': '9a68ff1b158fd3a73b63e5e07a80c3bef95c869436a946151246b10b4a85bcd4',
     },
   },
@@ -73,7 +76,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.16.3',
     imageDigest: 'sha256:0425e3e03e7fd9b3dc95c4214546afe19de2eb2e28ca621441a56663ac6e1f46',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': '62e42e3e0fffd609365363be85b63ec27b215b8e7ac9929cf5736c49af0416ec',
+      'x86_64-unknown-linux-musl': '52b21d0b31d7415c42e9dba8e5133459b8fa3ab264b192d41b20ec84c7623e1f',
       'aarch64-unknown-linux-musl': 'd1685202c98ad680234fb203676247aa948eda08d51d32d4dadce9de98f21394',
     },
   },
@@ -81,7 +84,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.17.1',
     imageDigest: 'sha256:94728574965d17c6485dd361aa3c0818b325b9016dac5ea6afec7b4b2700865f',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': '318a3b1c548161ad476f9ff70b654787a20fc46685e3e1c2b7dd88b363ef3d58',
+      'x86_64-unknown-linux-musl': '4028d5e753de53bda82fa487df25353f668e785c3dfff66dfa636e2203a82b3a',
       'aarch64-unknown-linux-musl': '9347a4db839f53fe123cc775bd87e4dd02f6c2750783bea02ea4fcae9c923164',
     },
   },
@@ -89,7 +92,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.18.3',
     imageDigest: 'sha256:0bd98fa7977f1e75694779359ca4e212822e5a71334e28421182f72f209d5286',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': '60663a254cf421dba4db45710872895cd3a714fe1e6978f7927923b5cfae4718',
+      'x86_64-unknown-linux-musl': 'b4faedcdf8c9577bf1c8f2ab9b454636b87e056c116c99d49bd4f9fb2e634285',
       'aarch64-unknown-linux-musl': '1e738b45f90935c383b4076c30f377f390964cb5962b5bff24439812d157dc24',
     },
   },
@@ -97,7 +100,7 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     version: '1.19.1',
     imageDigest: 'sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10',
     binarySha256: {
-      'x86_64-unknown-linux-gnu': 'eef986e769d4d3e806dd2d546e1b4ecdd416211e54d34b4ed764fac7c58e1085',
+      'x86_64-unknown-linux-musl': '70a40529e2ebe0a2787d574d3a2e28437cfe94f26f24fa419f6ac57b4ae817c9',
       'aarch64-unknown-linux-musl': '0e607c11705fab22f7d667f4749bc0b6b60a8fa9e91de71880a6ebafbbda1b26',
     },
   },
@@ -134,7 +137,7 @@ export function qdrantBinaryAsset(
   const release = findQdrantRelease(version);
   if (!release || platform !== 'linux') return null;
   const target: QdrantBinaryTarget | null =
-    arch === 'x64' ? 'x86_64-unknown-linux-gnu' : arch === 'arm64' ? 'aarch64-unknown-linux-musl' : null;
+    arch === 'x64' ? 'x86_64-unknown-linux-musl' : arch === 'arm64' ? 'aarch64-unknown-linux-musl' : null;
   if (!target) return null;
   const filename = `qdrant-${target}.tar.gz`;
   return {

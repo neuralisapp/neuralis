@@ -38,7 +38,7 @@ import {
 import { CliExit, type CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
 import { readComposeStack, type ComposeAnswer } from './host-broker/helper.mts';
-import { loadHostEnv } from './setup/detect.mts';
+import { bindMountOf, loadHostEnv } from './setup/detect.mts';
 import { askLine } from './setup/ownerCheck.mts';
 
 const USAGE = `Usage:
@@ -144,16 +144,12 @@ export function composeProbe(cwd: string): Promise<ComposeAnswer> {
 /**
  * Inside a container a checkpoint is only a way back when `<home>/checkpoints`
  * is a bind of the host's — the writable layer goes with `--rm` or a recreate.
- * Reads `/proc/self/mountinfo` (field 5 is the mount point); outside a
- * container every directory is persistent.
+ * Reads `/proc/self/mountinfo` (`bindMountOf`); outside a container every
+ * directory is persistent.
  */
 export function checkpointsArePersistent(home: string, inContainer: boolean, mountinfo: () => string = () => readFileSync('/proc/self/mountinfo', 'utf-8')): boolean {
   if (!inContainer) return true;
-  const wanted = new Set([resolve(home), resolve(home, 'checkpoints')]);
-  return mountinfo().split('\n').some((line) => {
-    const point = line.split(' ')[4];
-    return point !== undefined && wanted.has(point.replace(/\\040/g, ' '));
-  });
+  return bindMountOf(resolve(home, 'checkpoints'), mountinfo()) !== null;
 }
 
 /** The app's host port: `.env` NEURALIS_APP_PORT (pass the file's values when they are not loaded), else 3100. */

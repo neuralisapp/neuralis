@@ -14,6 +14,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,8 +31,11 @@ import {
   writeSourceConfigsPreserving,
 } from '../setup/records.mts';
 import { projectIdFromName } from '../../src/lib/utils';
-import { detectDocker, resolveConfigDir, resolveHostHome } from '../setup/detect.mts';
-import { imageSetupRefusal, run as runSetup } from '../setup.mts';
+import {
+  answeringQdrant, bindMountOf, busyPortRefusal, detectDocker, dockerRunProbe, findBusyPorts, listenProbe, listPublishedPorts, nextFreePorts, portClaims, qdrantOwnership, resolveConfigDir, resolveHostHome, setupRefusal,
+  type AsyncProgramRunner, type PortClaim, type PortProbe, type PublishedPort,
+} from '../setup/detect.mts';
+import { run as runSetup } from '../setup.mts';
 import { imageSetupCommand } from '../cli/spelling.mts';
 import { CliExit, type CliContext } from '../cli/registry.mts';
 import { DOCKER_SETUP_COMMAND } from '../../src/server/setupRequiredPage';
@@ -38,11 +43,13 @@ import {
   buildOriginLines,
   carryOverEnv,
   codexLoopbackQuestion,
+  hostQdrantUrl,
   imageTagLines,
   initialImageTag,
   isLoopbackPublicOrigin,
   normalizePublicOrigin,
   normalizeTrustedProxies,
+  originDefault,
   parseEnvContent,
   resolveImageTag,
   resolveQdrantApiKey,
@@ -55,12 +62,28 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 // Whether `/.dockerenv` exists is the one container signal (`installLayout`,
 // `resolveConfigDir`, `resolveHostHome`); a row turns it on, every other read
-// passes through.
-const container = vi.hoisted(() => ({ value: false }));
+// passes through. In a container row the mount table carries `binds` — the
+// folders the row's `docker run` would have bound from the host.
+const container = vi.hoisted(() => ({ value: false, binds: [] as string[] }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, existsSync: (path: import('node:fs').PathLike) => (path === '/.dockerenv' ? container.value : actual.existsSync(path)) };
 });
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const mountinfo = () => ['1 0 0:1 / / rw - overlay overlay rw', ...container.binds.map((dir, i) => `${i + 2} 1 8:1 ${dir} ${dir} rw - ext4 /dev/sdc rw`)].join('\n');
+  const readFile = ((path: unknown, ...rest: unknown[]) =>
+    (path === '/proc/self/mountinfo' && container.value ? Promise.resolve(mountinfo()) : (actual.readFile as (...a: unknown[]) => unknown)(path, ...rest))) as typeof actual.readFile;
+  return { ...actual, readFile, default: { ...actual, readFile } };
+});
+
+/** Ports nothing on this machine holds now: a port check must find them free wherever the suite runs. */
+async function freePorts(n: number): Promise<number[]> {
+  const servers = await Promise.all(Array.from({ length: n }, () => new Promise<ReturnType<typeof createServer>>((ready) => { const s = createServer(); s.listen(0, '0.0.0.0', () => ready(s)); })));
+  const ports = servers.map((s) => (s.address() as AddressInfo).port);
+  await Promise.all(servers.map((s) => new Promise((closed) => s.close(closed))));
+  return ports;
+}
 
 function scratchHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'neuralis-setup-'));
@@ -69,53 +92,97 @@ function scratchHome(): string {
   return home;
 }
 
-describe('deployment config placement', () => {
-  const env = { isClone: false, projectRoot: '/install/host', neuralisHome: '/data/neuralis' };
+describe('deployment config placement follows the install layout', () => {
+  const neuralisHome = '/data/neuralis';
+  /** An install root: the image's own tree (nothing), a clone (`.git`) or an npm folder (depends on neuralis). */
+  const root = (kind: 'image' | 'clone' | 'folder'): string => {
+    const dir = mkdtempSync(join(tmpdir(), `neuralis-layout-${kind}-`));
+    if (kind === 'clone') mkdirSync(join(dir, '.git'));
+    if (kind === 'folder') writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: { neuralis: '0.3.1' } }));
+    return dir;
+  };
 
-  it('keeps a native/npm host env beside the app for Next to load', () => {
-    expect(resolveConfigDir(env, null, false)).toBe(env.projectRoot);
+  it('on the host every layout keeps .env beside the app, where `next start` loads it', () => {
+    for (const kind of ['image', 'clone', 'folder'] as const) {
+      const projectRoot = root(kind);
+      expect(resolveConfigDir({ projectRoot, neuralisHome }, null, false), kind).toBe(projectRoot);
+    }
+    const checkout = join(HERE, '..', '..');
+    expect(resolveConfigDir({ projectRoot: checkout, neuralisHome }, null, true)).toBe(checkout);
   });
-  it('keeps a source host env beside the app', () => {
-    expect(resolveConfigDir({ ...env, isClone: true }, null, false)).toBe(env.projectRoot);
+  it('only the image\'s own tree keeps config on its persistent data mount', () => {
+    expect(resolveConfigDir({ projectRoot: root('image'), neuralisHome }, null, true)).toBe(neuralisHome);
   });
-  it('keeps pull-only container config on its persistent data mount', () => {
-    expect(resolveConfigDir(env, null, true)).toBe(env.neuralisHome);
-  });
-  it('preserves the source-overlay placement inside a container', () => {
-    expect(resolveConfigDir({ ...env, isClone: true }, null, true)).toBe(env.projectRoot);
+  it('a clone or an npm folder inside a container (devcontainer, CI) keeps its own folder', () => {
+    for (const kind of ['clone', 'folder'] as const) {
+      const projectRoot = root(kind);
+      expect(resolveConfigDir({ projectRoot, neuralisHome }, null, true), kind).toBe(projectRoot);
+    }
   });
   it('honors an explicit export directory in both environments', () => {
-    expect(resolveConfigDir(env, '/export', false)).toBe('/export');
-    expect(resolveConfigDir(env, '/export', true)).toBe('/export');
+    const projectRoot = root('image');
+    expect(resolveConfigDir({ projectRoot, neuralisHome }, '/export', false)).toBe('/export');
+    expect(resolveConfigDir({ projectRoot, neuralisHome }, '/export', true)).toBe('/export');
   });
 });
 
-describe('Docker detection runs the CLI without a shell', () => {
-  it('asks `docker --version` then `docker info` as plain argv — no redirect a cmd.exe would misread', () => {
+describe('Docker detection: ONE `docker info`, without a shell, with its cause', () => {
+  const ok = (stdout: string) => ({ stdout, stderr: '', status: 0, error: null });
+  const PLUGINS = '[{"Name":"buildx","Version":"v0.20.0"},{"Name":"compose","Version":"v2.40.0"}]';
+
+  it('asks the plugins and the server version in one plain-argv call — no redirect a cmd.exe would misread', () => {
     const calls: Array<[string, string[]]> = [];
-    const found = detectDocker((file, args) => { calls.push([file, args]); return args[0] === '--version' ? 'Docker version 29.7.2, build abc\n' : ''; });
-    expect(found).toEqual({ available: true, version: '29.7.2' });
-    expect(calls).toEqual([['docker', ['--version']], ['docker', ['info']]]);
+    const found = detectDocker((file, args) => { calls.push([file, args]); return ok(`${PLUGINS}|29.7.2\n`); });
+    expect(found).toEqual({ available: true, version: '29.7.2', cause: null, compose: true });
+    expect(calls).toEqual([['docker', ['info', '--format', '{{json .ClientInfo.Plugins}}|{{.ServerVersion}}']]]);
   });
 
-  it('a CLI without a running daemon is not Docker', () => {
-    expect(detectDocker((_file, args) => { if (args[0] === 'info') throw new Error('Cannot connect to the Docker daemon'); return 'Docker version 29.7.2'; }))
-      .toEqual({ available: false, version: null });
+  it('names the cause: no CLI, a daemon that does not answer, a socket this user may not open — and Compose from the client side', () => {
+    const enoent = Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
+    expect(detectDocker(() => ({ stdout: '', stderr: '', status: null, error: enoent }))).toEqual({ available: false, version: null, cause: 'missing', compose: false });
+    const down = { stdout: `${PLUGINS}|\n`, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n', status: 0, error: null };
+    expect(detectDocker(() => down)).toEqual({ available: false, version: null, cause: 'daemon', compose: true });
+    const denied = { stdout: '[]|\n', stderr: 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock\n', status: 1, error: null };
+    expect(detectDocker(() => denied)).toEqual({ available: false, version: null, cause: 'permission', compose: false });
+    // A daemon without the Compose plugin answers; Compose is false, Docker is available.
+    expect(detectDocker(() => ok('[{"Name":"buildx"},{"Name":"compose","Err":"not a valid plugin"}]|29.7.2'))).toEqual({ available: true, version: '29.7.2', cause: null, compose: false });
+    // An older CLI that refuses the template outright: no daemon proven, no Compose proven.
+    expect(detectDocker(() => ({ stdout: '', stderr: 'Cannot connect', status: 1, error: null }))).toEqual({ available: false, version: null, cause: 'daemon', compose: false });
   });
 
-  it.skipIf(process.platform === 'win32')('finds a real `docker` program on PATH; a failing daemon check is a paired control', () => {
+  it.skipIf(process.platform === 'win32')('finds a real `docker` program on PATH; a missing one and a refused socket are the paired controls', () => {
     const bin = mkdtempSync(join(tmpdir(), 'neuralis-fake-docker-'));
     const path = process.env.PATH;
-    const fake = (infoExit: number) => writeFileSync(join(bin, 'docker'), `#!/bin/sh\n[ "$1" = --version ] && echo 'Docker version 29.7.2, build fake' && exit 0\necho noise >&2\nexit ${infoExit}\n`, { mode: 0o755 });
+    const fake = (body: string) => writeFileSync(join(bin, 'docker'), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     try {
       process.env.PATH = `${bin}:${path}`;
-      fake(0);
-      expect(detectDocker()).toEqual({ available: true, version: '29.7.2' });
-      fake(1);
-      expect(detectDocker()).toEqual({ available: false, version: null });
+      fake(`echo '${PLUGINS}|29.7.2'`);
+      expect(detectDocker()).toEqual({ available: true, version: '29.7.2', cause: null, compose: true });
+      fake(`echo '${PLUGINS}|'; echo 'permission denied while trying to connect' >&2`);
+      expect(detectDocker()).toMatchObject({ available: false, cause: 'permission', compose: true });
+      process.env.PATH = mkdtempSync(join(tmpdir(), 'neuralis-no-docker-'));
+      expect(detectDocker()).toMatchObject({ available: false, cause: 'missing' });
     } finally {
       process.env.PATH = path;
     }
+  });
+});
+
+describe('the install folder lies on a bind from the host', () => {
+  const MOUNTINFO = [
+    '617 548 0:52 / / rw,relatime master:303 - overlay overlay rw,lowerdir=/x',
+    '620 617 8:32 /home/op/.neuralis /.neuralis rw,relatime - ext4 /dev/sdc rw',
+    '621 617 8:32 /home/op/my\\040neuralis /home/op/my\\040neuralis rw,relatime - ext4 /dev/sdc rw',
+    '622 617 8:32 /var/lib/docker/containers/abc/hostname /etc/hostname rw - ext4 /dev/sdc rw',
+  ].join('\n');
+
+  it('the longest mount point that covers the folder; the container root is no bind', () => {
+    expect(bindMountOf('/home/op/my neuralis', MOUNTINFO)).toBe('/home/op/my neuralis');
+    expect(bindMountOf('/home/op/my neuralis/sub', MOUNTINFO)).toBe('/home/op/my neuralis');
+    expect(bindMountOf('/.neuralis', MOUNTINFO)).toBe('/.neuralis');
+    expect(bindMountOf('/home/op/neuralis', MOUNTINFO)).toBeNull();
+    expect(bindMountOf('/etc/hostnames', MOUNTINFO)).toBeNull();
+    expect(bindMountOf('/anything', '')).toBeNull();
   });
 });
 
@@ -609,35 +676,250 @@ describe('the Qdrant API key mint is MODE-conditional', () => {
   });
 });
 
+describe('host ports: every busy one named, this install\'s own never busy, a free one offered', () => {
+  const claims: PortClaim[] = portClaims({ ports: { app: 3100, mcp: 3101, sandbox: 3102 }, qdrantPort: 6333, codex: true });
+  const table: PublishedPort[] = [
+    { port: 3100, project: 'neuralis', container: 'neuralis-neuralis-1' },
+    { port: 3101, project: 'neuralis', container: 'neuralis-neuralis-1' },
+    { port: 3102, project: 'neuralis', container: 'neuralis-neuralis-1' },
+    { port: 6333, project: 'neuralis', container: 'neuralis-qdrant-1' },
+    { port: 8080, project: null, container: 'adminer' },
+  ];
+
+  it('claims what the compose file publishes, on its bind address; the callback port is the fixed 1455', () => {
+    expect(claims.map((c) => `${c.key}:${c.address}:${c.port}`)).toEqual(['app:0.0.0.0:3100', 'mcp:0.0.0.0:3101', 'sandbox:0.0.0.0:3102', 'qdrant:127.0.0.1:6333', 'codex:127.0.0.1:1455']);
+    expect(portClaims({ ports: { app: 1, mcp: 2, sandbox: 3 }, qdrantPort: null, codex: false }).map((c) => c.key)).toEqual(['app', 'mcp', 'sandbox']);
+  });
+
+  it('on a host layout: the listen probe and Docker\'s table together — another stack\'s ports are busy and named, the own project\'s are not', async () => {
+    let asked = 0;
+    const published = async () => { asked++; return table; };
+    const probe: PortProbe = async (cs) => cs.filter((c) => [3100, 3101, 3102, 6333, 1455].includes(c.port));
+    const busy = await findBusyPorts(claims, { ownProject: 'other-install', published, probe, probeFirst: true });
+    expect(busy.map((b) => [b.key, b.port, b.holder])).toEqual([
+      ['app', 3100, 'Compose project "neuralis"'], ['mcp', 3101, 'Compose project "neuralis"'], ['sandbox', 3102, 'Compose project "neuralis"'],
+      ['qdrant', 6333, 'Compose project "neuralis"'], ['codex', 1455, null],
+    ]);
+    // A re-run or a regeneration beside its own running stack: nothing is busy but a stranger's port.
+    expect((await findBusyPorts(claims, { ownProject: 'neuralis', published, probe, probeFirst: true })).map((b) => b.key)).toEqual(['codex']);
+    // Setup inside a container: the listen probe sees its own namespace only (all free),
+    // yet every port another project publishes is busy and named — from ONE table read.
+    asked = 0;
+    const blind = await findBusyPorts(claims, { ownProject: 'other-install', published, probe: async () => [], probeFirst: true });
+    expect(blind.map((b) => [b.port, b.holder])).toEqual([[3100, 'Compose project "neuralis"'], [3101, 'Compose project "neuralis"'], [3102, 'Compose project "neuralis"'], [6333, 'Compose project "neuralis"']]);
+    expect(asked).toBe(1);
+    // Paired controls: the own project's ports are never busy; no Docker (no table) and a free probe → nothing.
+    expect(await findBusyPorts(claims, { ownProject: 'neuralis', published, probe: async () => [], probeFirst: true })).toEqual([]);
+    expect(await findBusyPorts(claims, { ownProject: null, published: async () => null, probe: async () => [], probeFirst: true })).toEqual([]);
+  });
+
+  it('in the image: Docker\'s table first, the throwaway probe only for what no container claims', async () => {
+    const probed: number[][] = [];
+    const probe: PortProbe = async (cs) => { probed.push(cs.map((c) => c.port)); return cs.filter((c) => c.port === 1455); };
+    const busy = await findBusyPorts(claims, { ownProject: null, published: async () => table, probe, probeFirst: false });
+    expect(busy.map((b) => b.key)).toEqual(['app', 'mcp', 'sandbox', 'qdrant', 'codex']);
+    expect(probed).toEqual([[1455]]);
+    const own = await findBusyPorts(claims, { ownProject: 'neuralis', published: async () => table, probe, probeFirst: false });
+    expect(own.map((b) => b.key)).toEqual(['codex']);
+  });
+
+  it('the next free port: above the busy one, never another claim\'s, a container\'s or one the probe finds taken', async () => {
+    const probe: PortProbe = async (cs) => cs.filter((c) => c.port === 3104);
+    const busy = claims.filter((c) => ['app', 'mcp', 'sandbox', 'qdrant'].includes(c.key));
+    const free = await nextFreePorts(busy, claims.map((c) => c.port), { probe, published: [...table, { port: 6334, project: 'x', container: 'y' }] });
+    expect(Object.fromEntries(free)).toEqual({ app: 3103, mcp: 3106, sandbox: 3105, qdrant: 6335 });
+  });
+
+  it('the listen probe: a held port is busy, its paired control on the same address is free', async () => {
+    const [held, idle] = await freePorts(2);
+    const holder = createServer();
+    await new Promise<void>((ready) => holder.listen(held, '127.0.0.1', ready));
+    try {
+      const result = await listenProbe([{ key: 'a', port: held!, address: '127.0.0.1' }, { key: 'b', port: idle!, address: '127.0.0.1' }]);
+      expect(result.map((c) => c.key)).toEqual(['a']);
+    } finally {
+      await new Promise((closed) => holder.close(closed));
+    }
+  });
+
+  it('Docker\'s table: one `docker ps`, every published host port with its Compose project', async () => {
+    const calls: string[][] = [];
+    const rows = await listPublishedPorts(async (_file, args) => {
+      calls.push(args);
+      return { stdout: 'neuralis\tneuralis-neuralis-1\t0.0.0.0:3100->3100/tcp, [::]:3100->3100/tcp, 0.0.0.0:3101->3101/tcp\n\tadminer\t0.0.0.0:8080->8080/tcp\nx\tquiet\t\n', stderr: '', status: 0, error: null };
+    });
+    expect(calls).toEqual([['ps', '--format', '{{.Label "com.docker.compose.project"}}\t{{.Names}}\t{{.Ports}}']]);
+    expect(rows).toEqual([
+      { port: 3100, project: 'neuralis', container: 'neuralis-neuralis-1' },
+      { port: 3101, project: 'neuralis', container: 'neuralis-neuralis-1' },
+      { port: 8080, project: null, container: 'adminer' },
+    ]);
+    expect(await listPublishedPorts(async () => ({ stdout: '', stderr: 'denied', status: 1, error: null }))).toBeNull();
+  });
+
+  it('a default-port stack as `docker ps` really prints it: identity RANGES and IPv6 expand, exposed-only ports do not count', async () => {
+    // Measured on a running default install (3100/3101 identity-mapped, 3102 → 3100, Qdrant on loopback).
+    const table = [
+      'neuralis\tneuralis-neuralis-1\t0.0.0.0:3100-3101->3100-3101/tcp, [::]:3100-3101->3100-3101/tcp, 0.0.0.0:3102->3100/tcp, [::]:3102->3100/tcp',
+      'neuralis\tneuralis-qdrant-1\t127.0.0.1:6333->6333/tcp',
+      '\tdetermined_robinson\t3100-3101/tcp',
+      'other\tother-web-1\t:::8443->443/tcp',
+    ].join('\n');
+    const rows = await listPublishedPorts(async () => ({ stdout: `${table}\n`, stderr: '', status: 0, error: null }));
+    expect(rows).toEqual([
+      { port: 3100, project: 'neuralis', container: 'neuralis-neuralis-1' },
+      { port: 3101, project: 'neuralis', container: 'neuralis-neuralis-1' },
+      { port: 3102, project: 'neuralis', container: 'neuralis-neuralis-1' },
+      { port: 6333, project: 'neuralis', container: 'neuralis-qdrant-1' },
+      { port: 8443, project: 'other', container: 'other-web-1' },
+    ]);
+    // The re-run of that install sees its own ports as its own, never as busy.
+    const busy = await findBusyPorts(portClaims({ ports: { app: 3100, mcp: 3101, sandbox: 3102 }, qdrantPort: 6333, codex: false }), {
+      ownProject: 'neuralis', published: async () => rows, probe: async (claims) => claims, probeFirst: true,
+    });
+    expect(busy).toEqual([]);
+    // Another install's run of that same table: both range ports busy, the holder named.
+    const foreign = await findBusyPorts(portClaims({ ports: { app: 3100, mcp: 3101, sandbox: 3102 }, qdrantPort: 6333, codex: false }), {
+      ownProject: 'neuralis-lab', published: async () => rows, probe: async (claims) => claims, probeFirst: true,
+    });
+    expect(foreign.filter((b) => b.port === 3100 || b.port === 3101).map((b) => [b.port, b.holder]))
+      .toEqual([[3100, 'Compose project "neuralis"'], [3101, 'Compose project "neuralis"']]);
+  });
+
+  it('the image\'s probe: the image THIS container runs, one labelled throwaway run per port IN PARALLEL; anything but "in use" refuses', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const runs: string[][] = [];
+    const runner: AsyncProgramRunner = async (_file, args) => {
+      if (args[0] === 'inspect') return { stdout: 'sha256:feed\n', stderr: '', status: 0, error: null };
+      runs.push(args);
+      inFlight++; peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return args.includes('0.0.0.0:3100:3100')
+        ? { stdout: '', stderr: 'docker: Error response from daemon: driver failed programming external connectivity: Bind for 0.0.0.0:3100 failed: port is already allocated\n', status: 125, error: null }
+        : { stdout: '', stderr: '', status: 0, error: null };
+    };
+    const probe = await dockerRunProbe(runner, 'abc123');
+    const busy = await probe(claims.slice(0, 4));
+    expect(busy.map((c) => c.key)).toEqual(['app']);
+    expect(peak).toBe(4);
+    expect(runs[0]).toEqual(['run', '--rm', '--label', 'neuralis.kind=probe', '--entrypoint', 'true', '-p', '0.0.0.0:3100:3100', 'sha256:feed']);
+    const broken = await dockerRunProbe(async (_f, args) => (args[0] === 'inspect' ? { stdout: 'sha256:feed', stderr: '', status: 0, error: null } : { stdout: '', stderr: 'no space left on device', status: 125, error: null }), 'abc123');
+    await expect(broken(claims.slice(0, 1))).rejects.toThrow(/Checking host port 3100 failed: no space left on device/);
+    await expect(dockerRunProbe(async () => ({ stdout: '', stderr: 'No such object', status: 1, error: null }), 'abc123')).rejects.toThrow(/Cannot tell which image/);
+  });
+
+  it('--compose-only asks nothing: each busy port named with its holder and the .env line that moves it', () => {
+    const exit = busyPortRefusal(
+      [{ key: 'app', port: 3100, address: '0.0.0.0', holder: 'Compose project "neuralis"' }, { key: 'qdrant', port: 6333, address: '127.0.0.1', holder: null }, { key: 'codex', port: 1455, address: '127.0.0.1', holder: null }],
+      new Map([['app', 3103], ['qdrant', 6334]]),
+    );
+    expect(exit.message).toBe('Ports this install publishes are in use.');
+    expect(exit.detail.slice(0, 3)).toEqual([
+      'Port 3100 (the app) is in use — held by Compose project "neuralis": set NEURALIS_APP_PORT=3103 in .env.',
+      'Port 6333 (Qdrant) is in use: set NEURALIS_QDRANT_PORT=6334 in .env.',
+      'Port 1455 (the ChatGPT sign-in callback) is in use: set NEURALIS_CODEX_LOOPBACK=off in .env.',
+    ]);
+    expect(exit.detail.at(-1)).toMatch(/setup --compose-only again\. Nothing was written\.$/);
+  });
+});
+
+describe('a Qdrant that answers is this install\'s own only when the carried mode explains it', () => {
+  const table: PublishedPort[] = [{ port: 6334, project: 'neuralis-lab', container: 'neuralis-lab-qdrant-1' }, { port: 6333, project: 'neuralis', container: 'neuralis-qdrant-1' }];
+  const own = (over: Partial<Parameters<typeof qdrantOwnership>[0]>) => qdrantOwnership({ carriedMode: null, carriedUrl: null, answeringUrl: 'http://localhost:6333', ownProject: 'neuralis-lab', published: table, ...over });
+
+  it('a fresh install never owns a running Qdrant — someone else\'s is offered, never adopted', () => {
+    expect(own({})).toBe('foreign');
+  });
+  it('docker: own when its Compose project publishes the answering port; another project\'s is foreign', () => {
+    expect(own({ carriedMode: 'docker', answeringUrl: 'http://127.0.0.1:6334' })).toBe('own');
+    expect(own({ carriedMode: 'docker', answeringUrl: 'http://localhost:6333' })).toBe('foreign');
+    expect(own({ carriedMode: 'docker', answeringUrl: 'http://127.0.0.1:6334', published: null })).toBe('foreign');
+  });
+  it('binary / external: own when the recorded URL is the one answering — a re-run keeps the mode, no question', () => {
+    expect(own({ carriedMode: 'binary', carriedUrl: 'http://localhost:6333', answeringUrl: 'http://127.0.0.1:6333' })).toBe('own');
+    expect(own({ carriedMode: 'external', carriedUrl: 'http://qdrant.lan:6333', answeringUrl: 'http://qdrant.lan:6333' })).toBe('own');
+    expect(own({ carriedMode: 'external', carriedUrl: 'http://qdrant.lan:6333', answeringUrl: 'http://localhost:6333' })).toBe('foreign');
+    expect(own({ carriedMode: 'skip', carriedUrl: null })).toBe('foreign');
+  });
+  it('the recorded port is carried, and every host tool reaches docker mode on it', () => {
+    const carried = carryOverEnv(parseEnvContent('QDRANT_MODE=docker\nNEURALIS_QDRANT_PORT=6334\nQDRANT_URL=http://localhost:6334\n'));
+    expect([carried.qdrantPort, carried.qdrantUrl]).toEqual([6334, 'http://localhost:6334']);
+    expect(carryOverEnv({}).qdrantPort).toBe(6333);
+    expect(hostQdrantUrl({ QDRANT_MODE: 'docker', NEURALIS_QDRANT_PORT: '6334', QDRANT_URL: 'http://localhost:6333' })).toBe('http://127.0.0.1:6334');
+    expect(hostQdrantUrl({ QDRANT_MODE: 'docker' })).toBe('http://127.0.0.1:6333');
+    expect(hostQdrantUrl({ QDRANT_MODE: 'external', QDRANT_URL: 'http://qdrant.lan:6333' })).toBe('http://qdrant.lan:6333');
+  });
+  it('an image re-run: the setup container cannot reach the host loopback, yet its own docker Qdrant is kept — no question', async () => {
+    const [port] = await freePorts(1);
+    const carried = carryOverEnv(parseEnvContent(`QDRANT_MODE=docker\nNEURALIS_QDRANT_PORT=${port}\n`));
+    const env = { qdrant: { running: false, url: 'http://localhost:6333', version: null } };
+    const published = (project: string) => async () => [{ port: port!, project, container: `${project}-qdrant-1` }];
+    expect(await answeringQdrant(env, carried, 'neuralis', { published: published('neuralis') }))
+      .toEqual({ url: `http://localhost:${port}`, version: null, owner: 'own' });
+    // Paired controls: another project's container on that port, or no table, is not this install's — nothing answers.
+    expect(await answeringQdrant(env, carried, 'neuralis', { published: published('acme') })).toBeNull();
+    expect(await answeringQdrant(env, carried, 'neuralis', { published: async () => null })).toBeNull();
+  });
+});
+
+describe('the public-origin default follows a moved app port', () => {
+  it('fresh: localhost on the chosen port; a carried origin on the OLD app port moves with it; any other stays', () => {
+    expect(originDefault(null, 3100, 3103)).toBe('http://localhost:3103');
+    expect(originDefault('http://localhost:3100', 3100, 3103)).toBe('http://localhost:3103');
+    expect(originDefault('http://192.168.1.20:3100', 3100, 3103)).toBe('http://192.168.1.20:3103');
+    expect(originDefault('http://localhost:3100', 3100, 3100)).toBe('http://localhost:3100');
+    expect(originDefault('https://neuralis.example.com', 3100, 3103)).toBe('https://neuralis.example.com');
+    expect(originDefault('http://proxy.lan:8080', 3100, 3103)).toBe('http://proxy.lan:8080');
+  });
+});
+
 describe('compose project name', () => {
   const compose = '/home/op/neuralis/docker-compose.yml';
 
   it('preserves what a previous run recorded', () => {
     expect(
-      resolveComposeProject({ existingName: 'neuralis-lab', composeFilePath: compose, installDir: '/home/op/.neuralis', projects: [] }),
+      resolveComposeProject({ existingName: 'neuralis-lab', composeFilePath: compose, projects: [] }),
     ).toEqual({ name: 'neuralis-lab', reason: 'preserved' });
   });
 
   it('keeps the plain default when nothing else claims it', () => {
     const rows = [{ name: 'other-stack', configFiles: '/srv/other/docker-compose.yml' }];
-    expect(resolveComposeProject({ existingName: null, composeFilePath: compose, installDir: '/home/op/.neuralis', projects: rows }).name).toBe('neuralis');
+    expect(resolveComposeProject({ existingName: null, composeFilePath: compose, projects: rows }).name).toBe('neuralis');
   });
 
   it('does not collide with itself (same compose file = this install)', () => {
     const rows = [{ name: 'neuralis', configFiles: compose }];
-    expect(resolveComposeProject({ existingName: null, composeFilePath: compose, installDir: '/home/op/.neuralis', projects: rows }).reason).toBe('default');
+    expect(resolveComposeProject({ existingName: null, composeFilePath: compose, projects: rows }).reason).toBe('default');
   });
 
-  it('derives a distinct name when another install already answers to neuralis', () => {
+  it('derives a distinct name from the INSTALL folder when another install already answers to neuralis', () => {
     const rows = [{ name: 'neuralis', configFiles: '/other/tree/docker-compose.yml' }];
-    const resolved = resolveComposeProject({ existingName: null, composeFilePath: compose, installDir: '/home/op/wintest', projects: rows });
-    expect(resolved.reason).toBe('derived');
-    expect(resolved.name).toBe('neuralis-wintest');
+    expect(resolveComposeProject({ existingName: null, composeFilePath: '/home/op/wintest/docker-compose.yml', projects: rows }))
+      .toEqual({ name: 'neuralis-wintest', reason: 'derived' });
+    // A folder already named for it is not prefixed twice.
+    expect(resolveComposeProject({ existingName: null, composeFilePath: '/srv/neuralis-lab/docker-compose.yml', projects: rows }).name).toBe('neuralis-lab');
+  });
+
+  it('two image installs sharing one data home get two names — a hash of the install folder, never a counter or the data home', () => {
+    // The first image install in ~/neuralis took `neuralis`; two more folders named the same, NEITHER started yet.
+    const rows = [{ name: 'neuralis', configFiles: '/home/op/neuralis/docker-compose.yml' }];
+    const at = (folder: string) => resolveComposeProject({ existingName: null, composeFilePath: `${folder}/docker-compose.yml`, projects: rows }).name;
+    const hash = (folder: string) => createHash('sha256').update(folder).digest('hex').slice(0, 6);
+    expect(at('/srv/a/neuralis')).toBe(`neuralis-${hash('/srv/a/neuralis')}`);
+    expect(at('/srv/b/neuralis')).toBe(`neuralis-${hash('/srv/b/neuralis')}`);
+    // Unstarted (absent from `compose ls`) and still distinct; the same folder always gets the same name.
+    expect(at('/srv/a/neuralis')).not.toBe(at('/srv/b/neuralis'));
+    expect(at('/srv/a/neuralis')).toBe(at('/srv/a/neuralis'));
+    expect(at('/srv/a/neuralis')).not.toContain('.neuralis');
+    // A derived base nobody else answers to stays readable — no hash.
+    expect(at('/srv/lab')).toBe('neuralis-lab');
   });
 
   it('takes the default when Docker cannot be probed', () => {
     expect(
-      resolveComposeProject({ existingName: null, composeFilePath: compose, installDir: '/x', projects: null }),
+      resolveComposeProject({ existingName: null, composeFilePath: compose, projects: null }),
     ).toEqual({ name: 'neuralis', reason: 'unprobed' });
   });
 
@@ -661,31 +943,128 @@ describe('setup run from the image writes an install folder the HOST runs', () =
   });
 
   it('the refusal command is the documented one, byte for byte (the setup-required page carries it too)', () => {
-    expect(imageSetupCommand(VERSION).join('\n')).toBe(DOCKER_SETUP_COMMAND.replace('<version>', VERSION));
+    expect(imageSetupCommand('latest').join('\n')).toBe(DOCKER_SETUP_COMMAND);
+    // A refusal pins the image's own release on the first line; nothing else moves.
+    expect(imageSetupCommand(VERSION).slice(1)).toEqual(imageSetupCommand('latest').slice(1));
+    expect(imageSetupCommand(VERSION)[0]).toBe(`NEURALIS_TAG=${VERSION}   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags`);
     const update = imageSetupCommand(VERSION, true);
-    expect(update.at(-1)).toBe(`  neuralisapp/neuralis:${VERSION} node bin/neuralis.mjs setup --compose-only --output "$PWD"`);
+    expect(update[0]).toBe(`NEURALIS_TAG=${VERSION}   # the release in .env NEURALIS_IMAGE_TAG`);
+    expect(update[1]).toBe('cd ~/neuralis   # the folder that holds docker-compose.yml');
+    expect(update.at(-1)).toBe('  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup --compose-only --output "$PWD"');
     expect(update.join('\n')).not.toContain('-it ');
-  });
-
-  it('refuses in the image without the host home or a reachable Docker; a host layout and a same-path bind pass', () => {
-    const base = { layout: 'container' as const, neuralisHome: '/.neuralis', hostHome: HOST_HOME, docker: true, version: VERSION, composeOnly: false };
-    expect(imageSetupRefusal(base)).toBeNull();
-    expect(imageSetupRefusal({ ...base, hostHome: undefined })?.message).toMatch(/NEURALIS_HOST_HOME is not set/);
-    expect(imageSetupRefusal({ ...base, hostHome: '.neuralis' })?.message).toMatch(/must be the absolute host path/);
-    const noDocker = imageSetupRefusal({ ...base, docker: false });
-    expect(noDocker?.message).toMatch(/Docker is not reachable/);
-    expect(noDocker?.detail.join('\n')).toContain('-v /var/run/docker.sock:/var/run/docker.sock');
-    expect(noDocker?.detail.at(-1)).toBe('Nothing was written.');
-    // The home bound at its own host path needs no NEURALIS_HOST_HOME.
-    expect(imageSetupRefusal({ ...base, neuralisHome: '/home/op/.neuralis', hostHome: undefined })).toBeNull();
-    for (const layout of ['folder', 'clone', 'monorepo', 'host-tree'] as const) {
-      expect(imageSetupRefusal({ ...base, layout, hostHome: undefined, docker: false })).toBeNull();
+    expect(imageSetupCommand(VERSION, true, '/home/op/my neuralis')[1]).toBe("cd '/home/op/my neuralis'");
+    expect(imageSetupCommand(VERSION, true, "/srv/op's")[1]).toBe("cd '/srv/op'\\''s'");
+    // Every form runs verbatim: no `<…>` a shell would read as a redirect.
+    for (const form of [imageSetupCommand('latest'), imageSetupCommand(VERSION), update, imageSetupCommand(VERSION, true, '/f')]) {
+      expect(form.join('\n')).not.toMatch(/<[^>\n]*>/);
     }
   });
 
+  it('every documented shell block runs verbatim (no `<…>`); the first install is `imageSetupCommand(\'latest\')`, the update names this release', () => {
+    const repo = join(HERE, '..', '..', '..');
+    const hostVersion = (JSON.parse(readFileSync(join(repo, 'neuralis', 'package.json'), 'utf8')) as { version: string }).version;
+    const files: Record<string, { install: number; update: number }> = {
+      'neuralis/README.md': { install: 1, update: 0 },
+      'neuralis/DOCKERHUB.md': { install: 1, update: 0 },
+      'neuralis/skills/neuralis-operations/SKILL.md': { install: 1, update: 1 },
+      'neuralis/skills/neuralis-operations/references/setup-and-compose.md': { install: 1, update: 0 },
+      'neuralis/skills/neuralis-operations/references/mounts.md': { install: 0, update: 0 },
+      'neuralis/skills/neuralis-operations/references/host-plane.md': { install: 0, update: 0 },
+      'neuralis/skills/neuralis-operations/references/rebuild-and-sync.md': { install: 0, update: 0 },
+      'web/docs/content/docs/getting-started/installation.mdx': { install: 1, update: 0 },
+      'web/docs/content/docs/enterprise/deployment.mdx': { install: 0, update: 1 },
+    };
+    const install = imageSetupCommand('latest').join('\n');
+    const update = imageSetupCommand(hostVersion, true).join('\n');
+    for (const [file, want] of Object.entries(files)) {
+      const text = readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+      const blocks = [...text.matchAll(/^```(?:bash|sh)\n([\s\S]*?)^```$/gm)].map((m) => m[1]!.replace(/\n$/, ''));
+      // ANY copied command, not only the image's: a `<…>` is a redirect to bash.
+      for (const block of blocks) expect(block, `${file}: a placeholder in a copied command`).not.toMatch(/<[^>\n]*>/);
+      const naming = blocks.filter((block) => block.includes('neuralisapp/neuralis:'));
+      expect(naming.length, `${file}: blocks naming the image`).toBe(want.install + want.update);
+      expect(naming.filter((block) => block === install).length, `${file}: first-install block`).toBe(want.install);
+      expect(naming.filter((block) => block.startsWith(`${update}\n`)).length, `${file}: update block`).toBe(want.update);
+    }
+  });
+
+  const DOCKER_OK = { available: true, cause: null, compose: true } as const;
+  const OUT = { dir: '/home/op/neuralis', bound: true, writable: true };
+  const base = { layout: 'container' as const, platform: 'linux' as const, neuralisHome: '/.neuralis', hostHome: HOST_HOME, docker: DOCKER_OK, version: VERSION, composeOnly: false, output: OUT };
+
+  it('refuses in the image without the host home, a reachable Docker or a bound install folder; a same-path bind passes', () => {
+    expect(setupRefusal(base)).toBeNull();
+    expect(setupRefusal({ ...base, hostHome: undefined })?.message).toMatch(/NEURALIS_HOST_HOME is not set/);
+    expect(setupRefusal({ ...base, hostHome: '.neuralis' })?.message).toMatch(/must be the absolute host path/);
+    const noDocker = setupRefusal({ ...base, docker: { available: false, cause: 'daemon', compose: true } });
+    expect(noDocker?.message).toMatch(/Docker is not reachable from this container: the socket is not bound/);
+    expect(noDocker?.detail.join('\n')).toContain('-v /var/run/docker.sock:/var/run/docker.sock');
+    expect(noDocker?.detail.at(-1)).toBe('Nothing was written.');
+    // The socket bound but its group not added: the other fix, named.
+    expect(setupRefusal({ ...base, docker: { available: false, cause: 'permission', compose: true } })?.message).toMatch(/may not open the bound socket — add its group: --group-add/);
+    // No `-v "$PWD:$PWD"`: the folder is the container's own, and every answer would be lost with it.
+    const unbound = setupRefusal({ ...base, output: { ...OUT, bound: false } });
+    expect(unbound?.message).toMatch(/install folder \/home\/op\/neuralis is not bound from the host/);
+    expect(unbound?.detail.join('\n')).toContain('  -v "$PWD:$PWD" \\');
+    expect(unbound?.detail.join('\n')).not.toContain('--user "$(id -u):$(id -g)".');
+    // Bound but not writable — a run without `--user`: the --user fix, never the bind hint.
+    const notWritable = setupRefusal({ ...base, output: { ...OUT, writable: false } });
+    expect(notWritable?.message).toMatch(/is not writable by this user/);
+    expect(notWritable?.detail[0]).toBe('The image runs as its own user unless it is given yours: --user "$(id -u):$(id -g)".');
+    expect(notWritable?.detail.join('\n')).not.toContain('Bind the folder at its own path');
+    // The compose-only refusal names the real folder it was given.
+    expect(setupRefusal({ ...base, composeOnly: true, output: { ...OUT, bound: false } })?.detail).toContain("  cd '/home/op/neuralis'");
+    // The home bound at its own host path needs no NEURALIS_HOST_HOME.
+    expect(setupRefusal({ ...base, neuralisHome: '/home/op/.neuralis', hostHome: undefined })).toBeNull();
+    for (const layout of ['clone', 'monorepo', 'host-tree'] as const) {
+      expect(setupRefusal({ ...base, layout, hostHome: undefined, docker: { available: false, cause: 'missing', compose: false }, output: { ...OUT, bound: false } })).toBeNull();
+    }
+  });
+
+  it('an npm install folder refuses a Docker it cannot run, naming the cause and this platform\'s fix; --compose-only needs only the CLI and Compose', () => {
+    const folder = { ...base, layout: 'folder' as const, hostHome: undefined, neuralisHome: '/home/op/.neuralis', output: { ...OUT, bound: false } };
+    const refusal = (docker: { available: boolean; cause: 'missing' | 'daemon' | 'permission' | null; compose: boolean }, platform: 'linux' | 'wsl' | 'macos' | 'windows', composeOnly = false) =>
+      setupRefusal({ ...folder, docker, platform, composeOnly });
+    const missing = { available: false, cause: 'missing', compose: false } as const;
+    const daemon = { available: false, cause: 'daemon', compose: true } as const;
+    const permission = { available: false, cause: 'permission', compose: true } as const;
+    const noCompose = { available: true, cause: null, compose: false } as const;
+    const rows: Array<[typeof missing | typeof daemon | typeof permission | typeof noCompose, 'linux' | 'wsl' | 'macos' | 'windows', RegExp, RegExp]> = [
+      [missing, 'linux', /^Docker is not installed\./, /docs\.docker\.com\/engine\/install/],
+      [missing, 'wsl', /^Docker is not installed in this WSL distro\./, /WSL integration/],
+      [missing, 'macos', /^Docker is not installed\./, /Install Docker Desktop/],
+      [missing, 'windows', /^Docker is not installed\./, /Install Docker Desktop/],
+      [daemon, 'linux', /daemon does not answer/, /sudo systemctl start docker/],
+      [daemon, 'wsl', /daemon does not answer/, /WSL integration .*sudo service docker start/],
+      [daemon, 'macos', /daemon does not answer/, /^Start Docker Desktop\.$/],
+      [permission, 'linux', /may not open the Docker socket/, /sudo usermod -aG docker "\$USER"/],
+      [permission, 'wsl', /may not open the Docker socket/, /sudo usermod -aG docker/],
+      [permission, 'windows', /may not open the Docker socket/, /Restart Docker Desktop/],
+      [noCompose, 'linux', /Docker Compose v2 \(`docker compose`\) is missing/, /docker-compose-plugin/],
+      [noCompose, 'macos', /Docker Compose v2 \(`docker compose`\) is missing/, /Update Docker Desktop/],
+    ];
+    for (const [docker, platform, message, fix] of rows) {
+      const exit = refusal(docker, platform);
+      expect(exit?.message, `${docker.cause ?? 'compose'} on ${platform}`).toMatch(message);
+      expect(exit?.message).toContain('An npm install folder runs Neuralis with Docker Compose.');
+      expect(exit?.detail[0], `${docker.cause ?? 'compose'} on ${platform}`).toMatch(fix);
+      expect(exit?.detail[1]).toBe('Then run npx neuralis setup again. More: https://docs.neuralisapp.com/getting-started/installation#if-something-fails');
+      expect(exit?.detail.at(-1)).toBe('Nothing was written.');
+    }
+    expect(refusal(DOCKER_OK, 'linux')).toBeNull();
+    // Offline regeneration keeps working: a stopped daemon or a socket this user cannot open still has the CLI and its plugin.
+    expect(refusal(daemon, 'linux', true)).toBeNull();
+    expect(refusal(permission, 'linux', true)).toBeNull();
+    expect(refusal(missing, 'linux', true)?.detail[1]).toContain('npx neuralis setup --compose-only again');
+    expect(refusal(noCompose, 'linux', true)?.message).toMatch(/Compose v2/);
+  });
+
+  const FAKE_DOCKER = "#!/bin/sh\ncase \"$1\" in\n  info) echo '[{\"Name\":\"compose\"}]|29.8.2' ;;\n  inspect) echo 'sha256:feed' ;;\nesac\nexit 0\n";
+  const FAKE_DOCKER_DOWN = "#!/bin/sh\necho '[{\"Name\":\"compose\"}]|'\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n";
+
   // The wiring, in process: a host package copy outside any workspace (the image's
   // layout), a fake `docker` on PATH, and `/.dockerenv` switched per row.
-  function imageRun(opts: { docker: boolean }) {
+  async function imageRun(opts: { docker: boolean }) {
     const root = mkdtempSync(join(tmpdir(), 'neuralis-image-setup-'));
     const host = join(root, 'host');
     const home = join(root, 'home');
@@ -693,14 +1072,16 @@ describe('setup run from the image writes an install folder the HOST runs', () =
     const bin = join(root, 'bin');
     for (const dir of [host, join(home, 'app', 'config'), out, bin]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', version: VERSION, bin: { neuralis: 'bin/neuralis.mjs' } }));
-    const env = 'NEURALIS_IMAGE_TAG=9.9.9\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n';
+    const [app, mcp, sandbox] = await freePorts(3);
+    const env = `NEURALIS_IMAGE_TAG=9.9.9\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\nNEURALIS_APP_PORT=${app}\nMCP_HTTP_PORT=${mcp}\nNEURALIS_MCP_SANDBOX_PORT=${sandbox}\n`;
     writeFileSync(join(out, '.env'), env);
-    writeFileSync(join(bin, 'docker'), opts.docker ? "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Docker version 29.8.2, build fake'\nexit 0\n" : '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'docker'), opts.docker ? FAKE_DOCKER : FAKE_DOCKER_DOWN, { mode: 0o755 });
     const ctx = { packageDir: host, installDir: host, cwd: host, stdout: () => {}, stderr: () => {}, env: process.env, stdin: process.stdin } as CliContext;
+    container.binds = [home, out];
     return { root, host, home, out, bin, env, ctx };
   }
 
-  async function inImage<T>(fixture: ReturnType<typeof imageRun>, vars: Record<string, string | undefined>, fn: () => Promise<T>, inContainer = true): Promise<T> {
+  async function inImage<T>(fixture: Awaited<ReturnType<typeof imageRun>>, vars: Record<string, string | undefined>, fn: () => Promise<T>, inContainer = true): Promise<T> {
     const saved = new Map(Object.keys({ PATH: '', ...vars }).map((k) => [k, process.env[k]]));
     const set = (k: string, v: string | undefined) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
     set('PATH', `${fixture.bin}:${process.env.PATH ?? ''}`);
@@ -717,7 +1098,7 @@ describe('setup run from the image writes an install folder the HOST runs', () =
   const probes = { QDRANT_URL: 'http://127.0.0.1:9', OLLAMA_URL: 'http://127.0.0.1:9' };
 
   it.skipIf(process.platform === 'win32')('--compose-only in the image binds the HOST home and passes it on; the data stays at the container path', async () => {
-    const f = imageRun({ docker: true });
+    const f = await imageRun({ docker: true });
     try {
       const code = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME }, () => runSetup(['--compose-only', '--output', f.out], f.ctx));
       expect(code).toBe(0);
@@ -733,7 +1114,7 @@ describe('setup run from the image writes an install folder the HOST runs', () =
   });
 
   it.skipIf(process.platform === 'win32')('control: on the host the same run binds the data home itself, NEURALIS_HOST_HOME notwithstanding', async () => {
-    const f = imageRun({ docker: true });
+    const f = await imageRun({ docker: true });
     try {
       const code = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME }, () => runSetup(['--compose-only', '--output', f.out], f.ctx), false);
       expect(code).toBe(0);
@@ -747,7 +1128,7 @@ describe('setup run from the image writes an install folder the HOST runs', () =
   });
 
   /** Runs `args` in the image expecting a refusal; asserts it wrote nothing. */
-  async function refused(f: ReturnType<typeof imageRun>, args: string[], vars: Record<string, string | undefined>): Promise<CliExit> {
+  async function refused(f: Awaited<ReturnType<typeof imageRun>>, args: string[], vars: Record<string, string | undefined>): Promise<CliExit> {
     const before = readdirSync(f.home, { recursive: true }).sort();
     let thrown: unknown = null;
     await inImage(f, { ...probes, ...vars }, async () => {
@@ -761,7 +1142,7 @@ describe('setup run from the image writes an install folder the HOST runs', () =
   }
 
   it.skipIf(process.platform === 'win32')('the three refusals write nothing: no host home, no Docker, a home the image user cannot write', async () => {
-    const f = imageRun({ docker: true });
+    const f = await imageRun({ docker: true });
     try {
       // (a) the image default home with no host path: nothing is even read from it.
       const noHome = await refused(f, ['--output', f.out], { NEURALIS_HOME: '/.neuralis', NEURALIS_HOST_HOME: undefined });
@@ -769,12 +1150,12 @@ describe('setup run from the image writes an install folder the HOST runs', () =
       expect(noHome.detail).toContain(`  ${imageSetupCommand(VERSION).at(-2)}`);
       expect(existsSync('/.neuralis')).toBe(false);
       // (b) no Docker answering through the socket, on --compose-only too.
-      writeFileSync(join(f.bin, 'docker'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      writeFileSync(join(f.bin, 'docker'), FAKE_DOCKER_DOWN, { mode: 0o755 });
       const noDocker = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
       expect(noDocker.message).toMatch(/Docker is not reachable/);
       // (c) the home not writable by this user: the --user fix, never a prompt and never a uid literal.
       if (process.getuid?.() !== 0) {
-        writeFileSync(join(f.bin, 'docker'), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Docker version 29.8.2, build fake'\nexit 0\n", { mode: 0o755 });
+        writeFileSync(join(f.bin, 'docker'), FAKE_DOCKER, { mode: 0o755 });
         chmodSync(f.home, 0o555);
         try {
           const readOnly = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
@@ -785,7 +1166,98 @@ describe('setup run from the image writes an install folder the HOST runs', () =
           chmodSync(f.home, 0o755);
         }
       }
+      // (d) no `-v "$PWD:$PWD"`: the install folder is the container's own — refused, naming the bind.
+      writeFileSync(join(f.bin, 'docker'), FAKE_DOCKER, { mode: 0o755 });
+      container.binds = [f.home];
+      const unbound = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
+      expect(unbound.message).toMatch(/is not bound from the host/);
+      expect(unbound.detail).toContain(`  cd '${f.out}'`);
+      // (e) bound but not writable — the run without `--user`: the --user fix, never the bind hint.
+      if (process.getuid?.() !== 0) {
+        container.binds = [f.home, f.out];
+        chmodSync(f.out, 0o555);
+        try {
+          const noUser = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
+          expect(noUser.message).toMatch(/is not writable by this user/);
+          expect(noUser.detail[0]).toContain('--user "$(id -u):$(id -g)"');
+        } finally {
+          chmodSync(f.out, 0o755);
+        }
+      }
     } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('--compose-only refuses a port another stack holds — named, with the .env line — and passes beside its own running stack', async () => {
+    const f = await imageRun({ docker: true });
+    const app = Number(parseEnvContent(f.env).NEURALIS_APP_PORT);
+    const holder = createServer();
+    await new Promise<void>((ready) => holder.listen(app, '0.0.0.0', ready));
+    const dockerHolding = (project: string) => `#!/bin/sh\ncase "$1" in\n  info) echo '[{"Name":"compose"}]|29.8.2' ;;\n  ps) printf '${project}\\t${project}-neuralis-1\\t0.0.0.0:${app}->3100/tcp\\n' ;;\nesac\nexit 0\n`;
+    try {
+      writeFileSync(join(f.bin, 'docker'), dockerHolding('acme'), { mode: 0o755 });
+      const exit = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: undefined }, async () => {
+        try { await runSetup(['--compose-only', '--output', f.out], f.ctx); return null; } catch (error) { return error as CliExit; }
+      }, false);
+      expect(exit).toBeInstanceOf(CliExit);
+      expect(exit!.detail[0]).toMatch(new RegExp(`^Port ${app} \\(the app\\) is in use — held by Compose project "acme": set NEURALIS_APP_PORT=\\d+ in \\.env\\.$`));
+      expect(readdirSync(f.out)).toEqual(['.env']);
+      // The same port held by THIS install's own project (NEURALIS_COMPOSE_PROJECT=neuralis) is no clash.
+      writeFileSync(join(f.bin, 'docker'), dockerHolding('neuralis'), { mode: 0o755 });
+      const code = await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: undefined }, () => runSetup(['--compose-only', '--output', f.out], f.ctx), false);
+      expect(code).toBe(0);
+      expect(readFileSync(join(f.out, 'docker-compose.yml'), 'utf8')).toContain(`      - "${app}:3100"\n`);
+    } finally {
+      await new Promise((closed) => holder.close(closed));
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('in the image --compose-only tries an unclaimed port with a throwaway run of its own image, and refuses the one in use', async () => {
+    const f = await imageRun({ docker: true });
+    const mcp = Number(parseEnvContent(f.env).MCP_HTTP_PORT);
+    const log = join(f.root, 'docker.log');
+    writeFileSync(join(f.bin, 'docker'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\ncase "$1" in\n  info) echo '[{"Name":"compose"}]|29.8.2' ;;\n  inspect) echo 'sha256:feed' ;;\n  run) case "$*" in *":${mcp}:${mcp} "*) echo 'Bind for 0.0.0.0:${mcp} failed: port is already allocated' >&2; exit 125 ;; esac ;;\nesac\nexit 0\n`, { mode: 0o755 });
+    try {
+      const exit = await refused(f, ['--compose-only', '--output', f.out], { NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: HOST_HOME });
+      expect(exit.detail[0]).toMatch(new RegExp(`^Port ${mcp} \\(MCP\\) is in use: set MCP_HTTP_PORT=\\d+ in \\.env\\.$`));
+      const calls = readFileSync(log, 'utf8').trim().split('\n');
+      expect(calls.filter((c) => c.startsWith('ps '))).toHaveLength(1);
+      expect(calls.filter((c) => c.startsWith('inspect '))).toHaveLength(1);
+      expect(calls.filter((c) => c.startsWith('run --rm --label neuralis.kind=probe --entrypoint true -p ')).length).toBeGreaterThanOrEqual(3);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('an npm install folder with no usable Docker refuses before the first prompt and writes nothing', async () => {
+    const f = await imageRun({ docker: false });
+    const folder = join(f.root, 'folder');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'package.json'), JSON.stringify({ private: true, dependencies: { neuralis: VERSION } }));
+    const ctx = { ...f.ctx, installDir: folder, cwd: folder } as CliContext;
+    const before = readdirSync(f.home, { recursive: true }).sort();
+    const printed: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...parts: unknown[]) => { printed.push(parts.join(' ')); });
+    try {
+      for (const [script, cause] of [[null, /Docker is not installed/], [FAKE_DOCKER_DOWN, /daemon does not answer/]] as const) {
+        const empty = mkdtempSync(join(tmpdir(), 'neuralis-path-'));
+        if (script) writeFileSync(join(empty, 'docker'), script, { mode: 0o755 });
+        let thrown: unknown = null;
+        await inImage(f, { ...probes, NEURALIS_HOME: f.home, NEURALIS_HOST_HOME: undefined, PATH: empty }, async () => {
+          try { await runSetup([], ctx); } catch (error) { thrown = error; }
+        }, false);
+        expect(thrown).toBeInstanceOf(CliExit);
+        expect((thrown as CliExit).message).toMatch(cause);
+        expect((thrown as CliExit).detail.at(-1)).toBe('Nothing was written.');
+        expect(readdirSync(folder)).toEqual(['package.json']);
+        expect(readdirSync(f.home, { recursive: true }).sort()).toEqual(before);
+      }
+      // The detection summary already names the cause.
+      expect(printed.join('\n')).toMatch(/Docker: .*not available \(its daemon does not answer\)/);
+    } finally {
+      log.mockRestore();
       rmSync(f.root, { recursive: true, force: true });
     }
   });

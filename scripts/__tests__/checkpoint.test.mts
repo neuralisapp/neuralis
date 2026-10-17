@@ -184,7 +184,7 @@ describe('a container-form checkpoint is a way back only on the persistent mount
   it('the generated compose binds <home>/checkpoints next to app/ and projects/', () => {
     const content = buildComposeContent({
       composeProject: 'neuralis', uid: 1000, gid: 1000, dockerGid: null, appPort: 3100, mcpPort: 3101, sandboxPort: 3102,
-      nextAuthUrl: 'http://localhost:3100', brainInfraMode: 'local', qdrantMode: 'external', qdrantUrl: 'http://q:6333',
+      nextAuthUrl: 'http://localhost:3100', brainInfraMode: 'local', qdrantMode: 'external', qdrantUrl: 'http://q:6333', qdrantPort: 6333,
       qdrantImage: qdrantImageRef('1.13.6'), qdrantDashboard: false, codexLoopbackPublish: false, composeOllama: false,
       neuralisHome: '/home/op/.neuralis',
       machine: { desktopVariant: 'ubuntu-xfce', image: 'neuralisapp/webtop-ubuntu-xfce:0.1.0', containerScope: 'user', idleMinutes: 30, screen: '1920x1080', sidecarPort: 9400, cdpPort: 9222, seccompUnconfined: false, dockerSocket: '/var/run/docker.sock' },

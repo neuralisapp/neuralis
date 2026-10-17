@@ -13,7 +13,7 @@ import { appPort, checkOffline, composeProbe, httpProbe } from './checkpoint.mts
 import type { CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
 import { detectIsClone, loadHostEnv, resolveConfigDir } from './setup/detect.mts';
-import { readEnvFile } from './setup/envFile.mts';
+import { hostQdrantUrl, readEnvFile } from './setup/envFile.mts';
 import { askLine } from './setup/ownerCheck.mts';
 import { qdrantImageRef, qdrantStatePath, readQdrantState } from './setup/qdrantVersion.mts';
 import { processExec } from './qdrant-upgrade/upgrade.mts';
@@ -80,7 +80,7 @@ function parseArgs(argv: string[], cwd: string): Args {
 async function facts(neuralisDir: string): Promise<InstallFacts> {
   const neuralisHome = resolveNeuralisHome().home;
   const isClone = await detectIsClone(neuralisDir);
-  const configDir = resolveConfigDir({ isClone, projectRoot: neuralisDir, neuralisHome }, null);
+  const configDir = resolveConfigDir({ projectRoot: neuralisDir, neuralisHome }, null);
   const env = await readEnvFile(configDir);
   const modes: QdrantMode[] = ['docker', 'binary', 'external', 'skip'];
   const qdrantMode = modes.find((m) => m === env.QDRANT_MODE?.trim()) ?? 'external';
@@ -135,7 +135,7 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
     return 0;
   }
   const env = await readEnvFile(install.configDir);
-  const p = ports(install, env.QDRANT_URL?.trim() || 'http://localhost:6333');
+  const p = ports(install, hostQdrantUrl(env));
   if (args.command === 'backup') {
     await runBackup(p, install, { outDir: args.out, includeVolumes: args.include });
     console.log('  Keep this folder private: it holds the session secret, the Qdrant key and the credential master key.');
