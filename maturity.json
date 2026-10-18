@@ -269,7 +269,7 @@
       "summary": "The host provides sign-in, projects with membership, roles and spend limits, package bootstrap and routing, the workspace shell and the operator commands, and leaves every product capability to packages.",
       "limits": [
         "Sign-in is email and password; single sign-on (OIDC, SAML) is not available.",
-        "The host access plane needs a Linux kernel (Linux or WSL2); it is unavailable on macOS and native Windows.",
+        "The host access plane runs confined only on a Linux kernel (Linux or WSL2); a macOS or native Windows machine joins only as an unconfined device that serves its owner alone, not yet run live there.",
         "A package added to the host dependencies runs in-process with full first-party trust; vet it like any dependency.",
         "Encrypted credentials depend on the master key file; back it up with the data directory."
       ]
@@ -311,7 +311,7 @@
       "gates": [],
       "summary": "WSL2 with an in-distro Docker engine is the platform Neuralis is developed and live-tested on, including confined shells and the host access broker.",
       "limits": [
-        "Use an in-distro Docker engine; with Docker Desktop the host broker needs its loopback TCP fallback."
+        "Use an in-distro Docker engine."
       ]
     },
     {
@@ -323,10 +323,10 @@
       "gates": [
         "G-b"
       ],
-      "summary": "On macOS Neuralis is built to run in Docker Desktop or natively, without confined shells or the host access plane.",
+      "summary": "On macOS Neuralis is built to run in Docker Desktop or natively, without confined shells; the machine joins the host access plane only as an unconfined, owner-only device.",
       "limits": [
         "Neuralis has not been run on macOS so far.",
-        "Confined shells are refused on macOS and the host access plane is unavailable."
+        "Confined shells are refused on macOS; as a device it runs unconfined for its owner alone, not yet run live."
       ]
     },
     {
@@ -341,7 +341,7 @@
       "summary": "Native Windows is not supported end to end; use WSL2.",
       "limits": [
         "Neuralis has not been run on native Windows so far.",
-        "Confined shells and the host access plane are unavailable on native Windows."
+        "Confined shells are unavailable on native Windows; as a device it runs unconfined for its owner alone, not yet run live."
       ]
     },
     {

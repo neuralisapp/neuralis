@@ -58,7 +58,6 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
     },
     monorepo: true,
     imageTag: null,
-    hostBroker: { enabled: false, socketPath: '/x/host-broker.sock', secretFile: '/x/secret' },
     build: NO_BUILD_INPUTS,
     operatorImage: null,
     ...overrides,
@@ -310,11 +309,13 @@ describe('the monorepo build inputs — named contexts and the .npmrc secret', (
   });
 });
 
-describe('the generated compose carries no plan names (it is shipped, operator-read text)', () => {
-  it('the host-plane comment says what the bind is, never a round codename', () => {
-    const content = buildComposeContent(baseInput({ hostBroker: { enabled: true, socketPath: '/x/host-broker.sock', secretFile: '/x/secret' } }), STAMP);
-    expect(content).toContain('# The host-access plane — mount the broker runtime DIRECTORY');
+describe('the generated compose holds no host secret and no host-plane bind', () => {
+  it('the server reaches the app as a paired device over the device link: no broker runtime bind, no secret file env, no plan names', () => {
+    const content = buildComposeContent(baseInput(), STAMP);
+    expect(content).not.toMatch(/host-broker|NEURALIS_HOST_BROKER|\/run\/neuralis/);
     expect(content).not.toMatch(/nightjar/);
+    // Positive control: the same text does carry the binds it is meant to.
+    expect(content).toContain(':/.neuralis/checkpoints');
   });
 });
 

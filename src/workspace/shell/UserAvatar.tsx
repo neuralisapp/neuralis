@@ -5,17 +5,10 @@ import { User as UserIcon } from 'lucide-react';
 import { resolveLucideIcon } from '@neuralis/package-system/client';
 import { cn } from '@/lib/cn';
 import type { UserAppearance } from '@/server/store/UserStore';
+import { appearanceImageUrl } from '@/lib/appearanceImageUrl';
 import { useUserAppearance, useUserName } from './useUserAppearance';
 
-/**
- * The browser URL of a stored appearance picture. Content-addressed: the hash
- * IS the cache key, so the route answers it `immutable` and a new picture is a
- * new URL. The route (`app/api/appearance/[kind]/[id]/[hash]`) gates it with
- * the record's own read gate.
- */
-export function appearanceImageUrl(kind: 'user' | 'project', ownerId: string, hash: string): string {
-  return `/api/appearance/${kind}/${encodeURIComponent(ownerId)}/${encodeURIComponent(hash)}`;
-}
+export { appearanceImageUrl };
 
 /** What {@link AppearanceAvatar} draws: an icon, a colour, an optional picture URL and the tile choice. */
 export type AvatarAppearance = {

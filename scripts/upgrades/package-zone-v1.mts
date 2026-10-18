@@ -22,6 +22,7 @@ import {
   DATA_FORMAT_LEDGER_RELATIVE_PATH,
   durableReplaceFile,
   listDataFormatDeclarations,
+  offlineUpgradeSteps,
   pendingOfflineKinds,
   readDataFormatLedger,
   type OfflineUpgradeContext,
@@ -36,7 +37,7 @@ import {
 } from '@neuralis/agent-core/upgrade';
 import { BUILTIN_PACKAGE_IDS } from '../../src/server/host/builtinSlots';
 // The host's own kind declarations (the upgrade command verifies modules against every loaded one).
-import { HOST_DATA_FORMATS } from '../../src/server/store/dataFormats';
+import { HOST_DATA_FORMATS, PROJECT_UPGRADE_STEPS } from '../../src/server/store/dataFormats';
 
 /** `app/config/platform.json`, as the platform-config kind declares it (home-relative). */
 const PLATFORM_CONFIG = HOST_DATA_FORMATS.platformConfig.files[0];
@@ -57,13 +58,16 @@ async function deps(ctx: OfflineUpgradeContext): Promise<PackageDataZoneUpgradeD
   return {
     roots: { home: ctx.home, appRoot: ctx.appRoot, projectsRoot: ctx.projectsRoot },
     npmPackageIds: [...BUILTIN_PACKAGE_IDS],
-    // Pending or in progress: any kind the identity upgrade owns is behind, absent or `upgrading`.
+    // Pending or in progress: a kind whose identity STEP lies above the version its data holds
+    // (behind, absent or `upgrading` from below it) — a later step of the same chain is not this one.
     // Reads the ledger and its existence bit itself (two reads per call; the kernel records the bit only on its own first read).
     async identityUpgradePending() {
       const ledger = await readDataFormatLedger(ctx.appRoot);
       const existed = existsSync(join(ctx.appRoot, DATA_FORMAT_LEDGER_RELATIVE_PATH));
-      const identity = listDataFormatDeclarations().filter((decl) => decl.upgrade?.id === HOST_DATA_FORMATS.project.upgrade.id);
-      return pendingOfflineKinds(ledger, existed, identity).length > 0;
+      const declarations = new Map(listDataFormatDeclarations().map((decl) => [decl.kind, decl]));
+      const identity = PROJECT_UPGRADE_STEPS.identity.id;
+      return pendingOfflineKinds(ledger, existed, declarations.values()).some(({ kind, from }) =>
+        offlineUpgradeSteps(declarations.get(kind)!).some((step) => step.id === identity && step.to > from));
     },
     sourceConfigVersion: SOURCE_CONFIG_FORMAT.version,
     extraCheckpointFiles: typeof overrides === 'string' && overrides.length > 0 ? [PLATFORM_CONFIG] : [],

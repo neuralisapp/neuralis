@@ -1,6 +1,6 @@
 {
   "name": "neuralis",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "FSL-1.1-ALv2",
   "homepage": "https://neuralisapp.com",
   "engines": { "node": ">=26" },
@@ -51,11 +51,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
-    "@neuralis/admin": "0.3.1",
-    "@neuralis/agent-core": "0.3.1",
-    "@neuralis/brain-core": "0.3.1",
-    "@neuralis/machine-core": "0.3.1",
-    "@neuralis/package-system": "0.3.1",
+    "@neuralis/admin": "0.3.2",
+    "@neuralis/agent-core": "0.3.2",
+    "@neuralis/brain-core": "0.3.2",
+    "@neuralis/machine-core": "0.3.2",
+    "@neuralis/package-system": "0.3.2",
     "@tailwindcss/oxide": "4.3.3",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
@@ -82,5 +82,27 @@
     "@types/react-dom": "^19.3.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
+  },
+  "overrides": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "express-rate-limit": "^8.2.2",
+    "hono": "^4.13.5",
+    "@hono/node-server": "^1.19.15 || ^2.0.5",
+    "ip-address": "^10.3.1",
+    "fast-uri": "^3.1.6",
+    "@qdrant/js-client-rest": {
+      "undici": "^7.29.1"
+    }
+  },
+  "allowScripts": {
+    "@neuralis/agent-core": true,
+    "node-pty": true,
+    "esbuild": false,
+    "sharp": false,
+    "ssh2": false,
+    "cpu-features": false,
+    "protobufjs": false,
+    "@google/genai": false
   }
 }

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { compareReleaseVersions, parseReleaseManifest } from '@neuralis/package-system/contracts';
 import { detectChannel, discoverBuiltinDeps } from '../setup/discoverPackages.mts';
 import { imageTagAfterUpdate, upsertEnvValue } from '../setup/envFile.mts';
-import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, npmInvocation, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, refuseLayout, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack } from '../update.mts';
+import { companionImageMove, companionVersionsFor, downgradeRefusal, moveCompanionImages, npmInvocation, parseUpdateArgs, planLine, readReleaseManifest, recreateStep, refuseLayout, releaseInstallPolicy, RELEASE_MANIFEST_URL, run as runUpdateVerb, runStack, withInstallPolicy } from '../update.mts';
 import { applyStack, HEALTH_TIMEOUT_MS, outsideComposeRefusal, stackCommands, type HealthAnswer, type StackPorts } from '../update/stack.mts';
 import { checkpointTakenLine } from '../upgrade.mts';
 import { mergePlatformConfig, platformConfigPath } from '../setup/platformConfig.mts';
@@ -393,6 +393,127 @@ describe('the update command refuses rather than half-working', () => {
   });
 });
 
+describe('the install policy moves with the line, before the install', () => {
+  const POLICY = {
+    overrides: { react: '19.3.0', '@qdrant/js-client-rest': { undici: '^7.29.1' } },
+    allowScripts: { '@neuralis/agent-core': true, 'node-pty': true, esbuild: false },
+  };
+
+  /**
+   * A folder whose npm is a recorder reached through `npm_execpath`: `view`
+   * answers the target release (npm 12's array form), `install` records the
+   * manifest it found and exits `installExit`, `rebuild` exits `rebuildExit`;
+   * the installed bin is a no-op. `swapped` runs the re-executed half instead:
+   * the installed host package (0.2.0, carrying `ownPolicy`) settles the folder
+   * whose manifest carries `folderPolicy`, with a data home of its own.
+   */
+  async function applyWithFakeNpm(release: unknown, installExit = 0, swapped?: { ownPolicy: object; folderPolicy?: object; rebuildExit?: number }): Promise<{ folder: { installDir: string; packageDir: string }; calls: string[][]; sawManifest: string[]; outcome: unknown; out: string }> {
+    const folder = fakeFolder(swapped ? '0.2.0' : '0.1.0');
+    mkdirSync(join(folder.packageDir, 'bin'), { recursive: true });
+    writeFileSync(join(folder.packageDir, 'bin', 'neuralis.mjs'), 'process.exit(0);\n');
+    const home = mkdtempSync(join(tmpdir(), 'neuralis-home-'));
+    if (swapped) {
+      const own = JSON.parse(readFileSync(join(folder.packageDir, 'package.json'), 'utf8')) as object;
+      writeFileSync(join(folder.packageDir, 'package.json'), JSON.stringify({ ...own, ...swapped.ownPolicy }));
+      const manifest = JSON.parse(readFileSync(join(folder.installDir, 'package.json'), 'utf8')) as object;
+      writeFileSync(join(folder.installDir, 'package.json'), `${JSON.stringify({ ...manifest, ...swapped.folderPolicy }, null, 2)}\n`);
+      writeFileSync(join(folder.installDir, '.env'), 'NEURALIS_IMAGE_TAG=0.1.0\n');
+    }
+    const bin = mkdtempSync(join(tmpdir(), 'neuralis-fake-npm-'));
+    const log = join(bin, 'calls.jsonl');
+    const saw = join(bin, 'saw.jsonl');
+    writeFileSync(join(bin, 'npm-cli.js'), [
+      "const fs = require('node:fs');",
+      'const args = process.argv.slice(2);',
+      `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');`,
+      `if (args[0] === 'view') { console.log(${JSON.stringify(JSON.stringify(release))}); process.exit(0); }`,
+      `if (args[0] === 'install') { fs.appendFileSync(${JSON.stringify(saw)}, JSON.stringify(fs.readFileSync('package.json', 'utf8')) + '\\n'); process.exit(${installExit}); }`,
+      `if (args[0] === 'rebuild') process.exit(${swapped?.rebuildExit ?? 0});`,
+      'process.exit(97);',
+    ].join('\n'));
+    const before = { npm_execpath: process.env.npm_execpath, NEURALIS_HOME: process.env.NEURALIS_HOME };
+    process.env.npm_execpath = join(bin, 'npm-cli.js');
+    process.env.NEURALIS_HOME = home;
+    const logged: string[] = [];
+    const log$ = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logged.push(args.join(' ')); });
+    let outcome: unknown;
+    try {
+      outcome = await runUpdateVerb(['--version', '0.2.0', '--apply', ...(swapped ? ['--host-swapped'] : [])], cliContext(folder, { NEURALIS_UPDATE_PREVIOUS: '0.1.0' })).catch((error: unknown) => error);
+    } finally {
+      log$.mockRestore();
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    const read = (file: string): unknown[] => (existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as unknown) : []);
+    return { folder, calls: read(log) as string[][], sawManifest: read(saw) as string[], outcome, out: logged.join('\n').replace(/\x1b\[[0-9;]*m/g, '') };
+  }
+
+  it('the target release\'s overrides + allowScripts are in the folder manifest when npm install runs, after dependencies', async () => {
+    const { folder, calls, sawManifest, outcome } = await applyWithFakeNpm([{ name: 'neuralis', version: '0.2.0', ...POLICY }]);
+    expect(outcome).toBe(0);
+    expect(calls).toEqual([['view', 'neuralis@0.2.0', '--json'], ['install', 'neuralis@0.2.0', '--save-exact']]);
+    const manifest = readFileSync(join(folder.installDir, 'package.json'), 'utf8');
+    expect(sawManifest).toEqual([manifest]);
+    expect(JSON.parse(manifest)).toEqual({ private: true, dependencies: { neuralis: '0.1.0', '@acme/ops': '1.0.0' }, ...POLICY });
+    expect(Object.keys(JSON.parse(manifest) as object)).toEqual(['private', 'dependencies', 'overrides', 'allowScripts']);
+  });
+
+  it('a failed install puts the folder manifest back byte for byte ("the installation is unchanged" stays true)', async () => {
+    const folder = fakeFolder('0.1.0');
+    const original = readFileSync(join(folder.installDir, 'package.json'), 'utf8');
+    const { folder: failed, outcome, sawManifest } = await applyWithFakeNpm({ name: 'neuralis', version: '0.2.0', ...POLICY }, 1);
+    expect((outcome as CliExit).message).toMatch(/npm install failed/);
+    expect(JSON.parse(sawManifest[0]!)).toHaveProperty('overrides');
+    expect(readFileSync(join(failed.installDir, 'package.json'), 'utf8')).toBe(original);
+  });
+
+  it('a release that ships no policy removes the previous one; matching fields are not rewritten', () => {
+    const current = `${JSON.stringify({ private: true, dependencies: { neuralis: '0.2.0' }, ...POLICY }, null, 2)}\n`;
+    expect(releaseInstallPolicy(JSON.stringify({ name: 'neuralis', version: '0.1.0' }))).toEqual({});
+    expect(JSON.parse(withInstallPolicy(current, {})!)).toEqual({ private: true, dependencies: { neuralis: '0.2.0' } });
+    expect(withInstallPolicy(current, releaseInstallPolicy(JSON.stringify(POLICY)))).toBeNull();
+  });
+
+  it('a manifest without dependencies gets the policy at the end, never dropped', () => {
+    const written = withInstallPolicy(`${JSON.stringify({ private: true, overrides: { react: '19.0.0' } }, null, 2)}\n`, POLICY)!;
+    expect(Object.keys(JSON.parse(written) as object)).toEqual(['private', 'overrides', 'allowScripts']);
+    expect(JSON.parse(written)).toEqual({ private: true, ...POLICY });
+  });
+
+  it('after the swap a folder moved by older code gets the running release\'s own policy, installs once and rebuilds the approved scripts — no registry read', async () => {
+    const { folder, calls, sawManifest, outcome, out } = await applyWithFakeNpm(null, 0, { ownPolicy: POLICY });
+    expect(outcome).toBe(0);
+    expect(calls).toEqual([['install'], ['rebuild', '@neuralis/agent-core', 'node-pty']]);
+    const manifest = readFileSync(join(folder.installDir, 'package.json'), 'utf8');
+    expect(sawManifest).toEqual([manifest]);
+    expect(JSON.parse(manifest)).toEqual({ private: true, dependencies: { neuralis: '0.2.0', '@acme/ops': '1.0.0' }, ...POLICY });
+    expect(out).toContain('install policy : overrides + allowScripts\n');
+    // The tag moves only after the policy settled.
+    expect(out.indexOf('installed under the release\'s install policy')).toBeLessThan(out.indexOf('image tag      : 0.1.0 → 0.2.0'));
+  });
+
+  it('after the swap a folder already carrying the policy runs no npm at all (new → new costs nothing)', async () => {
+    const { calls, outcome, out } = await applyWithFakeNpm(null, 0, { ownPolicy: POLICY, folderPolicy: POLICY });
+    expect(outcome).toBe(0);
+    expect(calls).toEqual([]);
+    expect(out).toContain('install policy : overrides + allowScripts (unchanged)');
+  });
+
+  it.each([
+    ['install', 1, 0, [['install']]],
+    ['rebuild', 0, 1, [['install'], ['rebuild', '@neuralis/agent-core', 'node-pty']]],
+  ])('after the swap a failed npm %s puts the folder manifest back byte for byte and moves nothing after it', async (step, installExit, rebuildExit, expected) => {
+    const { folder, calls, outcome } = await applyWithFakeNpm(null, installExit, { ownPolicy: POLICY, rebuildExit });
+    expect(calls).toEqual(expected);
+    expect((outcome as CliExit).message).toMatch(new RegExp(`the code moved, the install policy did not: npm ${step}`));
+    expect((outcome as CliExit).detail.join('\n')).toContain('npx neuralis update --version 0.2.0 --apply');
+    expect(readFileSync(join(folder.installDir, 'package.json'), 'utf8')).toBe(`${JSON.stringify({ private: true, dependencies: { neuralis: '0.2.0', '@acme/ops': '1.0.0' } }, null, 2)}\n`);
+    expect(readFileSync(join(folder.installDir, '.env'), 'utf8')).toBe('NEURALIS_IMAGE_TAG=0.1.0\n');
+  });
+});
+
 describe('the release manifest the update resolves against', () => {
   const line = { schema: 1, version: '0.2.0', packages: { '@neuralis/agent-core': '0.2.0' }, images: { 'neuralisapp/neuralis': '0.2.0' } };
 
@@ -651,8 +772,26 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
     expect(out).toContain('stopped at recreate: rebuild exited 1');
     expect(out).toContain('done before it : compose, stop, vector store, upgrade — nothing after it ran');
     expect(out).toContain('to continue by hand once the cause is fixed: npx neuralis rebuild → wait for /api/health');
-    expect(out).toContain('npm install neuralis@0.1.0 --save-exact');
-    expect(out).toContain('npx neuralis checkpoint restore cp-1');
+    // The way back: the data first (offline), then the update itself moves code + images down.
+    const back = out.slice(out.indexOf('going back (the update stops and restarts the app itself):'));
+    expect(back).toMatch(/data {11}: docker compose stop neuralis && npx neuralis checkpoint restore cp-1 \(the checkpoint this upgrade took\)\n.*code \+ images  : npx neuralis update --version 0\.1\.0 --apply\n/);
+    expect(out).not.toMatch(/npm install neuralis@|images : /);
+  });
+
+  it('a clone\'s way back keeps the git checkout and the manifest images line, data first', async () => {
+    const clone = fakeInstall({ next: '16.3.8' });
+    const logged: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logged.push(args.join(' ')); });
+    try {
+      expect(await runStack({ ctx: cliContext({ installDir: clone, packageDir: clone }), layout: 'clone', previous: '0.1.0' }, fakeStack(clone).ports)).toBe(0);
+    } finally {
+      log.mockRestore();
+    }
+    const out = logged.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    const [data, code, images] = ['data   : npx neuralis checkpoint restore <id>', 'code   : git checkout v0.1.0 && npm install', 'images : npx neuralis update --manifest <the 0.1.0 release-manifest.json> --apply'].map((line) => out.indexOf(line));
+    expect(data).toBeGreaterThan(out.indexOf('going back (app stopped):'));
+    expect(code).toBeGreaterThan(data);
+    expect(images).toBeGreaterThan(code);
   });
 
   it('the dry run names every command the apply runs, with the folder\'s project and services', () => {

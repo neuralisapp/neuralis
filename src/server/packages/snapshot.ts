@@ -39,7 +39,7 @@ function getService(): PackageSnapshotService {
 
 // R2b — caller identity for scope-isolated package advertise. When present and
 // a package is owned by a user/agent-scoped source, it is hidden unless the
-// caller matches (or holds `filesystem.observeScoped` — the ONE shared
+// caller matches (or holds `files.readOthers` — the ONE shared
 // `canAccessScope`, which since D-A has NO role-name conjunct: the grant alone
 // carries the decision, so a custom role granted it passes exactly like owner
 // via `'*'` or admin via its enumerated default grant).

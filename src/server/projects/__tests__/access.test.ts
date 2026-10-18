@@ -233,8 +233,8 @@ describe('project access helpers', () => {
         },
         roles: {
           owner: { agents: '*', canInvite: true, canManageRoles: true, grantedFeatures: ['*'], priority: 1 },
-          admin: { agents: '*', canInvite: true, canManageRoles: true, grantedFeatures: ['drive.read'], priority: 2 },
-          member: { agents: 'own', canInvite: false, canManageRoles: false, grantedFeatures: ['drive.read'], priority: 20 },
+          admin: { agents: '*', canInvite: true, canManageRoles: true, grantedFeatures: ['files.read'], priority: 2 },
+          member: { agents: 'own', canInvite: false, canManageRoles: false, grantedFeatures: ['files.read'], priority: 20 },
         },
         agentOwnership: {},
         limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} } },
@@ -242,7 +242,7 @@ describe('project access helpers', () => {
         updatedAt: 'T',
       } as ProjectRecord;
     }
-    const ADMIN_CALLER = { priority: 2, grantedFeatures: ['drive.read'] };
+    const ADMIN_CALLER = { priority: 2, grantedFeatures: ['files.read'] };
 
     it('D1 — an admin-strength caller cannot empty the apex role', () => {
       const existing = projectWithRoles();

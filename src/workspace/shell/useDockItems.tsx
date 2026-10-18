@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties, type ComponentType } from 'react';
 import { Package, LayoutDashboard, Plus, BrushCleaning } from 'lucide-react';
 import { useSession } from 'next-auth/react';
-import { resolveAgentColor, resolveAgentIcon } from '@neuralis/package-system/client';
+import { agentDisplayLabel, resolveAgentColor, resolveAgentIcon } from '@neuralis/package-system/client';
 import { agentTapOpenOrder, boundAgentOf, getDefaultChatWidgetType, isGroupRuntimeKey, useWorkspaceStore, type WorkspaceStore } from '../store/workspaceStore';
 import type { WidgetInstance } from '../store/types';
 import { useAgentHasStore, useAgentsState, useDockPrefs, useDockWidgetItems, useNewWindowAgent, usePhoneForegroundId, useProjectGroups, usePresentation, useWorkspaceSession } from '../store/selectors';
@@ -122,7 +122,7 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       const idsOfType = widgetTypeState.idsByType.get(widgetType) ?? [];
       const windows = windowChoices({
         ids: idsOfType, byId: openWidgetsById, runtimeKey, type: widgetType, title, inGroup,
-        agentName: (id) => agentsById[id]?.name || id, openWidget, cleanWindow,
+        agentName: (id) => agentDisplayLabel(agentsById[id] ?? { id }), openWidget, cleanWindow,
       });
       const repeatable = isRepeatableWidget(widgetType);
       return {
@@ -276,7 +276,7 @@ export function usePackageDockItems(projectId: string | null, agentId: string | 
 
 type AgentDockButtonProps = {
   id: string;
-  agent: { name?: string; userId?: string; userName?: string; config?: Record<string, unknown> } | undefined;
+  agent: { name?: string; slug?: string; userId?: string; userName?: string; config?: Record<string, unknown> } | undefined;
   idx: number;
   selected: boolean;
   chatCollapsed: boolean;
@@ -391,7 +391,7 @@ function AgentDockTile({
           showCollapsedHint && 'ring-2 ring-white/30 animate-pulse',
           'disabled:opacity-40 disabled:cursor-not-allowed',
         )}
-        title={showCollapsedHint ? `Open ${agent?.name || 'Agent'} chat` : (agent?.name || 'Agent')}
+        title={showCollapsedHint ? `Open ${agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug })} chat` : (agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug }))}
       >
         <div
           className="w-12 h-full flex items-center justify-center shrink-0 relative"
@@ -422,7 +422,7 @@ function AgentDockTile({
         </div>
         {hasLabels ? (
           <div className={cn('flex-1 min-w-0 text-center pl-3 line-clamp-2 leading-tight break-words text-[13px] font-semibold tracking-tight', selected ? 'text-white/90' : 'text-white/70')}>
-            {agent?.name || 'Agent'}
+            {agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug })}
           </div>
         ) : null}
       </button>
@@ -436,8 +436,8 @@ function AgentDockTile({
           type="button"
           onClick={(e) => { e.stopPropagation(); cleanAgentStore({ agentId: id }); }}
           className="absolute top-0.5 right-0.5 z-10 w-4 h-4 flex items-center justify-center text-white/60 hover:text-white transition-colors [filter:drop-shadow(0_0_2px_rgba(0,0,0,0.85))]"
-          title={`Clean ${agent?.name || 'Agent'} workspace`}
-          aria-label={`Clean ${agent?.name || 'Agent'} workspace`}
+          title={`Clean ${agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug })} workspace`}
+          aria-label={`Clean ${agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug })} workspace`}
         >
           <BrushCleaning className="w-3 h-3" />
         </button>
@@ -542,7 +542,7 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
       const asks = phoneForeground === null || chatIds.includes(phoneForeground);
       const windows = chatType && asks ? windowChoices({
         ids: chatIds, byId: windowsById, runtimeKey, type: chatType, title: chatTitle, inGroup,
-        agentName: (id) => byId[id]?.name || id, openWidget, cleanWindow,
+        agentName: (id) => agentDisplayLabel(byId[id] ?? { id }), openWidget, cleanWindow,
       }) : [];
       const onNewWindow = chatType && asks && isRepeatableWidget(chatType) && !disabled
         ? () => { openWidget({ agentId: entry.id, type: chatType, title: chatTitle, target: 'new' }); }
@@ -550,7 +550,7 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
       const item: DockItem = {
         id: entry.id,
         position,
-        title: byId[entry.id]?.name || 'Agent',
+        title: agentDisplayLabel(byId[entry.id] ?? { id: entry.id }),
         prefKey: agentDockKey(entry.id),
         group: entry.ownedByMe ? 'agents:own' : 'agents:other',
         // The tile renders itself; icon + colour are what the edit-mode tray shows.

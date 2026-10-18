@@ -21,6 +21,9 @@ export const DOCKER_SETUP_COMMAND = [
   'docker compose up -d',
 ].join('\n');
 
+/** The one-line installer the docs site serves: it runs the command below for the visitor. */
+export const DOCKER_INSTALLER_COMMAND = 'curl -fsSL https://neuralisapp.com/install.sh | sh';
+
 const FOLDER_SETUP_COMMAND = 'npx neuralis setup';
 
 const HELP_URL = 'https://docs.neuralisapp.com/getting-started/installation#if-something-fails';
@@ -58,7 +61,9 @@ a{color:#7cc4ff}
 <h1>Neuralis is not set up yet</h1>
 <p>${escapeHtml(REASON_TEXT[reason])} Until setup has run, every page shows this notice.</p>
 <h2>Docker image (Linux or WSL2)</h2>
-<p>Run setup from the image into a folder of your own, then start the stack it writes. The first line picks the release: <code>latest</code>, or a release tag. Setup records the exact release in <code>.env</code>.</p>
+<p>One command checks Docker, runs setup from the image into a folder of your own and offers to start the stack it writes:</p>
+<pre>${escapeHtml(DOCKER_INSTALLER_COMMAND)}</pre>
+<p>Or by hand — what the installer runs. The first line picks the release: <code>latest</code>, or a release tag. Setup records the exact release in <code>.env</code>.</p>
 <pre>${escapeHtml(DOCKER_SETUP_COMMAND)}</pre>
 <p>If you started this container by hand, stop and remove it: the stack runs from the folder setup wrote.</p>
 <h2>npm install folder or git clone</h2>

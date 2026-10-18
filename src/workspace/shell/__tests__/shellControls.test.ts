@@ -27,9 +27,10 @@ vi.mock('../useDockItems', () => ({
   useSecondaryDockItems: () => dockFixture.items('secondary'),
 }));
 vi.mock('../AnimatedUniverseBackground', () => ({ AnimatedUniverseBackground: () => null }));
+const wallpaper = vi.hoisted(() => ({ image: null as string | null }));
 vi.mock('../../theme/useTheme', async () => {
   const { DEFAULT_THEME } = await import('../../theme/themes');
-  return { useTheme: () => ({ theme: DEFAULT_THEME, backgroundTheme: DEFAULT_THEME, dockTheme: DEFAULT_THEME }) };
+  return { useTheme: () => ({ theme: DEFAULT_THEME, backgroundTheme: DEFAULT_THEME, dockTheme: DEFAULT_THEME, backgroundImage: wallpaper.image }) };
 });
 Object.assign(window, { innerWidth: 1280, innerHeight: 800, screen: { width: 1280, height: 800 } });
 vi.mock('../UserAvatar', () => ({ UserAvatar: () => null }));
@@ -72,6 +73,7 @@ const byAttr = (name: string, value?: string): FakeNode[] =>
   dom.document.querySelectorAll(value === undefined ? `[${name}]` : `[${name}="${value}"]`);
 
 beforeEach(() => {
+  wallpaper.image = null;
   calls = [];
   responder = () => ({});
   client._resetNotificationsClient();
@@ -529,10 +531,12 @@ describe('dock lanes in the mounted shell', () => {
   });
 
   it('the background image follows the Background material, never the Universe toggle', async () => {
+    wallpaper.image = 'data:image/png;base64,' + 'A'.repeat(2400000);
     for (const [level, opacity] of [['opaque', '1'], ['dim', '0.6'], ['transparent', '0.34']] as const) {
       window.localStorage.setItem('neuralis:workspace:dockLayout', JSON.stringify({ backgroundTransparency: level }));
       await render(shell());
-      const image = dom.container.querySelectorAll('DIV').find((n) => n.style.backgroundImage === 'var(--bg-image)')!;
+      const image = dom.container.querySelectorAll('DIV').find((n) => n.style.backgroundImage === `url(${JSON.stringify(wallpaper.image)})`)!;
+      expect(image).toBeDefined();
       expect([level, String(image.style.opacity)]).toEqual([level, opacity]);
       await act(async () => root!.unmount()); root = null;
     }

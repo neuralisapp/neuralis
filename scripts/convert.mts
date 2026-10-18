@@ -38,7 +38,7 @@ import { createCheckpoint, listCheckpoints, restoreCheckpoint } from '@neuralis/
 import { appPort, checkOffline, composeProbe, httpProbe } from './checkpoint.mts';
 import { CliExit, type CliContext } from './cli/registry.mts';
 import { loadHostEnv } from './setup/detect.mts';
-import { unitFilePath } from './host-broker/helper.mts';
+import { homedir } from 'node:os';
 
 /** Written by `create-neuralis convert`; its presence means "not converted yet". */
 export const CONVERT_RECORD_DIR = '.neuralis-convert';
@@ -148,8 +148,13 @@ export function archiveEntries(installDir: string, entries: readonly string[]): 
   return archive;
 }
 
+/** The retired host broker's systemd user unit — `neuralis device install` disables and removes it. */
+function legacyBrokerUnitPath(): string {
+  return join(process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'systemd', 'user', 'neuralis-host-broker.service');
+}
+
 /** The one host-wide unit names THIS folder's broker — a unit serving another install is left alone. */
-export function unitServesFolder(installDir: string, unitPath: string = unitFilePath()): boolean {
+export function unitServesFolder(installDir: string, unitPath: string = legacyBrokerUnitPath()): boolean {
   if (!existsSync(unitPath)) return false;
   return readFileSync(unitPath, 'utf-8').includes(`${installDir.replace(/\/+$/, '')}/`);
 }
@@ -192,7 +197,7 @@ async function convert(installDir: string, from: string): Promise<number> {
   for (const dir of keptDirs) console.log(`  · kept ${dir}/ — it holds files the ${from} package did not ship`);
   console.log(`  · checkpoint: ${checkpointDir}`);
   if (unitServesFolder(installDir)) {
-    console.log('  · this folder\'s host-broker unit: re-render it once with `npx neuralis host-broker upgrade` (its path moved into node_modules/neuralis).');
+    console.log('  · this folder\'s host-broker unit runs the old broker: replace it with the device service — `npm install -g @neuralis/cli`, then `neuralis device install` on this machine (it retires the old unit and keeps its secret).');
   }
   console.log(`  · next: npx neuralis update --version ${record.to} --apply   (image tag + companions, then compose → upgrade → up → health, run by the command)`);
   console.log('  · going back (app stopped):');

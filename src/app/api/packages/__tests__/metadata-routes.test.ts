@@ -53,8 +53,8 @@ function req(projectId?: string, agentId?: string) {
 const access = {
   project: { id: 'proj-1', agentOwnership: {} },
   member: { role: 'member' },
-  role: { agents: 'own', grantedFeatures: ['drive.read'] },
-  session: { userId: 'user-1', projectId: 'proj-1', role: 'member', grantedFeatures: ['drive.read'], agentAccess: 'own', agentOwnership: {} },
+  role: { agents: 'own', grantedFeatures: ['files.read'] },
+  session: { userId: 'user-1', projectId: 'proj-1', role: 'member', grantedFeatures: ['files.read'], agentAccess: 'own', agentOwnership: {} },
 };
 
 describe('package metadata routes', () => {
@@ -86,8 +86,8 @@ describe('package metadata routes', () => {
     expect(response.status).toBe(200);
     // R2b — scope (userId/role/grantedFeatures) threaded for scope-isolated advertise.
     expect(mocks.getDockSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['drive.read'] },
-      ['drive.read'],
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      ['files.read'],
     );
   });
 
@@ -97,8 +97,8 @@ describe('package metadata routes', () => {
     expect(response.status).toBe(200);
     expect(mocks.ensureProjectPackagesLoaded).toHaveBeenCalledWith('proj-1');
     expect(mocks.getCommandSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['drive.read'] },
-      ['drive.read'],
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      ['files.read'],
     );
   });
 
@@ -107,8 +107,8 @@ describe('package metadata routes', () => {
 
     expect(response.status).toBe(200);
     expect(mocks.getWidgetSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['drive.read'] },
-      ['drive.read'],
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      ['files.read'],
     );
   });
 

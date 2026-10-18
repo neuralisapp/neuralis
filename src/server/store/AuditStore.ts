@@ -70,6 +70,8 @@ export type AuditAction =
   // An external client's (the `neuralis` CLI) OAuth-bearer call on the package catch-all — token-free.
   | 'cli.session_call'
   | 'cli.session_rejected'
+  // One approval on the `:3101` OAuth consent page — user, project, agent, client and resources; never a code or token.
+  | 'oauth.consent_granted'
   // Which declared credential ids a skill activation projected, at which tier ceiling (ids only).
   | 'skill.credentials_projected'
   // modular-meerkat Inc 4 — self-scope channel credential writes (F7).
@@ -114,6 +116,16 @@ export type AuditAction =
   // never under `data://` where the audited agent could delete them (SF-AC2).
   | 'terminal.session'     // PTY attach / detach over the WebSocket companion
   | 'terminal.blocked'     // InputGuard blocklist rejection on a typed command
+  // Paired devices (agent-core): a pairing, an authenticated link, a revocation
+  // (by the owner, or with the owner's own revocation), a rename and the removal
+  // of an already-revoked record (its revoke row stays). A REFUSED
+  // link dial writes no row — the handshake is unauthenticated, so a row per
+  // attempt would be an attacker-sized log; it is a sampled warn instead.
+  | 'device.pair'
+  | 'device.link'
+  | 'device.revoke'
+  | 'device.rename'
+  | 'device.purge'
   // stalled-stint — stopping a turn from OUTSIDE the browser that is driving it.
   // The denial is audited too, unlike the delegate precedent below it: the
   // admin-strength arm is the escalation-shaped one, so the trail has to answer

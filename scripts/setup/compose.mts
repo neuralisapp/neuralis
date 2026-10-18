@@ -21,7 +21,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { feedPrivateScopeRecord, npmrcProblems, planLocalSources, sha256Text } from '../build/build-workspace.mjs';
 import { spell } from '../cli/spelling.mts';
 
@@ -106,20 +106,6 @@ export type ComposeEmitInput = {
    * folder — keeps the plain `image:` line.
    */
   operatorImage: OperatorImage | null;
-  /**
-   * Host-access plane. When the operator has provisioned the
-   * broker, compose bind-mounts its runtime directory (Unix socket + secret)
-   * read-only into the app container. THIS BIND IS THE REAL GATE: no in-app
-   * role can add a mount or start a host unit, so an attacker who flips every
-   * reachable setting still cannot reach the host plane.
-   */
-  hostBroker: {
-    enabled: boolean;
-    /** Host path of the broker's Unix socket. */
-    socketPath: string;
-    /** Host path of the operator-owned shared-secret file. */
-    secretFile: string;
-  };
 };
 
 export type BuildInputs = {
@@ -455,16 +441,6 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '      - /var/run/docker.sock:/var/run/docker.sock',
   );
 
-  if (input.hostBroker.enabled) {
-    lines.push(
-      '      # The host-access plane — mount the broker runtime DIRECTORY',
-      '      # read-only. A broker restart may replace the socket inode; mounting',
-      '      # only the socket file would leave the container bound to a stale one.',
-      '      # Removing this bind disables the plane; no app role can recreate it.',
-      `      - ${dirname(input.hostBroker.socketPath)}:/run/neuralis/host-broker:ro`,
-    );
-  }
-
   if (input.qdrantMode === 'docker') {
     lines.push(
       '    # The app spans BOTH networks; Qdrant sits only on its own (see the',
@@ -498,16 +474,6 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '      # scroll. Dev affordance; off in prod.',
     '      - BRAIN_VECTOR_LOG_CONSOLE=${BRAIN_VECTOR_LOG_CONSOLE:-0}',
   );
-
-  if (input.hostBroker.enabled) {
-    lines.push(
-      '      # The container reads the shared secret from this FILE, never from',
-      '      # platform config: `PATCH /config` sits behind the project-scoped',
-      '      # `platform.config` feature, so a secret stored there would be readable',
-      '      # and writable by any project owner.',
-      '      - NEURALIS_HOST_BROKER_SECRET_FILE=/run/neuralis/host-broker/secret',
-    );
-  }
 
   if (input.qdrantMode === 'docker') {
     lines.push('      - QDRANT_URL=http://qdrant:6333');

@@ -44,9 +44,29 @@ import {
 import { dirname } from 'node:path';
 import { getEnv } from '../config/env';
 
+/**
+ * `neuralis/project`'s offline chain, in order: the package-identity upgrade
+ * (v2), then the device upgrade, whose role-grant raise gives `device.own` to
+ * every stored builtin role the manifests grant it (v3, role-grant revision
+ * 20), then the two-word feature ids on every stored role, custom roles and
+ * package overrides included (v4, role-grant revision 21 —
+ * `roleGrantFormatLockstep.test.ts`). Each step stamps the revision IT
+ * produces, never the live one.
+ */
+export const PROJECT_UPGRADE_STEPS = {
+  identity: { to: 2, id: 'package-identity-v2' },
+  device: { to: 3, id: 'source-device-v1' },
+  features: { to: 4, id: 'two-word-features-v1' },
+} as const;
+
 /** Kind name → declaration. The version is the on-disk format this build reads and writes. */
 export const HOST_DATA_FORMATS = {
-  project: { kind: 'neuralis/project', version: 2, files: ['app/projects'], upgrade: { mode: 'offline', id: 'package-identity-v2' } },
+  project: {
+    kind: 'neuralis/project',
+    version: 4,
+    files: ['app/projects'],
+    upgrade: [PROJECT_UPGRADE_STEPS.identity, PROJECT_UPGRADE_STEPS.device, PROJECT_UPGRADE_STEPS.features],
+  },
   projectPurged: { kind: 'neuralis/project-purged', version: 1, files: ['app/projects-purged'] },
   user: { kind: 'neuralis/user', version: 1, files: ['app/users'] },
   // v2: every blob opens under the key file + salt file alone (no NEXTAUTH_SECRET or static-salt
@@ -70,7 +90,14 @@ export const HOST_DATA_FORMATS = {
     version: 1,
     files: ['app/credentials/credential-use-rules.json'],
   },
-  platformConfig: { kind: 'neuralis/platform-config', version: 1, files: ['app/config/platform.json'] },
+  // v2: the retired keys no build reads are gone (`platform-config-v2`) — the store refuses to
+  // write or delete an unregistered key, so only the offline module can drop them.
+  platformConfig: {
+    kind: 'neuralis/platform-config',
+    version: 2,
+    upgrade: { mode: 'offline', id: 'platform-config-v2' },
+    files: ['app/config/platform.json'],
+  },
   auditLog: { kind: 'neuralis/audit-log', version: 1, files: [] },
   routeLog: { kind: 'neuralis/route-log', version: 1, files: [] },
 } as const satisfies Record<string, DataFormatDeclaration>;

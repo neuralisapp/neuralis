@@ -1,9 +1,12 @@
 /**
- * The package catch-all's THIRD identity arm: an OAuth access token an external
- * client (the `neuralis` CLI) presents as `Authorization: Bearer <jwt>`.
+ * The OAuth access token an external client (the `neuralis` CLI) presents as
+ * `Authorization: Bearer <jwt>` — the package catch-all's THIRD identity arm,
+ * and the realtime hub's bearer arm (`resolveSessionContext` with
+ * `acceptBearer`, `/api/events` only), both answering for the same resource.
  *
  * Precedence in the catch-all stays cookie → `nrs1.` ticket → this arm, and a
- * PRESENT-but-invalid ticket never reaches it. This module does only the token
+ * PRESENT-but-invalid ticket never reaches it; the hub refuses a ticket outright
+ * (a skill never subscribes). This module does only the token
  * half: it asks the package that provides the kernel `route-token-verifier`
  * contract (looked up by contract id, never by package name) to verify the
  * token for the host API resource — `<trusted app origin>/api` — and returns
@@ -44,7 +47,7 @@ export function packageApiChallenge(error?: 'invalid_token' | 'insufficient_scop
 }
 
 export type PackageOAuthResolveResult =
-  | { kind: 'match'; session: SessionContext; clientId: string; scope: string }
+  | { kind: 'match'; session: SessionContext; clientId: string; scope: string; expiresAt?: number }
   | { kind: 'reject'; code: RouteTokenVerifyErrorCode }
   | null;
 
@@ -75,5 +78,11 @@ export async function tryResolvePackageOAuth(req: NextRequest): Promise<PackageO
     (): { ok: false; code: RouteTokenVerifyErrorCode } => ({ ok: false, code: 'not_ready' }),
   );
   if (!result.ok) return { kind: 'reject', code: result.code };
-  return { kind: 'match', session: result.session, clientId: result.clientId, scope: result.scope };
+  return {
+    kind: 'match',
+    session: result.session,
+    clientId: result.clientId,
+    scope: result.scope,
+    ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}),
+  };
 }

@@ -158,7 +158,7 @@ describe('/api/events — discovered channel coverage', () => {
       if (!manifest.neuralis || manifest.neuralis.referenceOnly) return [];
       return readdirSync(channelRoot).filter((file) => file.endsWith('.ts')).map((file) => file.slice(0, -3));
     });
-    expect(discovered).toHaveLength(4);
+    expect(discovered).toHaveLength(5);
     const route = readFileSync(join(repository, 'neuralis/src/app/api/events/route.ts'), 'utf-8');
     const hostArms = [...route.matchAll(/send\('([^']+)'/g)].map((match) => match[1]);
     expect(new Set(hostArms).size).toBe(4);

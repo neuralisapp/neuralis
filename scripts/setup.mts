@@ -36,7 +36,7 @@ import { slugify } from '../src/lib/utils';
 // `./setup/records.mts`.
 
 import { CliExit, type CliContext } from './cli/registry.mts';
-import { installLayout, spell, type InstallLayout } from './cli/spelling.mts';
+import { installLayout, spell, spellOn, type InstallLayout } from './cli/spelling.mts';
 import {
   PORT_ROLES, answeringQdrant, bindMountOf, busyPortRefusal, detectEnvironment, detectQdrant, findBusyPorts, imageFix, nextFreePorts, portCheck, portClaims,
   resolveConfigDir, resolveHostHome, setupRefusal,
@@ -50,6 +50,7 @@ import {
   listExistingProjects,
   resolveSetupProjectId,
   type SetupProjectResolution,
+  readOwnerRecord,
   writeOwnerRecord,
   writeProjectRecord,
   writeSourceConfigsPreserving,
@@ -61,7 +62,7 @@ import {
   normalizeTrustedProxies, trustedProxiesLines, buildNpmrcLines,
   imageTagLines, initialImageTag, resolveImageTag,
   DEFAULT_QDRANT_PORT, hostQdrantUrl, originDefault, qdrantHostPort,
-  normalizePublicOrigin,
+  isLoopbackPublicOrigin, normalizePublicOrigin,
   readEnvFile,
   resolveQdrantApiKey,
   parseEnvContent as parseEnvContentShared,
@@ -202,7 +203,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.1',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.2',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -462,12 +463,19 @@ async function askOwner(): Promise<{ email: string; name: string; passwordHash: 
   const email = await ask('Email');
   if (!email || !email.includes('@')) throw new CliExit(1, 'A valid email is required.');
 
+  // Typed twice: a hidden typo would lock the only owner out of a fresh install.
   let password = '';
-  while (password.length < 8) {
-    password = await askPassword('Password (min 8 chars, hidden)');
-    if (password.length < 8) {
+  while (!password) {
+    const first = await askPassword('Password (min 8 chars, hidden)');
+    if (first.length < 8) {
       warn('Password must be at least 8 characters.');
+      continue;
     }
+    if (await askPassword('Confirm password (hidden)') !== first) {
+      warn('The passwords do not match — enter it again.');
+      continue;
+    }
+    password = first;
   }
 
   const name = await ask('Name', email.split('@')[0] ?? 'admin');
@@ -943,6 +951,8 @@ async function ensureQdrant(
   carried: CarriedOverEnv,
   answer: QdrantAnswer,
   freePortAbove: (port: number) => Promise<number>,
+  advanced: boolean,
+  noDocker: NoDockerChoice | null,
 ): Promise<SetupConfig['qdrant'] & { runningVersion: string | null }> {
   heading('Vector Search (Qdrant)');
   const carriedKey = carried.qdrantApiKey;
@@ -997,13 +1007,16 @@ async function ensureQdrant(
   console.log(`  ${c.dim}Without it: keyword search only, no persistent memory.${c.reset}`);
   blank();
 
-  // Docker available → prefer compose-managed stack, no separate setup container
+  // Docker available → prefer compose-managed stack, no separate setup container.
+  // Unasked, it is the default answer; `--advanced` offers the other two.
   if (env.docker) {
-    const choice = await askChoice('How to run Qdrant?', [
-      `Docker stack ${c.dim}(recommended, starts with the app stack)${c.reset}`,
-      'Use an external Qdrant URL',
-      'Skip for now (in-memory only)',
-    ]);
+    const choice = advanced
+      ? await askChoice('How to run Qdrant?', [
+        `Docker stack ${c.dim}(recommended, starts with the app stack)${c.reset}`,
+        'Use an external Qdrant URL',
+        'Skip for now (in-memory only)',
+      ])
+      : 0;
 
     if (choice === 1) {
       const url = await ask('Qdrant URL', `http://localhost:${DEFAULT_QDRANT_PORT}`);
@@ -1034,12 +1047,16 @@ async function ensureQdrant(
     return { url: `http://localhost:${port}`, mode: 'docker', apiKey, port, runningVersion: null };
   }
 
-  // No Docker → offer binary download or skip
-  const choice = await askChoice('Qdrant is not running. Options:', [
-    `Download Qdrant binary ${c.dim}(script handles everything)${c.reset}`,
-    'Enter external Qdrant URL',
-    'Skip (in-memory only, not recommended)',
-  ]);
+  // No Docker → the operator's early answer (`askNoDocker`) decides: the native binary or
+  // in-memory. `--advanced` still offers the full set (an external URL too), defaulting to it.
+  const early = noDocker === 'native' ? 0 : 2;
+  const choice = advanced
+    ? await askChoice('Qdrant is not running. Options:', [
+      `Download Qdrant binary ${c.dim}(script handles everything)${c.reset}`,
+      'Enter external Qdrant URL',
+      'Skip (in-memory only, not recommended)',
+    ], early)
+    : early;
 
   if (choice === 0) {
     const binDir = join(env.neuralisHome, 'bin');
@@ -1052,9 +1069,18 @@ async function ensureQdrant(
       env.neuralisHome,
     );
     step(`Downloading Qdrant ${version}...`);
-    const binaryPath = await downloadQdrantBinary(binDir, version);
+    // A failed download (network, a checksum mismatch) is named and leaves the install
+    // in-memory: nothing was unpacked, and a re-run tries again.
+    let binaryPath: string | null;
+    try {
+      binaryPath = await downloadQdrantBinary(binDir, version);
+    } catch (err) {
+      fail(`Qdrant download failed: ${err instanceof Error ? err.message : String(err)}`);
+      warn('Qdrant skipped. Using in-memory mode (data lost on restart) — re-run setup to try again.');
+      return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
+    }
     if (!binaryPath) {
-      fail('Qdrant binary not available for this platform.');
+      fail(`No Qdrant binary is published for ${process.platform}/${process.arch}.`);
       warn('Install Qdrant manually or use Docker.');
       return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
     }
@@ -1095,6 +1121,28 @@ async function ensureQdrant(
 
   warn('Qdrant skipped. Using in-memory mode (data lost on restart).');
   return { url: '', mode: 'skip', apiKey: null, port, runningVersion: null };
+}
+
+type NoDockerChoice = 'native' | 'memory';
+
+/**
+ * A checkout with no reachable Docker: ONE question before anything is written, because the
+ * vector store and the virtual desktop both run in Docker. Nothing is chosen for the operator —
+ * Enter is "install Docker first", which writes nothing.
+ */
+async function askNoDocker(): Promise<NoDockerChoice | 'install'> {
+  blank();
+  console.log(`  ${c.yellow}Docker is not installed or not reachable. The vector store (Qdrant) and the virtual desktop need it.${c.reset}`);
+  console.log('    [1] Install Docker first (recommended) — prints the link, writes nothing, re-run setup after');
+  console.log('    [2] Continue natively — native Qdrant binary, no virtual desktop');
+  console.log('    [3] Continue in-memory only — memory is lost on restart');
+  for (;;) {
+    const answer = await ask('How do you want to continue?', '1');
+    if (answer === '1') return 'install';
+    if (answer === '2') return 'native';
+    if (answer === '3') return 'memory';
+    fail('Answer 1, 2 or 3.');
+  }
 }
 
 // ── Host ports ─────────────────────────────────────────────────
@@ -1312,7 +1360,8 @@ async function chooseVectorConfig(
   llmKeys: Record<string, string>,
   qdrantMode: string,
   deploymentMode: 'native' | 'docker',
-  localLLMs: LocalLLMEntry[] = [],
+  localLLMs: LocalLLMEntry[],
+  advanced: boolean,
 ): Promise<VectorChoice> {
   heading('Vector (embeddings)');
 
@@ -1321,8 +1370,16 @@ async function chooseVectorConfig(
     return { enabled: false };
   }
 
-  const menu = buildMenu(env);
   const recommended = recommendedEmbeddingModel();
+  // Unasked, the target is the recommended model and embedding stays off until its key is in
+  // the app: no provider is called, indexing and text/field search work meanwhile.
+  if (!advanced) {
+    if (!recommended) return { enabled: false };
+    info(`Embedding target: ${c.bold}${recommended.id}${c.reset} ${c.dim}@${recommended.defaultDimension} — off until its key is added in the app${c.reset}`);
+    return { enabled: false, modelId: recommended.id, dimension: recommended.defaultDimension };
+  }
+
+  const menu = buildMenu(env);
   console.log(`  ${c.dim}Pick an embedding provider. Recommended for a new install: ${recommended ? `${recommended.apiModelId} @${recommended.defaultDimension}` : 'a cloud model'}.${c.reset}`);
   console.log(`  ${c.dim}An existing install keeps the model it has; changing it later rebuilds the index from the Vector section.${c.reset}`);
   blank();
@@ -1534,13 +1591,22 @@ async function askOllamaDeployment(
       warn(`Could not reach ${url}: ${String((err as Error)?.message ?? err)} — saving URL anyway`);
     }
   }
-  const stored = hostReachableUrl(url, deploymentMode);
-  return { id: 'ollama', label: 'Ollama', baseUrl: stored, kind: 'ollama-native', enabled: true };
+  return detectedOllamaEntry(url, deploymentMode);
 }
 
+/** The Ollama at `url` as a chat endpoint — the default answer when one was detected. */
+function detectedOllamaEntry(url: string, deploymentMode: 'native' | 'docker'): LocalLLMEntry {
+  return { id: 'ollama', label: 'Ollama', baseUrl: hostReachableUrl(url, deploymentMode), kind: 'ollama-native', enabled: true };
+}
+
+/**
+ * Unasked (without `--advanced`) every question takes its default answer: a detected
+ * Ollama or local server is added, nothing else — more endpoints are added in the app.
+ */
 async function configureLocalLLMs(
   env: DetectedEnv,
   deploymentMode: 'native' | 'docker',
+  advanced: boolean,
 ): Promise<{ entries: LocalLLMEntry[]; keys: Record<string, string> }> {
   heading('Custom LLM endpoints');
   console.log(`  ${c.dim}Point Neuralis at an OpenAI-compatible or Ollama-native LLM server.${c.reset}`);
@@ -1556,7 +1622,9 @@ async function configureLocalLLMs(
 
   // Ollama gets the dedicated 3-way prompt because it's the most common path
   // (and the only one with a viable docker-compose service today).
-  const ollamaEntry = await askOllamaDeployment(env, deploymentMode);
+  const ollamaEntry = advanced
+    ? await askOllamaDeployment(env, deploymentMode)
+    : env.ollama.running ? detectedOllamaEntry(env.ollama.url, deploymentMode) : null;
   if (ollamaEntry) {
     entries.push(ollamaEntry);
     info(`Added ${c.bold}${ollamaEntry.label}${c.reset} → ${ollamaEntry.baseUrl}`);
@@ -1574,7 +1642,7 @@ async function configureLocalLLMs(
       reachable = false;
     }
     if (!reachable) continue;
-    const confirm = (await ask(`Detected ${c.bold}${probe.label}${c.reset} at ${probe.url} — add? (Y/n)`, 'y')).toLowerCase();
+    const confirm = advanced ? (await ask(`Detected ${c.bold}${probe.label}${c.reset} at ${probe.url} — add? (Y/n)`, 'y')).toLowerCase() : 'y';
     if (confirm !== 'n') {
       const stored = hostReachableUrl(probe.url, deploymentMode);
       entries.push({ id: probe.id, label: probe.label, baseUrl: stored, kind: probe.kind, enabled: true });
@@ -1583,7 +1651,7 @@ async function configureLocalLLMs(
   }
 
   // Manual add loop — lets the user point at custom hosts/ports.
-  while (true) {
+  while (advanced) {
     const more = (await ask('Add a custom LLM endpoint? (y/N)', 'n')).toLowerCase();
     if (more !== 'y') break;
     const label = (await ask('Label', 'My endpoint')).trim() || 'My endpoint';
@@ -1627,7 +1695,7 @@ async function askEndpointAuth(): Promise<{ auth: 'none' | 'bearer'; key: string
     'Bearer API key — a gateway or hosted endpoint',
   ], 0);
   if (authChoice !== 1) return { auth: 'none', key: '' };
-  const key = (await ask('API key (stored encrypted, never echoed)', '')).trim();
+  const key = (await askSensitive('API key (stored encrypted, never echoed)')).trim();
   if (!key) warn('No key entered — add it later in the admin Credentials tab.');
   return { auth: 'bearer', key };
 }
@@ -1655,7 +1723,7 @@ async function askEndpointNetwork(baseUrl: string): Promise<'private' | 'public'
 
 // ── Machine-core desktop variant + image prefetch ──────────────
 
-async function chooseMachineVariant(env: DetectedEnv): Promise<MachineChoice> {
+async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, advanced: boolean): Promise<MachineChoice> {
   heading('Machine (virtual desktop)');
   console.log(`  ${c.dim}The first beta bundles Ubuntu + XFCE with Neuralis control and authentication.${c.reset}`);
   console.log(`  ${c.dim}machine-core streams the Webtop desktop into the workspace over Selkies.${c.reset}`);
@@ -1664,31 +1732,38 @@ async function chooseMachineVariant(env: DetectedEnv): Promise<MachineChoice> {
 
   if (!env.docker) {
     warn('Docker not available — machine widget will surface a "docker-missing" error at runtime.');
-    return { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true };
+    return { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true, pullOnHost: false };
   }
 
   const variant = DEFAULT_MACHINE_VARIANT;
   info(`Bundled desktop: ${c.bold}${variant.label}${c.reset} ${c.dim}(${variant.derivativeImage})${c.reset}`);
 
-  const prefetch = await ask('Pre-pull the Neuralis desktop image now (background)?', 'y');
+  // A pull started in the image's one-shot container dies with it: there the host pulls it
+  // (the installer does; the summary names the command).
+  if (layout === 'container') {
+    step(`Pull it on the host before the first desktop start: ${c.bold}docker pull ${variant.derivativeImage}${c.reset}`);
+    return { variant, skipPrefetch: true, pullOnHost: true };
+  }
+
+  const prefetch = advanced ? await ask('Pre-pull the Neuralis desktop image now (background)?', 'y') : 'y';
   const skipPrefetch = prefetch.toLowerCase() === 'n';
 
   if (!skipPrefetch) {
     step(`Starting background pull of ${c.bold}${variant.derivativeImage}${c.reset}…`);
     try {
-      await backgroundPullMachineImage(variant.derivativeImage, env.neuralisHome);
-      info('Background pull kicked off — the first desktop open may still wait for the download or need a retry.');
+      const pid = await backgroundPullMachineImage(variant.derivativeImage, env.neuralisHome);
+      info(`Background pull kicked off (pid ${pid}) — the first desktop open may still wait for the download or need a retry.`);
     } catch (err) {
       warn(`Background pull failed (continuing anyway): ${err instanceof Error ? err.message : String(err)}`);
     }
   } else {
-    step('Image prefetch skipped — first widget open will pull the image on demand.');
+    step(`Image prefetch skipped — the first desktop start needs it: docker pull ${variant.derivativeImage}`);
   }
 
-  return { variant, skipPrefetch };
+  return { variant, skipPrefetch, pullOnHost: false };
 }
 
-async function backgroundPullMachineImage(image: string, dataHome: string): Promise<void> {
+async function backgroundPullMachineImage(image: string, dataHome: string): Promise<number | undefined> {
   // Spawn an independent `docker pull` process and detach so the setup CLI
   // exits without waiting. Errors become log output — we don't block setup
   // on a slow/failed pull.
@@ -1707,6 +1782,7 @@ async function backgroundPullMachineImage(image: string, dataHome: string): Prom
   child.on('error', (err) => {
     warn(`docker pull ${image} failed to spawn: ${err.message}`);
   });
+  return child.pid;
 }
 
 // ── File generation ────────────────────────────────────────────
@@ -2079,10 +2155,6 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     build: buildInputsFor(env, config.buildNpmrc ?? undefined),
     // Decided at generation, from the install folder's package.json (`operatorImageFor`).
     operatorImage: null,
-    // Emitted only when the operator has actually provisioned the broker —
-    // `pnpm neuralis:host-broker init` writes the secret + ceiling and prints
-    // the unit. Setup never turns the host plane on by itself.
-    hostBroker: hostBrokerEmitInput(config.neuralisHome, hostHome),
   };
 }
 
@@ -2111,22 +2183,6 @@ function buildInputsFor(env: DetectedEnv, npmrcPath: string | undefined): BuildI
     neuralisHome: env.neuralisHome,
     npmrcPath,
   });
-}
-
-/**
- * Detect operator-provisioned host-broker artifacts.
- *
- * Presence of BOTH the secret file and a configured socket path is what makes
- * compose emit the binds. Nothing here creates them — `pnpm neuralis:host-broker
- * init` does, deliberately as a separate, explicit operator act.
- */
-function hostBrokerEmitInput(neuralisHome: string, hostHome: string): ComposeEmitInput['hostBroker'] {
-  const hostDir = join(hostHome, 'host-broker');
-  return {
-    enabled: existsSync(join(neuralisHome, 'host-broker', 'secret')),
-    socketPath: join(hostDir, 'host-broker.sock'),
-    secretFile: join(hostDir, 'secret'),
-  };
 }
 
 /**
@@ -2192,7 +2248,7 @@ function composeInputFromExisting(
     neuralisHome: hostHome,
     machine: {
       desktopVariant: machineEnv('NEURALIS_MACHINE_DESKTOP_VARIANT', 'ubuntu-xfce'),
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.1'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.2'),
       containerScope: machineEnv('NEURALIS_MACHINE_CONTAINER_SCOPE', 'user'),
       idleMinutes: Number(envVars.NEURALIS_MACHINE_IDLE_MINUTES) || 30,
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
@@ -2206,9 +2262,6 @@ function composeInputFromExisting(
     imageTag: null,
     build: buildInputsFor(env, envVars.NEURALIS_BUILD_NPMRC),
     operatorImage: null,
-    // Re-detected on every regeneration, so `--compose-only` picks up a broker
-    // provisioned (or removed) since the last run.
-    hostBroker: hostBrokerEmitInput(env.neuralisHome, hostHome),
   };
 }
 
@@ -2367,7 +2420,24 @@ async function handleExistingSetup(env: DetectedEnv): Promise<boolean> {
 
 // ── Summary ────────────────────────────────────────────────────
 
-function printSummary(config: SetupConfig, env: DetectedEnv) {
+function printUsage(ctx: CliContext): void {
+  console.log(`Usage: ${spell('setup', ctx)} [options]
+
+Writes the data home, .env, the first owner and project, and docker-compose.yml.
+Asks the owner account, the public origin and a free port for a busy one; every
+other question takes its default answer, changed later in the app.
+
+  --advanced          ask every question: provider keys, OpenAI, Qdrant, local LLM
+                      servers, embedding, desktop prefetch, project name, ChatGPT
+                      sign-in callback, trusted proxies
+  --compose-only      regenerate docker-compose.yml from .env; asks nothing
+  --output DIR        write .env and the compose files into DIR
+  --uid N, --gid N    the user and group the stack runs as (default: detected)
+  --docker-gid N      the Docker socket's group (default: detected)
+  -h, --help          this text`);
+}
+
+function printSummary(config: SetupConfig, env: DetectedEnv, layout: InstallLayout, advanced: boolean) {
   heading('Setup Complete');
 
   info(`Owner: ${c.bold}${config.owner.name}${c.reset} <${config.owner.email}>`);
@@ -2402,7 +2472,7 @@ function printSummary(config: SetupConfig, env: DetectedEnv) {
   }
 
   info(
-    `Machine: ${c.bold}${config.machine.variant.key}${c.reset} ${c.dim}(${config.machine.variant.derivativeImage}${config.machine.skipPrefetch ? ', no prefetch' : ', prefetch running in background'})${c.reset}`,
+    `Machine: ${c.bold}${config.machine.variant.key}${c.reset} ${c.dim}(${config.machine.variant.derivativeImage}${config.machine.pullOnHost ? ', pull it on the host' : config.machine.skipPrefetch ? ', no prefetch' : ', prefetch running in background'})${c.reset}`,
   );
 
   blank();
@@ -2410,6 +2480,11 @@ function printSummary(config: SetupConfig, env: DetectedEnv) {
   blank();
 
   if (config.deploymentMode === 'native') {
+    if (config.qdrant.mode === 'docker') {
+      // The native app needs its Qdrant: the compose file setup wrote runs it alone.
+      console.log(`    ${c.bold}Start the vector store (Docker):${c.reset}`);
+      console.log(`      docker compose up -d qdrant`);
+    }
     console.log(`    ${c.bold}Build and start from the host folder:${c.reset}`);
     console.log(`      npm run build`);
     console.log(`      npm run start`);
@@ -2427,11 +2502,51 @@ function printSummary(config: SetupConfig, env: DetectedEnv) {
   blank();
   console.log(`    Then open: ${c.cyan}${c.bold}${config.publicOrigin}${c.reset}`);
   blank();
+  if (config.machine.pullOnHost) {
+    console.log(`  ${c.bold}The virtual desktop's image${c.reset} ${c.dim}(~3 GB; pull it on the host before the first desktop start):${c.reset}`);
+    console.log(`      docker pull ${config.machine.variant.derivativeImage}`);
+    blank();
+  }
+  if (!advanced) {
+    console.log(`  ${c.cyan}${c.bold}Next, in the app${c.reset} ${c.dim}(signed in as the owner):${c.reset}`);
+    console.log(`    Admin → Credentials         AI provider keys, Sign in with ChatGPT`);
+    console.log(`    Admin → Vector              the embedding key, turn embedding on, rebuild`);
+    console.log(`    Credentials → Custom endpoints   a local or self-hosted LLM server`);
+    const everyQuestion = layout === 'container' ? 'curl -fsSL https://neuralisapp.com/install.sh | sh -s -- --advanced' : spellOn(layout, 'setup --advanced');
+    console.log(`  ${c.dim}Every setup question instead: ${everyQuestion}${c.reset}`);
+    blank();
+  }
+}
+
+/**
+ * The next step, offered: an npm folder and a clone run Docker from this folder. Never in the
+ * image's one-shot container — it cannot start its own stack; the installer asks there.
+ */
+async function offerStart(configDir: string): Promise<void> {
+  const answer = (await ask('Start Neuralis now?', 'y')).toLowerCase();
+  if (answer.startsWith('n')) {
+    step(`Start it later in ${configDir}: docker compose up -d`);
+    return;
+  }
+  const code = await new Promise<number | null>((done) => {
+    const child = spawn('docker', ['compose', 'up', '-d'], { cwd: configDir, stdio: 'inherit' });
+    child.on('error', () => done(null));
+    child.on('close', done);
+  });
+  if (code === 0) info('Neuralis is starting.');
+  else warn(`docker compose up -d did not finish (${code === null ? 'docker did not start' : `exit ${code}`}) — run it in ${configDir} once the cause is fixed.`);
 }
 
 // ── Main ───────────────────────────────────────────────────────
 
 export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
+  if (cliArgs.includes('--help') || cliArgs.includes('-h')) {
+    printUsage(ctx);
+    return 0;
+  }
+  // The full question set; without it every question but the owner, the address and a busy
+  // port takes its default answer, and the summary names where each one is changed in the app.
+  const advanced = cliArgs.includes('--advanced');
   const flagValue = (flag: string): string | null => {
     const idx = cliArgs.indexOf(flag);
     return idx >= 0 ? (cliArgs[idx + 1] ?? null) : null;
@@ -2469,6 +2584,16 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     const layout = installLayout(ctx.installDir, ctx.packageDir);
     printDetection(env, layout);
     const image = await setupPreflight(ctx, env, await readNeuralisVersion(ctx.packageDir), false, outputOverride);
+    // 1b. No Docker (a checkout; an npm folder and the image refused above): asked before any write.
+    const noDocker = env.docker ? null : await askNoDocker();
+    if (noDocker === 'install') {
+      blank();
+      step('Install Docker Engine with Compose v2: https://docs.docker.com/engine/install/');
+      step('Your user must reach the daemon without sudo (`docker info` answers).');
+      step(`Then re-run: ${spellOn(layout, 'setup')}`);
+      step('Nothing was written.');
+      return 0;
+    }
     await preflightDataRoot(env, image);
 
     // 2. Check existing setup
@@ -2527,19 +2652,22 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       step('Left untouched — remove by hand once you have confirmed they are unused.');
     }
 
-    // 3. Owner account
-    const owner = await askOwner();
+    // 3. Owner account — a re-run keeps every user, so it asks nothing here.
+    const owner = env.existingSetup && maintained?.ok && maintained.ownerUserId
+      ? await readOwnerRecord(env.neuralisHome, maintained.ownerUserId)
+      : await askOwner();
 
     // 3b. Deployment mode — determines how loopback URLs are stored. Must
     // run before any step that writes service URLs (chooseVectorConfig,
     // configureLocalLLMs). An npm install folder and the image write a folder
     // that runs the published image, so they are Docker only; native runs from
-    // a source clone (or the host package itself).
-    const deploymentMode = layout === 'folder' || layout === 'container' ? 'docker' : await askDeploymentMode(env);
+    // a source clone (or the host package itself). The early no-Docker answer already chose native.
+    const deploymentMode = layout === 'folder' || layout === 'container' ? 'docker' : noDocker && !advanced ? 'native' : await askDeploymentMode(env);
 
     // 4. LLM keys (excl. OpenAI) + OpenAI via API-key / ChatGPT OAuth / both.
-    const llmKeys = await askLlmKeys();
-    const openaiAuth = await askOpenAIAuth();
+    // Unasked: no key (the default answer of every key prompt) — Admin → Credentials holds them.
+    const llmKeys = advanced ? await askLlmKeys() : {};
+    const openaiAuth: OpenAIAuth = advanced ? await askOpenAIAuth() : {};
     if (openaiAuth.apiKey) llmKeys['OPENAI_API_KEY'] = openaiAuth.apiKey;
 
     // 5. Qdrant — the carried key rides in so the MODE decides mint/ask/none,
@@ -2548,26 +2676,26 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     const qdrant = await ensureQdrant(env, carried, qdrantAnswer, async (port) => {
       const claim: PortClaim = { key: 'qdrant', port, address: '127.0.0.1' };
       return (await nextFreePorts([claim], [], { probe: ports.probe, published: await ports.published() })).get('qdrant')!;
-    });
+    }, advanced, noDocker);
 
     // 6. Custom LLM endpoints — probe the standard ports, let the user add
     // any reachable one. Runs BEFORE chooseVectorConfig so the embedding
     // step can offer "use the same Ollama for embeddings?" without needing
     // a second copy of the URL.
-    const localLlmChoice = await configureLocalLLMs(env, deploymentMode);
+    const localLlmChoice = await configureLocalLLMs(env, deploymentMode, advanced);
     const localLLMs = localLlmChoice.entries;
 
     // 6b. Vector (embeddings) — interactive, registry-driven.
-    const vector = await chooseVectorConfig(env, llmKeys, qdrant.mode, deploymentMode, localLLMs);
+    const vector = await chooseVectorConfig(env, llmKeys, qdrant.mode, deploymentMode, localLLMs, advanced);
 
     // 6c. Machine-core (virtual desktop) — bundled desktop + background image prefetch.
-    const machine = await chooseMachineVariant(env);
+    const machine = await chooseMachineVariant(env, layout, advanced);
 
     // 7. Project — already settled above on an existing install; a fresh one
     // mints its id from the name through the app's own derivation.
     if (!maintained?.ok) {
       heading('Project');
-      const answered = await ask('Project name', 'My Workspace');
+      const answered = advanced ? await ask('Project name', 'My Workspace') : 'My Workspace';
       maintained = resolveSetupProjectId({ existingSetup: false, projects: [], answer: answered });
     }
     if (!maintained.ok) throw new Error(maintained.reason);
@@ -2608,7 +2736,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // A held callback port is named, and the default turns to "no": the stack would not start.
     const codexDefault = codexQuestion.ask && codexQuestion.defaultOn && settled.codexHolder === undefined;
     let codexLoopback = codexQuestion.ask ? codexDefault : codexQuestion.value;
-    if (codexQuestion.ask) {
+    if (codexQuestion.ask && advanced) {
       heading('ChatGPT sign-in callback');
       step('Publish port 1455 on this machine\'s loopback so a browser ON this machine can finish a ChatGPT sign-in by itself.');
       step(`${c.dim}The price: Docker holds 127.0.0.1:1455 for as long as the stack runs — \`codex login\` (and this wizard's own ChatGPT sign-in on a later re-run) cannot use that port meanwhile, and the stack will not start while another program holds it.${c.reset}`);
@@ -2629,11 +2757,14 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     }
 
     // 7b-3. Trusted reverse proxies — topology, never a tunable. The default is
-    // the carried value; a fresh install trusts none (only the socket peer).
-    heading('Reverse proxy');
-    step('Only when a reverse proxy fronts the app: its address (or CIDR), so logins and webhooks are limited per real client.');
-    step(`${c.dim}Leave empty otherwise — a forwarding header is then never believed. \`none\` clears a carried value.${c.reset}`);
-    let trustedProxies: string | null = null;
+    // the carried value; a fresh install trusts none (only the socket peer). A
+    // loopback origin has no proxy in front of it: asked only for another origin.
+    let trustedProxies: string | null = advanced || !isLoopbackPublicOrigin(publicOrigin) ? null : normalizeTrustedProxies(carried.trustedProxies);
+    if (trustedProxies === null) {
+      heading('Reverse proxy');
+      step('Only when a reverse proxy fronts the app: its address (or CIDR), so logins and webhooks are limited per real client.');
+      step(`${c.dim}Leave empty otherwise — a forwarding header is then never believed. \`none\` clears a carried value.${c.reset}`);
+    }
     while (trustedProxies === null) {
       trustedProxies = normalizeTrustedProxies(await ask('Trusted proxies', carried.trustedProxies));
       if (trustedProxies === null) fail('Not an address or CIDR list — expected something like 10.0.0.5 or 172.18.0.0/16');
@@ -2776,8 +2907,9 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       askOverwrite: true, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir, dataHome: env.neuralisHome,
     });
 
-    // 14. Summary
-    printSummary(config, env);
+    // 14. Summary, then the start offered where this process can start the stack.
+    printSummary(config, env, layout, advanced);
+    if (layout === 'folder' || (layout === 'clone' && deploymentMode === 'docker')) await offerStart(configDir);
 
   } finally {
     rl.close();

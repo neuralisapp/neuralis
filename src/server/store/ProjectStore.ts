@@ -58,9 +58,11 @@ const STORE_SLOT = Symbol.for('@neuralis/host:projectStore');
 /**
  * The role-grant revision every seeded record carries (`roleGrantVersion`) —
  * a per-record marker, raised only by an offline upgrade together with
- * `HOST_DATA_FORMATS.project` (`roleGrantFormatLockstep.test.ts`).
+ * `HOST_DATA_FORMATS.project` (`roleGrantFormatLockstep.test.ts`). 21 = the
+ * two-word feature ids (`files.*`, `sources.*`, `exec.local`, `terminal.local`,
+ * `machine.control`, …) on every stored role.
  */
-const ROLE_GRANT_VERSION = 19;
+export const ROLE_GRANT_VERSION = 21;
 
 /**
  * A project-record signal, emitted after the write resolved, naming the users it
@@ -162,7 +164,7 @@ export class ProjectUpdateError extends Error {
  * and a setup-written record stays unseeded (its empty role map grants nothing)
  * until a boot with every builtin manifest readable seeds it.
  */
-const DEWILDCARD_LIVENESS_IDS = ['project.dashboard', 'drive.read', 'core.agents'] as const;
+const DEWILDCARD_LIVENESS_IDS = ['project.dashboard', 'files.read', 'core.agents'] as const;
 
 let warnedDegenerateAdminGrants = false;
 
@@ -293,12 +295,12 @@ async function resolveUniqueId(baseId: string): Promise<string> {
  * seeds it through the ONE `seedRolesForNewProject`, the same seed
  * `createProject` stamps, and fills the two defaults setup does not write.
  *
- * Nothing else is converted. Every record since role-grant version 19 is born
- * current (both writers seed at 19), so a record is either current or unseeded.
- * A role-grant change after 19 — a new `defaultRoleGrants` feature for existing
- * projects, a rename, a revoke — ships as an OFFLINE upgrade module under
- * `scripts/upgrades/` that raises `neuralis/project` in the same change, never
- * as a replay table read here. A record stamped by a NEWER build is served as
+ * Nothing else is converted. Both writers seed at `ROLE_GRANT_VERSION`, and
+ * every role-grant change since 19 — a new `defaultRoleGrants` feature for
+ * existing projects, a rename, a revoke — ships as an OFFLINE upgrade module
+ * under `scripts/upgrades/` that raises `neuralis/project` (one more step of
+ * its chain) in the same change, so a record the app reads is either current
+ * or unseeded — never a replay table read here. A record stamped by a NEWER build is served as
  * read and never rewritten (`assertProjectRecordWritable`).
  */
 export function migrateProjectRecord(raw: Record<string, unknown>): ProjectRecord {
@@ -547,7 +549,7 @@ export async function createProject(
     agentOwnership: {},
     limits: { spend: structuredClone(DEFAULT_SPEND_LIMITS) },
     roleGrantVersion: seededRoles.roleGrantVersion,
-    formatVersion: 2,
+    formatVersion: HOST_DATA_FORMATS.project.version,
     createdAt: now,
     updatedAt: now,
   };

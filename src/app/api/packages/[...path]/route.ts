@@ -16,7 +16,7 @@ import { resolveAgentAxis } from '@/server/auth/resolveVerifiedAgentScope';
 import { getRuntime } from '@/server/host/bootstrap';
 import { logRuntimeWait } from '@/server/logging/hostLogger';
 import { listProjectsForUser, getProjectById } from '@/server/store/ProjectStore';
-import { getUserById, isActiveUser } from '@/server/store/UserStore';
+import { getUserById, isActiveUser, sessionEpochOf } from '@/server/store/UserStore';
 import { FileStoreReadError } from '@neuralis/package-system/data';
 import { writeAuditLog } from '@/server/store/AuditStore';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
@@ -444,6 +444,12 @@ async function handleRequest(
       // governed (`pending_review`), and keeps the human-only arms human. Cookie
       // ⇒ true; ticket and OAuth ⇒ false. Never forgeable by the request body.
       interactive: !ticketSession && !oauth,
+      // Host-only, never forgeable either: the epoch the cookie or the OAuth
+      // grant was just verified against (a route minting a long-lived
+      // credential binds it to this), and the OAuth client the grant names —
+      // a consent/audit LABEL, never an authority. The ticket arm carries neither.
+      ...(ticketSession ? {} : { sessionEpoch: sessionEpochOf(userRecord) }),
+      ...(oauth ? { oauthClient: { clientId: oauth.clientId, scope: oauth.scope } } : {}),
     });
   } catch (err: unknown) {
     const status = (err as { status?: number }).status;

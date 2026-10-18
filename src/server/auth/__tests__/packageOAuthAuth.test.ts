@@ -41,6 +41,11 @@ describe('tryResolvePackageOAuth', () => {
     expect(packageApiResource()).toBe('https://neuralis.example.com/api');
   });
 
+  it('the verifier\'s token expiry rides the match (the realtime hub closes then)', async () => {
+    mocks.verifyRouteToken.mockResolvedValue({ ok: true, session: { userId: 'u1', projectId: 'p1', agentId: 'a1' }, clientId: 'c', scope: 'routes:call', expiresAt: 1_900_000_000_000 });
+    expect(await tryResolvePackageOAuth(req('Bearer jwt'))).toMatchObject({ kind: 'match', expiresAt: 1_900_000_000_000 });
+  });
+
   it('a refused, throwing or absent verifier REJECTS a present bearer — never null', async () => {
     mocks.verifyRouteToken.mockResolvedValueOnce({ ok: false, code: 'wrong_resource' });
     expect(await tryResolvePackageOAuth(req('Bearer jwt'))).toEqual({ kind: 'reject', code: 'wrong_resource' });

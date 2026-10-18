@@ -19,11 +19,14 @@
  * and an apply inside a container refuses while `<home>/checkpoints` is not a
  * bind of the host's — a checkpoint in the writable layer is gone at `--rm`.
  * Each upgrade is ONE file under `scripts/upgrades/` whose default export
- * satisfies `OfflineUpgradeModule`; files run in name order and own disjoint
- * kinds. `--apply` order: every module's strict dry run → ONE checkpoint of the
- * union of their files plus the ledger (skipped when resuming) → ledger
- * `state: 'upgrading'` → each module's idempotent apply → state cleared LAST.
- * An interrupted run is resumed by running the same command again.
+ * satisfies `OfflineUpgradeModule`; files run in name order. A kind is raised by
+ * the ONE module its declaration names — or, for a kind whose declaration is a
+ * CHAIN, by one module per step, and the file order must be the chain order.
+ * `--apply` order: every module's strict dry run → ONE checkpoint of the union
+ * of their files plus the ledger (skipped when resuming) → ledger
+ * `state: 'upgrading'` (with the `from` each kind starts at) → each module's
+ * idempotent apply → state cleared LAST. An interrupted run is resumed by
+ * running the same command again; it re-runs every step above that `from`.
  */
 
 import { existsSync } from 'node:fs';
@@ -36,6 +39,7 @@ import {
   createCheckpoint,
   listDataFormatDeclarations,
   markDataFormatUpgrade,
+  offlineUpgradeSteps,
   pendingOfflineKinds,
   pruneCheckpoints,
   readDataFormatLedger,
@@ -72,10 +76,11 @@ export async function loadUpgradeModules(dir: string): Promise<DiscoveredUpgrade
   for (const { file, module } of found) {
     if (ids.has(module.id)) throw new Error(`Two upgrade modules share the id ${module.id}`);
     ids.add(module.id);
-    for (const { kind } of module.kinds) {
-      const owner = owners.get(kind);
-      if (owner) throw new Error(`${kind} is claimed by two upgrade modules (${owner}, ${file})`);
-      owners.set(kind, file);
+    for (const { kind, to } of module.kinds) {
+      // One module per (kind, target): a chained kind has one module per step.
+      const owner = owners.get(`${kind}@${to}`);
+      if (owner) throw new Error(`${kind} v${to} is claimed by two upgrade modules (${owner}, ${file})`);
+      owners.set(`${kind}@${to}`, file);
     }
   }
   return found;
@@ -83,29 +88,36 @@ export async function loadUpgradeModules(dir: string): Promise<DiscoveredUpgrade
 
 export type UpgradeSelection = { module: OfflineUpgradeModule; pending: OfflineUpgradeKind[]; resuming: boolean };
 
+/** What the ledger records for one kind: its final target this run, and the version its data starts from. */
+export type UpgradeMark = OfflineUpgradeKind & { from: number };
+
 /**
  * Derive-and-verify against the kinds the loaded code declares: every pending
  * offline kind — behind its code version, mid-upgrade, or absent from a ledger
  * file that exists (a kind this install has never been through; the kernel's
- * ONE `pendingOfflineKinds` predicate, the boot claim's own) — must be raised by
- * exactly the ONE module its declaration names, to that version.
+ * ONE `pendingOfflineKinds` predicate, the boot claim's own) — is raised by every
+ * step of its chain above the version its data holds, each step by exactly the
+ * ONE module that step names, and the modules' file order is the chain order.
  */
 function selectPendingUpgrades(
   modules: readonly DiscoveredUpgrade[],
   ledger: Awaited<ReturnType<typeof readDataFormatLedger>>,
   ledgerExisted: boolean,
-): UpgradeSelection[] {
+): { selection: UpgradeSelection[]; marks: UpgradeMark[] } {
   const declarations = new Map(listDataFormatDeclarations().map((decl) => [decl.kind, decl]));
   for (const [kind, entry] of Object.entries(ledger)) {
     if (entry.state !== 'upgrading') continue;
-    const owner = declarations.get(kind)?.upgrade?.id;
-    if (!owner || !modules.some(({ module }) => module.id === owner)) throw new Error(`No upgrade module completes the half-done upgrade of ${kind}`);
+    const decl = declarations.get(kind);
+    if (!decl || offlineUpgradeSteps(decl).length === 0) throw new Error(`No upgrade module completes the half-done upgrade of ${kind}`);
   }
+  const position = new Map(modules.map(({ module }, index) => [module.id, index]));
   for (const { file, module } of modules) {
     for (const { kind, to } of module.kinds) {
       const decl = declarations.get(kind);
-      if (!decl || decl.upgrade?.id !== module.id || decl.version !== to) {
-        throw new Error(`${file} raises ${kind} to v${to}, but this build declares ${decl ? `v${decl.version} (upgrade ${decl.upgrade?.id ?? 'none'})` : 'no such kind'}`);
+      const steps = decl ? offlineUpgradeSteps(decl) : [];
+      if (!decl || !steps.some((step) => step.id === module.id && step.to === to)) {
+        const declared = steps.map((step) => `${step.id} → v${step.to}`).join(', ') || 'none';
+        throw new Error(`${file} raises ${kind} to v${to}, but this build declares ${decl ? `v${decl.version} (upgrade ${declared})` : 'no such kind'}`);
       }
     }
   }
@@ -114,19 +126,27 @@ function selectPendingUpgrades(
     if (entry && entry.version > decl.version) {
       throw new Error(`${decl.kind} is at v${entry.version} on disk but this build reads v${decl.version}: the data is newer than the code — start the build that wrote it, or go back with \`${spell('checkpoint restore <id>')}\``);
     }
+    // The chain runs in file order, so the files must sort in chain order.
+    const order = offlineUpgradeSteps(decl).map((step) => position.get(step.id)).filter((at): at is number => at !== undefined);
+    if (order.some((at, i) => i > 0 && at < order[i - 1]!)) {
+      throw new Error(`${decl.kind}: its upgrade chain (${offlineUpgradeSteps(decl).map((step) => step.id).join(' → ')}) must run in that order, but the module files sort differently`);
+    }
   }
   const selected: UpgradeSelection[] = [];
-  for (const { kind, to } of pendingOfflineKinds(ledger, ledgerExisted, declarations.values())) {
-    const upgradeId = declarations.get(kind)!.upgrade!.id;
-    const owners = modules.filter(({ module }) => module.id === upgradeId && module.kinds.some((k) => k.kind === kind));
-    if (owners.length !== 1) throw new Error(`${kind} needs the ${upgradeId} upgrade module, found ${owners.length}`);
-    const { module } = owners[0]!;
-    let row = selected.find((s) => s.module === module);
-    if (!row) selected.push(row = { module, pending: [], resuming: false });
-    row.pending.push({ kind, to });
-    if (ledger[kind]?.state === 'upgrading') row.resuming = true;
+  const marks: UpgradeMark[] = [];
+  for (const { kind, from, to } of pendingOfflineKinds(ledger, ledgerExisted, declarations.values())) {
+    marks.push({ kind, to, from });
+    for (const step of offlineUpgradeSteps(declarations.get(kind)!).filter((s) => s.to > from)) {
+      const owners = modules.filter(({ module }) => module.id === step.id && module.kinds.some((k) => k.kind === kind && k.to === step.to));
+      if (owners.length !== 1) throw new Error(`${kind} needs the ${step.id} upgrade module, found ${owners.length}`);
+      const { module } = owners[0]!;
+      let row = selected.find((s) => s.module === module);
+      if (!row) selected.push(row = { module, pending: [], resuming: false });
+      row.pending.push({ kind, to: step.to });
+      if (ledger[kind]?.state === 'upgrading') row.resuming = true;
+    }
   }
-  return modules.flatMap(({ module }) => selected.filter((s) => s.module === module));
+  return { selection: modules.flatMap(({ module }) => selected.filter((s) => s.module === module)), marks };
 }
 
 export type UpgradeOptions = {
@@ -181,8 +201,8 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> 
   }
   const modules = await loadUpgradeModules(opts.modulesDir);
   const ledgerExisted = existsSync(join(opts.roots.appRoot, DATA_FORMAT_LEDGER_RELATIVE_PATH));
-  const selection = selectPendingUpgrades(modules, await readDataFormatLedger(opts.roots.appRoot), ledgerExisted);
-  const pending = selection.flatMap((s) => s.pending.map((k) => k.kind));
+  const { selection, marks } = selectPendingUpgrades(modules, await readDataFormatLedger(opts.roots.appRoot), ledgerExisted);
+  const pending = marks.map((mark) => mark.kind);
   if (selection.length === 0) {
     opts.log('Nothing to upgrade: every offline data format is current.');
     return { pending, applied: false };
@@ -216,13 +236,12 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> 
     checkpoint = (await createCheckpoint(opts.roots.home, { label: `upgrade-${selection.map((s) => s.module.id).join('-')}`, files: [...files] })).id;
     opts.log(checkpointTakenLine(checkpoint));
   }
-  const kinds = selection.flatMap((s) => s.pending);
-  await markDataFormatUpgrade(opts.roots.appRoot, kinds, 'begin');
+  await markDataFormatUpgrade(opts.roots.appRoot, marks, 'begin');
   for (const { module } of selection) {
     await module.apply(ctx);
     opts.log(`${module.id}: applied.`);
   }
-  await markDataFormatUpgrade(opts.roots.appRoot, kinds, 'complete');
+  await markDataFormatUpgrade(opts.roots.appRoot, marks, 'complete');
   if (opts.keepCheckpoints !== undefined) {
     const pruned = await pruneCheckpoints(opts.roots.home, opts.keepCheckpoints);
     if (pruned.length > 0) opts.log(`Pruned ${pruned.length} older checkpoint(s) (dataCheckpointKeep ${opts.keepCheckpoints}).`);

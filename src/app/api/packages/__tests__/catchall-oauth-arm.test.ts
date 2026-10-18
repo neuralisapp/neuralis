@@ -54,7 +54,12 @@ function req(url: string, headers: Record<string, string> = { authorization: `Be
   return new NextRequest(url, { headers: new Headers(headers), ...init });
 }
 const params = { params: Promise.resolve({ path: ['agent-core', 'cli', 'session'] }) };
-const dispatched = () => (mocks.routePackage.mock.calls[0] as unknown[] | undefined)?.[1] as { session: Record<string, unknown>; interactive: boolean } | undefined;
+const dispatched = () => (mocks.routePackage.mock.calls[0] as unknown[] | undefined)?.[1] as {
+  session: Record<string, unknown>;
+  interactive: boolean;
+  sessionEpoch?: number;
+  oauthClient?: { clientId: string; scope: string };
+} | undefined;
 const auditRow = (action: string) => mocks.writeAuditLog.mock.calls.map((c) => c[0] as Record<string, unknown>).find((r) => r.action === action);
 
 beforeEach(() => {
@@ -78,6 +83,26 @@ describe('catch-all OAuth arm — dispatch', () => {
     const row = auditRow('cli.session_call')!;
     expect(row).toMatchObject({ userId: 'u1', details: { projectId: 'p1', agentId: 'a1', clientId: 'neuralis-cli', scope: 'routes:call' } });
     expect(JSON.stringify(mocks.writeAuditLog.mock.calls)).not.toContain(TOKEN);
+  });
+
+  it('stamps the host-only channel facts: the OAuth client as a label, and the epoch the grant was verified against', async () => {
+    mocks.getUserById.mockResolvedValue({ id: 'u1', status: 'active', sessionEpoch: 4 });
+    await GET(req('http://localhost:3100/api/packages/agent-core/devices/pair'), params);
+    expect(dispatched()).toMatchObject({ interactive: false, sessionEpoch: 4, oauthClient: { clientId: 'neuralis-cli', scope: 'routes:call' } });
+  });
+
+  it('a cookie carries the epoch and no OAuth client; a skill ticket carries neither', async () => {
+    mocks.getUserById.mockResolvedValue({ id: 'u1', status: 'active', sessionEpoch: 4 });
+    mocks.getSessionUser.mockResolvedValueOnce({ id: 'u1', email: 'u1@x', name: 'U' });
+    await GET(req('http://localhost:3100/api/packages/agent-core/x', { 'x-project-id': 'p1' }), params);
+    expect(dispatched()).toMatchObject({ interactive: true, sessionEpoch: 4 });
+    expect(dispatched()).not.toHaveProperty('oauthClient');
+    mocks.routePackage.mockClear();
+    mocks.tryResolveSessionTicket.mockResolvedValueOnce({ kind: 'match', session: { ...oauthSession, requestId: 'r' } });
+    await GET(req('http://localhost:3100/api/packages/agent-core/x', { authorization: 'Bearer nrs1.r.s' }), params);
+    expect(dispatched()!.interactive).toBe(false);
+    expect(dispatched()).not.toHaveProperty('sessionEpoch');
+    expect(dispatched()).not.toHaveProperty('oauthClient');
   });
 
   it('a body cannot make the call interactive', async () => {

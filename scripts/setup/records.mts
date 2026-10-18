@@ -193,6 +193,15 @@ export async function createDirectorySkeleton(neuralisHome: string, projectId: s
   }
 }
 
+/** The maintained project's owner as stored — a re-run keeps every user and never asks again. */
+export async function readOwnerRecord(neuralisHome: string, userId: string): Promise<SetupConfig['owner']> {
+  const raw = JSON.parse(await readFile(join(neuralisHome, 'app', 'users', `${userId}.json`), 'utf-8')) as Partial<SetupConfig['owner']>;
+  if (typeof raw.email !== 'string' || typeof raw.name !== 'string' || typeof raw.passwordHash !== 'string') {
+    throw new Error(`The project owner's user record (${userId}) is incomplete.`);
+  }
+  return { email: raw.email, name: raw.name, passwordHash: raw.passwordHash };
+}
+
 export async function writeOwnerRecord(config: SetupConfig): Promise<string> {
   const now = new Date().toISOString();
   const record = {

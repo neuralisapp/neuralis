@@ -40,6 +40,8 @@ export type MachineChoice = {
   variant: MachineVariant;
   /** When true, image pulling is skipped (no Docker available / user opted out). */
   skipPrefetch: boolean;
+  /** Run from the image's one-shot container: a pull started there dies with it, so the host pulls. */
+  pullOnHost: boolean;
 };
 
 /**

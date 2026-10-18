@@ -29,7 +29,9 @@ platform-bearer path):
    user/project/agent from that user's own consent; the request then passes the
    COOKIE arm's account gates — an active account, `mustChangePassword` ⇒ 403,
    live membership — never the ticket's, a supplied project or agent id may only
-   agree with the token's, and `interactive` is false. A refusal is `401` with an
+   agree with the token's, and `interactive` is false — the route request carries
+   `oauthClient {clientId, scope}` instead, a label and never an authority; the
+   cookie and OAuth arms also stamp `sessionEpoch` (a ticket carries neither). A refusal is `401` with an
    RFC 9728 `WWW-Authenticate` challenge (`resource_metadata` points at
    `/.well-known/oauth-protected-resource/api` on the MCP port) and audits
    `cli.session_rejected` with a code; a successful call audits
@@ -115,6 +117,16 @@ notifications ride the shared multiplexed `/api/events` hub, on its `runtime`
 channel. The workspace subscribes through `runtimeClient.subscribeToRuntimeEvents`
 (a direct `subscribeHub({ channel: 'runtime' })`); package widgets reach the same
 hub through the `WorkspaceHostPort.subscribeRealtime` wrapper.
+
+The hub authenticates the browser's cookie and, only when no cookie is present,
+an external client's OAuth access token for the host API resource (the same
+`routes:call` bearer the catch-all accepts — `neuralis device list --watch` uses
+it). A bearer connection takes its project and agent from the token (a supplied
+`projectId` may only agree, else `403`), runs the same account and membership
+gates as the cookie, refuses a session ticket, answers a refused token `401`
+with the OAuth challenge, and closes when the token expires; the client renews
+and reconnects. `?channels=a,b` narrows any connection to those channels — an
+intersection, never a channel its gates refuse.
 
 ## Package Management Routes
 

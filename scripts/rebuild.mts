@@ -75,16 +75,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sha256Dir } from './build/treeDigest.mjs';
 import { homedir } from 'node:os';
-import {
-  dockerExec,
-  parseSha256sum,
-  readComposeStack,
-  resolveInstalledSandboxer,
-  sha256File,
-  SANDBOXER_CONTAINER_PATH,
-  SANDBOXER_SYSTEM_PATH,
-  unitFilePath,
-} from './host-broker/helper.mts';
+import { dockerExec, parseSha256sum, readComposeStack, sha256File, SANDBOXER_CONTAINER_PATH } from './host-broker/helper.mts';
 import { CliExit, type CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
 
@@ -256,35 +247,33 @@ async function enforceBuilderCacheGuard(
 }
 
 /**
- * The image just rebuilt `nrs-sandboxer`; the HOST copy the broker executes did
- * not change. Say so, measured — a stale host helper passed every exit-code
+ * The image just rebuilt `nrs-sandboxer`; the copy the server's DEVICE executes
+ * did not change. Say so, measured — a stale host helper passed every exit-code
  * probe for two weeks on the owner's box (2026-09-02) — and name the verb.
- * Only when a host plane is provisioned (secret file present); never fatal.
+ * Read by file convention, never an import: the device client's systemd user
+ * service (`neuralis-device.service`) names its helper on ONE line,
+ * `Environment=NEURALIS_DEVICE_SANDBOXER=<path>`. No service, or a service with
+ * no helper (an unconfined device) ⇒ nothing to compare. Never fatal.
  */
 async function reportHostHelperDrift(installDir: string): Promise<void> {
-  const home = process.env.NEURALIS_HOME?.trim() || join(homedir(), '.neuralis');
-  if (!existsSync(join(home, 'host-broker', 'secret'))) return;
-  let unitText: string | null = null;
-  try { unitText = readFileSync(unitFilePath(), 'utf-8'); } catch { /* no unit */ }
-  const helper = resolveInstalledSandboxer({
-    unitText,
-    envSandboxer: process.env.NEURALIS_HOST_BROKER_SANDBOXER,
-    systemExists: existsSync(SANDBOXER_SYSTEM_PATH),
-    homeDir: homedir(),
-  });
+  const base = process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
+  let serviceText: string;
+  try { serviceText = readFileSync(join(base, 'systemd', 'user', 'neuralis-device.service'), 'utf-8'); } catch { return; }
+  const helperPath = /^Environment=NEURALIS_DEVICE_SANDBOXER=(.+)$/m.exec(serviceText)?.[1]?.trim().replace(/^"(.*)"$/, '$1');
+  if (!helperPath) return;
   const id = await appContainerId(installDir);
   if (!id) return;
   const sum = await capture('docker', ['exec', id, 'sha256sum', SANDBOXER_CONTAINER_PATH]);
   const imageSha = sum.code === 0 ? parseSha256sum(sum.out) : null;
   if (!imageSha) return;
-  const installedSha = existsSync(helper.path) ? sha256File(helper.path) : null;
+  const installedSha = existsSync(helperPath) ? sha256File(helperPath) : null;
   if (installedSha === imageSha) {
-    console.log(`  ${ok} host helper      : ${c.dim}${helper.path} matches the new image${c.reset}`);
+    console.log(`  ${ok} device helper    : ${c.dim}${helperPath} matches the new image${c.reset}`);
     return;
   }
   console.log(
-    `  ${warn} host helper      : ${c.yellow}${installedSha ? 'differs from' : 'missing —'} the new image's nrs-sandboxer` +
-      ` — run ${c.bold}${spell('host-broker upgrade')}${c.reset}${c.yellow} (the host broker never reloads on a rebuild)${c.reset}`,
+    `  ${warn} device helper    : ${c.yellow}${installedSha ? 'differs from' : 'missing —'} the new image's nrs-sandboxer` +
+      ` — update the device client (\`npm install -g @neuralis/cli@<this release>\`) and run ${c.bold}neuralis device install${c.reset}${c.yellow} on this machine (a device never reloads on a rebuild)${c.reset}`,
   );
 }
 

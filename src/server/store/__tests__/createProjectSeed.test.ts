@@ -56,7 +56,7 @@ vi.mock('../../projects/projectInit', () => ({
 import type { ProjectRecord } from '../projectTypes';
 import { createProject, DEFAULT_ROLES } from '../ProjectStore';
 
-const LIVENESS_IDS = ['project.dashboard', 'drive.read', 'core.agents'] as const;
+const LIVENESS_IDS = ['project.dashboard', 'files.read', 'core.agents'] as const;
 
 /** The record the id CLAIM wrote (`createProject` writes through `update`). */
 async function lastWritten(): Promise<ProjectRecord> {
@@ -93,10 +93,10 @@ describe('createProject — admin-union liveness floor', () => {
 
   it('a HEALTHY union is stamped at the current role-grant version', async () => {
     const project = await createProject('Healthy', 'owner-1');
-    expect(project.roleGrantVersion).toBe(19);
+    expect(project.roleGrantVersion).toBe(21);
     expect(project.roles.admin.grantedFeatures).not.toContain('*');
     expect(project.roles.admin.grantedFeatures).toEqual(expect.arrayContaining([...LIVENESS_IDS]));
-    expect((await lastWritten()).roleGrantVersion).toBe(19);
+    expect((await lastWritten()).roleGrantVersion).toBe(21);
   });
 
   it('R-4 — an EMPTY union REFUSES, and nothing reaches the store', async () => {
@@ -137,14 +137,14 @@ describe('createProject — admin-union liveness floor', () => {
     // CREATE has to work.)
     const healthy = await createProject('AfterDegenerate', 'owner-1');
     expect(healthy.roles.admin.grantedFeatures).not.toContain('*');
-    expect(healthy.roleGrantVersion).toBe(19);
+    expect(healthy.roleGrantVersion).toBe(21);
     expect((await lastWritten()).roles.admin.grantedFeatures).not.toContain('*');
   });
 
   it('R-4 — the refusal names the diagnosis: the id set AND the "nothing was written" fact', async () => {
     await withAdminUnion([], async () => {
       await expect(createProject('Diagnostic', 'owner-1')).rejects.toThrow(
-        /project\.dashboard, drive\.read, core\.agents/,
+        /project\.dashboard, files\.read, core\.agents/,
       );
       await expect(createProject('Diagnostic', 'owner-1')).rejects.toThrow(/Nothing was written/);
     });

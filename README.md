@@ -1,14 +1,36 @@
-![Neuralis](https://docs.neuralisapp.com/img/neuralis-logo.png)
+![Neuralis — build your AI workforce: self-hosted, multi-agent, multiplayer](https://docs.neuralisapp.com/img/neuralis-banner.jpg)
 
 **Your agents. Your infrastructure. One package protocol.**
+
+[Website](https://neuralisapp.com) · [Documentation](https://docs.neuralisapp.com) · [Install](https://docs.neuralisapp.com/getting-started/installation) · [Releases](https://github.com/neuralisapp/neuralis/releases) · [Docker Hub](https://hub.docker.com/r/neuralisapp/neuralis) · [npm](https://www.npmjs.com/package/neuralis) · [X](https://x.com/neuralis_app) · [Threads](https://www.threads.com/@neuralis_app) · [YouTube](https://www.youtube.com/@neuralis_app)
+
+Runs on Linux and Windows (WSL2) with Docker, or from source on Linux and macOS · License: FSL-1.1-ALv2
 
 Neuralis is a self-hosted, multi-agent and multiplayer AI platform built around one package protocol. It gives organizations a shared place to run agents, work with their knowledge and extend the workspace on infrastructure they control. Models, tools, files and everyday applications meet inside projects with explicit identities and permissions.
 
 An agent has a persistent identity, memory, access to a scoped filesystem and a place on the team's calendar. It can work through chat, scheduled workflows, tools and a virtual desktop. The aim is useful ongoing work with clear responsibility, rather than a succession of disconnected prompts.
 
+## Requirements
+
+**Recommended:** the Docker install, on Linux or Windows with WSL2.
+
+| Install | Tested on | You need |
+|---|---|---|
+| Docker image | Linux, Windows with WSL2 | Docker Engine with Compose v2 ([install guide](https://docs.docker.com/engine/install/)): `docker compose version` answers and your user reaches the daemon without sudo (`docker info`). Nothing else — setup runs from the image. |
+| npm (`npm create neuralis`) | Linux, Windows with WSL2 | The same Docker, plus Node.js 26 or newer and, on Linux, python3, make and a C++ compiler for the terminal's native module (Debian/Ubuntu: `sudo apt install build-essential python3`). |
+| Native, from a clone (no Docker) | Linux, macOS | git, Node.js 26 or newer and, on Linux, python3, make and a C++ compiler; on macOS the terminal's native module ships prebuilt. Vector store: setup downloads and starts Qdrant on Linux, connects to a Qdrant you run, or runs in-memory only. |
+
+Ubuntu's own `nodejs` package is older than 26: install 26 from NodeSource or with `sudo snap install node --classic --channel=26`. Native Windows (without WSL2) has not been tested end to end. The maturity rows predate the release checks of the published version, which pass on Linux (Docker and native) and natively on macOS (Apple silicon and Intel).
+
 ## Quick start
 
-Setup runs from the image itself: it writes the session secret, the data folders, the first owner account and a `docker-compose.yml` into a folder of your own, and the stack runs from that folder. You need Docker Engine with Compose v2 (`docker compose version`) on Linux or Windows with WSL2; Node.js is not needed, and macOS has not been tested yet.
+Setup runs from the image itself: it writes the session secret, the data folders, the first owner account and a `docker-compose.yml` into a folder of your own, and the stack runs from that folder. Node.js is not needed. On Linux or WSL2, one command checks Docker, creates `~/.neuralis` and `~/neuralis`, runs setup from the image in your terminal and offers to start Neuralis:
+
+```bash
+curl -fsSL https://neuralisapp.com/install.sh | sh
+```
+
+To read the script first: `curl -fsSLO https://neuralisapp.com/install.sh && sh install.sh`. The manual form, which is what the installer runs:
 
 ```bash
 NEURALIS_TAG=latest   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags
@@ -21,11 +43,11 @@ docker run -it --rm --user "$(id -u):$(id -g)" \
 docker compose up -d
 ```
 
-The first line picks the release: `latest`, or the tag of the release you want. Setup records the exact release it ran from in `.env` (`NEURALIS_IMAGE_TAG`), so the stack never runs a moving tag. Neuralis then answers on http://localhost:3100 with Qdrant beside it — when a port is already taken, setup names it and offers a free one; sign in with the owner account setup created.
+Setup asks for the owner account (the password twice) and the address users reach Neuralis on, plus a free port when one is taken; provider keys, embedding and local LLM servers are added in the app afterwards, and `setup --advanced` asks every question instead. The first line picks the release: `latest`, or the tag of the release you want. Setup records the exact release it ran from in `.env` (`NEURALIS_IMAGE_TAG`), so the stack never runs a moving tag. Neuralis then answers on http://localhost:3100 with Qdrant beside it — when a port is already taken, setup names it and offers a free one; sign in with the owner account setup created.
 
 An instance that has not been set up yet (no `NEXTAUTH_SECRET`, or no owner account) answers every page with a static "Neuralis is not set up yet" page (HTTP 503) that names the setup commands. Every other API call gets `503 {"error":"setup_required"}`, and `/api/health` answers `503 {"status":"setup_required","code":"secret_missing"}` (or `"setup_incomplete"`). `/api/health` answers 200 only on a configured instance whose runtime is ready. The image carries a `HEALTHCHECK` on `/api/health` (`wget` every 30 s after a 50 s start period, 3 retries), so a container started without setup turns `unhealthy`. The compose file setup writes defines its own healthcheck, which takes precedence.
 
-The same install as an npm project, with every operator command as `npx neuralis <command>`, needs Node.js 26 or newer and, on Linux, python3, make and a C++ compiler (Debian/Ubuntu: `sudo apt install build-essential python3`):
+The same install as an npm project, with every operator command as `npx neuralis <command>` (what it needs: the npm row of the requirements above):
 
 ```bash
 npm create neuralis my-neuralis   # an install folder pinned to one exact release
@@ -85,11 +107,11 @@ Neuralis is intended for organizations running on their own machines, on-premise
 
 Requests from people, agents, scheduled workflows, skill scripts, the `neuralis` command-line client and external MCP clients pass the same deny-by-default boundaries. Identity, project membership, feature grants, package trust and path policies each have a role. Audit records make sensitive actions inspectable.
 
-Today sign-in uses email and password; OIDC and SAML single sign-on are not available. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane requires explicit operator provisioning and should be restricted to a trusted operator's machine. Review the [security model](https://docs.neuralisapp.com/enterprise/security-model) and [deployment guide](https://docs.neuralisapp.com/enterprise/deployment) before choosing a topology.
+Today sign-in uses email and password; OIDC and SAML single sign-on are not available. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane reaches a machine only after its owner pairs it as a device; anyone else's commands run there only while it is confined (Linux), and an unconfined device — the only kind on macOS and Windows — serves its owner alone. Review the [security model](https://docs.neuralisapp.com/enterprise/security-model) and [deployment guide](https://docs.neuralisapp.com/enterprise/deployment) before choosing a topology.
 
 ## Start with a deployment that fits
 
-The Neuralis beta is available through `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a validated, history-free public host repository snapshot. Review the beta maturity and platform limits before choosing a deployment. The [installation guide](https://docs.neuralisapp.com/getting-started/installation) describes prerequisites and platform limits. `npm create neuralis` makes an install folder that is an ordinary npm project depending on one exact `neuralis` release, with every operator command as `npx neuralis <command>`; `npx neuralis update` moves the folder, the image tag and the companion images to a published release line together. The setup wizard creates a missing data home and installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Docker setup maps a chosen external MCP port to the fixed container listener. The separate [`@neuralis/cli`](https://docs.neuralisapp.com/getting-started/cli) client signs a person in from their own machine, calls package routes as that person, and starts Claude Code or Codex with an agent's skills, tools and context. Native Linux terminal support needs Python, make and a C++ compiler.
+The Neuralis beta is available through `npm create neuralis`, the `neuralisapp/neuralis` Docker image and a validated, history-free public host repository snapshot. Review the beta maturity and the requirements above before choosing a deployment. `npm create neuralis` makes an install folder that is an ordinary npm project depending on one exact `neuralis` release and carrying that release's dependency overrides and install-script approvals, with every operator command as `npx neuralis <command>`; `npx neuralis update` moves the folder, the image tag and the companion images to a published release line together. The setup wizard creates a missing data home and installation state, seeds the first owner and project, and preserves existing decisions on a rerun. Docker setup maps a chosen external MCP port to the fixed container listener. The separate [`@neuralis/cli`](https://docs.neuralisapp.com/getting-started/cli) client signs a person in from their own machine, calls package routes as that person, and starts Claude Code or Codex with an agent's skills, tools and context.
 
 Continue with [first run](https://docs.neuralisapp.com/getting-started/first-run), the [workspace guide](https://docs.neuralisapp.com/getting-started/workspace) and [package authoring](https://docs.neuralisapp.com/package-system). Operator procedures live in the shipped operations skill; public source-domain READMEs explain the [workspace package bridge](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/packages), [widget lifecycle](https://github.com/neuralisapp/neuralis/tree/main/src/workspace/widgets), [server package runtime](https://github.com/neuralisapp/neuralis/tree/main/src/server/packages) and [package API](https://github.com/neuralisapp/neuralis/tree/main/src/app/api/packages). Documentation is also available as [agent-readable text](https://docs.neuralisapp.com/llms.txt).
 
@@ -107,7 +129,7 @@ As of 2026-10-09. Scores measure development against documented promises and pla
 | Host (neuralis) | stable | 90 | Sign-in is email and password; single sign-on (OIDC, SAML) is not available. |
 | Install channels | beta | 70 | The beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded. |
 | Platform: Linux | experimental | 85 | No run on a standalone Linux host is recorded; the live-tested setup is Docker on WSL2. |
-| Platform: Windows with WSL2 | stable | 90 | Use an in-distro Docker engine; with Docker Desktop the host broker needs its loopback TCP fallback. |
+| Platform: Windows with WSL2 | stable | 90 | Use an in-distro Docker engine. |
 | Platform: macOS | experimental | 35 | Neuralis has not been run on macOS so far. |
 | Platform: Windows (native) | experimental | 35 | Neuralis has not been run on native Windows so far. |
 | Enterprise security and governance | stable | 90 | Give the host access plane only to a single trusted operator's machine. |

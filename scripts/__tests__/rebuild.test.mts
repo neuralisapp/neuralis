@@ -29,7 +29,7 @@ type Scenario = {
   hardCode?: number;
   measurements?: Array<string | null>;
   /** When set, the sandbox gets a provisioned host plane and the fake image reports this helper sha. */
-  hostPlane?: { imageSha: string; installedContent: string };
+  hostPlane?: { imageSha: string; installedContent: string; unconfined?: boolean };
   /** The sidecar image's source-hash label: undefined = matches the tree (default), null = no image, string = that label. */
   sidecarLabel?: string | null;
   sidecarBuildCode?: number;
@@ -135,20 +135,19 @@ finish(98, '', 'unexpected fake docker command: ' + args.join(' '));
     // .env nor rewrites the live docker-compose.yml.
     const setupLogPath = join(sandbox, 'setup.jsonl');
 
-    // Hermetic host plane: NEURALIS_HOME points into the sandbox, so the real
-    // machine's provisioned broker never leaks into the command log. When the
-    // scenario asks for one, provision a secret + a unit naming a helper file.
+    // Hermetic host plane: NEURALIS_HOME and XDG_CONFIG_HOME point into the
+    // sandbox, so the real machine's device service never leaks into the command
+    // log. When the scenario asks for one, write the device's service naming a
+    // helper file (an unconfined device's service names none).
     const home = join(sandbox, 'neuralis-home');
     const configHome = join(sandbox, 'config');
     if (scenario.hostPlane) {
-      mkdirSync(join(home, 'host-broker'), { recursive: true });
-      writeFileSync(join(home, 'host-broker', 'secret'), 'x'.repeat(64));
       const helperPath = join(sandbox, 'nrs-sandboxer');
       writeFileSync(helperPath, scenario.hostPlane.installedContent);
       mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
       writeFileSync(
-        join(configHome, 'systemd', 'user', 'neuralis-host-broker.service'),
-        `[Service]\nEnvironment=NEURALIS_HOST_BROKER_SANDBOXER=${helperPath}\n`,
+        join(configHome, 'systemd', 'user', 'neuralis-device.service'),
+        `[Service]\nEnvironment=NEURALIS_HOME=${home}\n${scenario.hostPlane.unconfined ? '' : `Environment=NEURALIS_DEVICE_SANDBOXER=${helperPath}\n`}`,
       );
     }
 
@@ -404,34 +403,36 @@ describe('neuralis:rebuild cache guard', () => {
     assert.match(result.stdout, /at\/below hard guard 40GB/);
   });
 
-  it('after a green rebuild a provisioned host plane gets a MEASURED helper-drift line naming `upgrade`', () => {
+  it('after a green rebuild the server device gets a MEASURED helper-drift line naming `neuralis device install`', () => {
     const installed = 'stale-helper-bytes';
     const result = runScenario({
       measurements: ['1GB'],
       hostPlane: { imageSha: createHash('sha256').update('fresh-helper-bytes').digest('hex'), installedContent: installed },
     });
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /host helper\s+: .*differs from the new image/);
-    assert.match(result.stdout, /pnpm neuralis:host-broker upgrade/);
+    assert.match(result.stdout, /device helper\s+: .*differs from the new image/);
+    assert.match(result.stdout, /npm install -g @neuralis\/cli@<this release>.*neuralis device install/);
     assert.ok(result.commands.some((cmd) => cmd[0] === 'exec' && cmd[2] === 'sha256sum'));
   });
 
-  it('control: a host helper that matches the new image reports so, no upgrade hint', () => {
+  it('control: a device helper that matches the new image reports so, no install hint', () => {
     const installed = 'fresh-helper-bytes';
     const result = runScenario({
       measurements: ['1GB'],
       hostPlane: { imageSha: createHash('sha256').update(installed).digest('hex'), installedContent: installed },
     });
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /host helper\s+: .*matches the new image/);
-    assert.doesNotMatch(result.stdout, /host-broker upgrade/);
+    assert.match(result.stdout, /device helper\s+: .*matches the new image/);
+    assert.doesNotMatch(result.stdout, /neuralis device install/);
   });
 
-  it('control: no host plane provisioned ⇒ no docker exec, no helper line', () => {
-    const result = runScenario({ measurements: ['1GB'] });
-    assert.equal(result.status, 0);
-    assert.doesNotMatch(result.stdout, /host helper/);
-    assert.ok(!result.commands.some((cmd) => cmd[0] === 'exec'));
+  it('control: no device service, or an unconfined one naming no helper ⇒ no docker exec, no helper line', () => {
+    for (const scenario of [{ measurements: ['1GB'] }, { measurements: ['1GB'], hostPlane: { imageSha: 'b'.repeat(64), installedContent: 'x', unconfined: true } }]) {
+      const result = runScenario(scenario);
+      assert.equal(result.status, 0);
+      assert.doesNotMatch(result.stdout, /device helper/);
+      assert.ok(!result.commands.some((cmd) => cmd[0] === 'exec'));
+    }
   });
 });
 

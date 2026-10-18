@@ -14,6 +14,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -985,6 +986,109 @@ describe('setup run from the image writes an install folder the HOST runs', () =
       expect(naming.length, `${file}: blocks naming the image`).toBe(want.install + want.update);
       expect(naming.filter((block) => block === install).length, `${file}: first-install block`).toBe(want.install);
       expect(naming.filter((block) => block.startsWith(`${update}\n`)).length, `${file}: update block`).toBe(want.update);
+    }
+  });
+
+  it('the README `## Requirements` section is the installation page\'s "Before you start", and each landing install note carries its channel\'s requirement', () => {
+    const repo = join(HERE, '..', '..', '..');
+    const read = (file: string): string => readFileSync(join(repo, file), 'utf8').replace(/\r\n/g, '\n');
+    const sectionBody = (text: string, heading: string): string => {
+      const lines = text.split('\n');
+      const start = lines.indexOf(heading);
+      expect(start, `heading ${heading}`).toBeGreaterThanOrEqual(0);
+      const end = lines.findIndex((line, index) => index > start && line.startsWith('## '));
+      return lines.slice(start + 1, end === -1 ? undefined : end).join('\n').trim();
+    };
+    const requirements = sectionBody(read('neuralis/README.md'), '## Requirements');
+    expect(requirements).toContain('| Native, from a clone (no Docker) |');
+    // Verbatim at the top of the page's section; the page's own notes may follow it.
+    const before = sectionBody(read('web/docs/content/docs/getting-started/installation.mdx'), '## Before you start');
+    expect(before.slice(0, requirements.length)).toBe(requirements);
+    // The note strings only: a fact surviving in the docblock above CHANNELS must not green this.
+    const notes = [...read('web/docs/app/(home)/widgets.tsx').matchAll(/^\s*note: '([^']*)',$/gm)].map((m) => m[1]!);
+    expect(notes).toHaveLength(3);
+    const [npm, docker, github] = notes as [string, string, string];
+    expect(npm).toContain('Node.js 26+ and Docker');
+    expect(docker).toContain('needs only Docker');
+    expect(github).toContain('natively on Linux and macOS');
+    expect(requirements).toMatch(/\| npm \(`npm create neuralis`\) \| [^|]*\| The same Docker, plus Node\.js 26 or newer/);
+    expect(requirements).toMatch(/\| Native, from a clone \(no Docker\) \| Linux, macOS \|/);
+  });
+
+  // The one-line installer (`curl … | sh`) is the documented first install run by a script.
+  const INSTALL_SH = join(HERE, '..', '..', '..', 'web', 'docs', 'public', 'install.sh');
+  const TTY_REFUSAL = 'neuralis install: setup asks questions and needs a terminal. Run it from one: curl -fsSLO https://neuralisapp.com/install.sh && sh install.sh\n';
+
+  it('install.sh runs the documented setup lines; only the socket/group line and the forwarded arguments are its own', () => {
+    // A Windows checkout may carry CRLF; the served script is LF.
+    const script = readFileSync(INSTALL_SH, 'utf8').replace(/\r\n/g, '\n');
+    const lines = script.split('\n');
+    const from = lines.findIndex((line) => line.trimStart().startsWith('docker run -it '));
+    const to = lines.findIndex((line, index) => index > from && line.includes(' setup --output '));
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const documented = imageSetupCommand('latest');
+    const at = documented.findIndex((line) => line.startsWith('docker run -it '));
+    const expected = documented.slice(at, at + 5);
+    // The two named differences: the socket from the Docker context with its group read inside
+    // the image (no host GNU `stat`), and `curl … | sh -s -- ARGS` passed to setup with the
+    // terminal as stdin (under a pipe the script itself is stdin).
+    expect(expected[1]).toContain('--group-add "$(stat -c %g /var/run/docker.sock)"');
+    expected[1] = '  -v "$socket":/var/run/docker.sock --group-add "$socket_gid" \\';
+    expected[4] = `${expected[4]} "$@" </dev/tty`;
+    expect(lines.slice(from, to + 1).map((line) => line.replace(/^ {2}/, ''))).toEqual(expected);
+    // The rest of the block: the default tag, both folders before any bind, the next step.
+    expect(documented[0]).toMatch(/^NEURALIS_TAG=latest /);
+    expect(script).toContain('NEURALIS_TAG=${NEURALIS_TAG:-latest}');
+    expect(documented[1]).toBe('mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis');
+    expect(script).toContain('dir=${NEURALIS_DIR:-$HOME/neuralis}');
+    expect(script).toContain('mkdir -p "$HOME/.neuralis" "$dir"');
+    expect(documented.at(-1)).toBe('docker compose up -d');
+    expect(lines.filter((line) => line.trim() === 'docker compose up -d')).toHaveLength(1);
+    // One `stat`, inside the image; the pull precedes the probe, the probe precedes setup.
+    const code = lines.filter((line) => !line.trimStart().startsWith('#'));
+    expect(code.filter((line) => /\bstat\b/.test(line))).toEqual([expect.stringContaining('--entrypoint stat "neuralisapp/neuralis:$NEURALIS_TAG" -c %g /var/run/docker.sock')]);
+    const pull = lines.findIndex((line) => line.trim() === 'docker pull "neuralisapp/neuralis:$NEURALIS_TAG"');
+    const probe = lines.findIndex((line) => line.includes('--entrypoint stat'));
+    expect(pull).toBeGreaterThan(-1);
+    expect(pull).toBeLessThan(probe);
+    expect(probe).toBeLessThan(from);
+    // A partial download runs nothing: everything is in `main`, called on the last line.
+    expect(script).toMatch(/^set -eu$/m);
+    expect(script.trimEnd().split('\n').at(-1)).toBe('main "$@"');
+    const syntax = spawnSync('sh', ['-n', INSTALL_SH], { encoding: 'utf8' });
+    expect(syntax.status, syntax.stderr).toBe(0);
+  });
+
+  /** install.sh in its own session: no controlling terminal unless `script` gives it one. */
+  const runInstaller = (home: string, viaTerminal: boolean): Promise<{ code: number | null; err: string }> => new Promise((done) => {
+    const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', PATH: join(home, 'empty-bin'), HOME: home };
+    const quoted = `'${INSTALL_SH.replace(/'/g, `'\\''`)}'`;
+    const [file, args] = viaTerminal ? ['/usr/bin/script', ['-qefc', `/bin/sh ${quoted}`, '/dev/null']] : ['/bin/sh', [INSTALL_SH]];
+    const child = spawn(file, args, { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    child.stdout.on('data', (chunk: Buffer) => { err += String(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { err += String(chunk); });
+    child.on('close', (code: number | null) => done({ code, err }));
+  });
+
+  it.runIf(process.platform === 'linux' && existsSync('/usr/bin/script'))('install.sh without a terminal refuses first, naming the download-read-run form, and writes nothing; with one it goes on to the Docker check', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'nrl-install-sh-'));
+    try {
+      mkdirSync(join(home, 'empty-bin'));
+      const refused = await runInstaller(home, false);
+      expect(refused.code).toBe(1);
+      expect(refused.err).toBe(TTY_REFUSAL);
+      expect(readdirSync(home)).toEqual(['empty-bin']);
+      // Paired control, same inputs on a pty: the terminal check passes and the next check
+      // (no `docker` on this PATH) is what refuses — so the refusal above is the terminal's.
+      const control = await runInstaller(home, true);
+      expect(control.code).toBe(1);
+      expect(control.err).not.toContain('needs a terminal');
+      expect(control.err).toContain('neuralis install: Docker is not installed. Install Docker Engine with Compose v2: https://docs.docker.com/engine/install/');
+      expect(readdirSync(home)).toEqual(['empty-bin']);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

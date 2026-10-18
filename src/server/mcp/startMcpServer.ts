@@ -15,7 +15,7 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'node:http';
 import { getRuntime } from '../host/bootstrap';
-import { resolveSessionUser } from './resolveSessionUser';
+import { resolveSessionUser, toConsentAppearance } from './resolveSessionUser';
 import { mcpHttpPort, resolveMcpBaseUrl } from './mcpBaseUrl';
 import { mountPackageCompanions, type CompanionMountHandle } from './mountPackageCompanions';
 import { addShutdownStep } from '../host/shutdown';
@@ -156,8 +156,8 @@ export async function startMcpServer(): Promise<void> {
   server.headersTimeout = 125_000;
 
   // Package companions on the SAME HTTP server — the MCP endpoint + OAuth AS,
-  // the terminal PTY WebSocket, machine-core's stream HTTP+WS bridge and the
-  // host-broker proxy. The loop injects PORTS only; each package owns its own
+  // the terminal PTY WebSocket, machine-core's stream HTTP+WS bridge, the
+  // host-terminal proxy and the device link. The loop injects PORTS only; each package owns its own
   // auth closure.
   companionMounts = mountPackageCompanions({
     loader: core.getLoader(),
@@ -174,7 +174,10 @@ export async function startMcpServer(): Promise<void> {
       // The consent picker's list — the store excludes archived projects.
       listProjects: async (userId) => {
         const projects = await listProjectsForUser(userId);
-        return projects.map((p) => ({ id: p.id, name: p.name }));
+        return projects.map((p) => {
+          const appearance = toConsentAppearance('project', p.id, p.appearance);
+          return { id: p.id, name: p.name, ...(appearance ? { appearance } : {}) };
+        });
       },
       mcpBaseUrl,
       loginRedirectUrl,

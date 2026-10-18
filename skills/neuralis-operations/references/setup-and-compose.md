@@ -34,7 +34,8 @@ write them. The wizard:
 ## Custom LLM endpoints
 
 The wizard's endpoint step registers chat-model sources into `platform.json`'s
-`localLLMs` list. It auto-probes the standard local ports (Ollama, LM Studio,
+`localLLMs` list. Without `--advanced` it adds a detected Ollama or local server and asks
+nothing; with it, it auto-probes the standard local ports (Ollama, LM Studio,
 vLLM, llama.cpp, LocalAI) and then offers a manual add loop, which is where a
 REMOTE endpoint goes: the same list holds a gateway (OpenRouter, Together,
 Groq, an Azure-OpenAI proxy, a company gateway) as happily as an Ollama on the
@@ -70,7 +71,7 @@ endpoint on a private address records `local` instead — your own hardware, whe
 
 ## Custom embedding endpoints
 
-The Vector step's *Custom endpoint* row registers one OpenAI-compatible
+The `--advanced` Vector step's *Custom endpoint* row registers one OpenAI-compatible
 `/v1/embeddings` server into `platform.json`'s `embeddingEndpoints` list: label,
 base URL (the client appends the path), the model name and the vector
 dimension it returns, then the same two questions as above — its key goes to
@@ -164,7 +165,7 @@ Up to three services are emitted:
   service. Publishes `3100` (app), `3101` (MCP + package companion surfaces), `3102`
   (the MCP Apps sandbox origin), and `127.0.0.1:1455` — the Codex login callback, host
   loopback only — ONLY when `.env` says `NEURALIS_CODEX_LOOPBACK=on` (default `off`;
-  the full setup asks it on Docker, defaulting to the current value — or edit `.env`,
+  `setup --advanced` asks it on Docker, defaulting to the current value — or edit `.env`,
   then `--compose-only` + `up -d`). Opted in, Docker holds the host's 1455
   while the stack runs: a native `codex login` on that host cannot use it, and `up`
   fails while something else holds it. Off, the Finish callback URL field is the path.
@@ -249,8 +250,10 @@ moving tag. What each part is for:
   and its detection then records your ids (and, through the bound socket, the socket's group)
   in the compose file. Without it the image's own user cannot write a home you own: setup
   refuses with the data-root check and names this flag.
-- **The socket, with its group added** — setup uses it to detect Docker, to read the vector
-  store's volume and to pre-pull the desktop image. Without a Docker answering through it,
+- **The socket, with its group added** — setup uses it to detect Docker and to read the vector
+  store's volume. It starts no desktop-image pull there (a pull in the one-shot container ends with
+  it): the summary names `docker pull <the desktop image>` after the next steps, and the installer
+  below runs it on the host. Without a Docker answering through it,
   setup in the image refuses before writing anything.
 - **`NEURALIS_HOST_HOME`** — the compose file binds the data home by its HOST path, and the
   container sees only `/.neuralis`. In the image setup refuses without it while the home is
@@ -265,14 +268,36 @@ override what detection recorded. The update is the same `docker run` without `-
 `setup --compose-only` — the five commands in the main page's §Update.
 
 The container's loopback is not the host's: setup does not see an Ollama or Qdrant running on
-the host, and the in-setup ChatGPT sign-in cannot receive its callback. On Linux add
-`--network host` to the `docker run` for both; otherwise add the providers later in Admin.
+the host, and the in-setup ChatGPT sign-in (`--advanced`) cannot receive its callback. On Linux
+add `--network host` to the `docker run` for both; otherwise add the providers later in Admin.
+Setup in the image never offers to start the stack — a container cannot start its own; the
+installer asks, and the manual form's next line is `docker compose up -d`.
+
+**The installer** — `curl -fsSL https://neuralisapp.com/install.sh | sh`, served from the docs
+site's `public/install.sh` — is this block as a POSIX `sh` script. It refuses without a terminal
+(setup asks questions; under a pipe the script itself is stdin, so `docker run -it` reads
+`/dev/tty`) and names the download-read-run form; checks `docker`, `docker info` (naming the
+"cannot reach Docker without sudo" case) and `docker compose version` before writing anything;
+takes the socket from `docker context inspect` (only a `unix://` endpoint — anything else is
+refused by name, never replaced with the literal path) and binds it at `/var/run/docker.sock`;
+pulls the image explicitly, then reads the socket's group INSIDE it (`--entrypoint stat … -c %g`),
+so the host needs no GNU `stat -c`; runs the block's `docker run` with arguments after
+`sh -s --` forwarded to setup; asks "Start Neuralis now? [Y/n]" (`docker compose up -d`, then the
+`.env` `NEXTAUTH_URL`); and, whatever the answer, starts `docker pull` of the `.env`
+`NEURALIS_MACHINE_IMAGE` on the host under `nohup`, appending to
+`~/.neuralis/app/logs/machine-image-prefetch.log`. `NEURALIS_TAG` and `NEURALIS_DIR` override the
+release and the install folder. A host test holds its `docker run` lines to `imageSetupCommand`
+with the socket/group line and the forwarded arguments as the only named differences.
 
 ## Installing without Docker
 
 The same host runs natively on Node 26 or newer from a folder that IS the host package — a clone of the public host repository: there, run `npx neuralis setup`, `npm run build`, then `npm run start`. Setup writes `.env` beside the host on this plane, where Next loads it; inside a pulled container it uses the persistent `NEURALIS_HOME`, and `--output` overrides either location. An npm install folder carries the host package under `node_modules/neuralis` and keeps `.env` and the compose files at its own root, for the Docker shape. You
-supply a Qdrant instance (`QDRANT_URL`, default `http://localhost:6333`); the setup
-wizard can download and start one for you. Without a reachable Qdrant the host still
+supply a Qdrant instance (`QDRANT_URL`, default `http://localhost:6333`). With no reachable Docker
+the wizard first asks how to go on — install Docker first (Enter: the link, nothing written),
+natively (it downloads and starts the pinned binary, Linux only; another platform or a failed
+download is named and runs in-memory) or in-memory only — and picks none of these itself;
+`--advanced` also offers an external URL. With Docker answering, a native run's default Qdrant is
+the compose service, and the next steps start it first (`docker compose up -d qdrant`). Without a reachable Qdrant the host still
 starts in a degraded in-memory vector mode and re-probes in the background.
 
 
@@ -291,11 +316,10 @@ starts in a degraded in-memory vector mode and re-probes in the background.
 | `NEURALIS_HOME` | Data root (in-container: `/.neuralis`) | Setup auto-detects per platform. |
 | `NEURALIS_HOST_HOME` | Host path of the data home: the default `data`/`packages` project sources' host-pair root, and the compose binds setup writes from inside a container | Required in Docker so vector payloads carry host paths, not container paths. Setup run in the image refuses without it while the home is `/.neuralis`. Custom mounts use the `NEURALIS_MOUNT_*` pair instead. |
 | `NEURALIS_MOUNT_<slug>` / `NEURALIS_MOUNT_HOST_<SLUG>` | Container path + host-pair root for a `npx neuralis mount` bind | Written to `docker-compose.override.yml`. `discoverRuntimeStack` lists them; `LocalDiskConnector` derives a source's `hostRoot` from the matching pair when the config omits one. |
-| `NEURALIS_HOST_BROKER_SECRET_FILE` | Container path of the bind-mounted host-broker secret | Emitted into the generated compose only when the operator has provisioned the broker. The secret is read from a FILE, never from platform config (config is writable behind the grantable `platform.config` feature). The broker process itself reads `NEURALIS_HOST_BROKER_{SOCKET,LISTEN,SECRET_FILE,CEILING_FILE,SCRATCH_ROOT,SANDBOXER,ORIGIN_ALLOW}` on the **host**, set by its unit — `npx neuralis host-broker init` prints them. |
 | `QDRANT_URL` | Vector DB endpoint | `http://qdrant:6333` in Docker, `http://localhost:6333` native. |
 | `QDRANT_API_KEY` | The Qdrant API key — every Qdrant request must carry it | **Setup-generated, mode-conditionally**: minted (preserve-if-exists, NEXTAUTH_SECRET family) in `docker` and `binary` modes, ASKED FOR in `external` mode (never minted — the server belongs to someone else; empty means unauthenticated), absent in `skip`. Boot-critical **infra env, not a credential**: the Qdrant client is constructed synchronously at boot, before the encrypted store can be decrypted. In docker mode the compose file hands it to the server via `${QDRANT_API_KEY:?}` interpolation (`QDRANT__SERVICE__API_KEY`); in binary mode the setup spawn env carries it. Consumed by brain-core's `QdrantClient`, by `@neuralis/admin`'s REST probes, by `npx neuralis reset-vector` (`api-key` header — `src/server/config/qdrantFetch.ts` is the host-side helper) and by `npx neuralis qdrant-upgrade` (the header in-process on the loopback port; a hop container gets it through a 0600 env-file, never argv). The setup-time reachability probe deliberately does NOT send it: it shares one header-free `httpGet` with the Ollama probe, so a key there would reach a different service, and it only calls `/healthz` and `/`, which Qdrant's auth whitelist leaves unauthenticated. Stripped from every agent shell (`/^QDRANT_/` blocklist row) and from helper-child spawns (authored `{ PATH }` env). Surfaced read-only on the Config tab as `(set)` / `(unset)`, never as a value. |
 | `QDRANT_MODE` | How Qdrant is provisioned (`docker` / `binary` / `external` / `skip`) | Written by setup; read back by `npx neuralis setup --compose-only` so the compose regen emits the right qdrant service / `QDRANT_URL` shape without re-asking. |
-| `NEURALIS_CODEX_LOOPBACK` | Codex sign-in loopback publish on the Docker shape (`on` / `off`, default `off`) | Operator opt-in: the full setup asks it on the Docker shape (default = the current `.env` value, `off` on a fresh install); editing `.env` and running `npx neuralis setup --compose-only` works too. `on` makes the compose regen publish `127.0.0.1:1455:1455` and set the container's bind to `0.0.0.0`; Docker then holds the host's 1455 while the stack runs. The compose always sets it explicitly in the service environment, so an `.env` flipped without the regen changes nothing. |
+| `NEURALIS_CODEX_LOOPBACK` | Codex sign-in loopback publish on the Docker shape (`on` / `off`, default `off`) | Operator opt-in: `setup --advanced` asks it on the Docker shape (default = the current `.env` value, `off` on a fresh install); editing `.env` and running `npx neuralis setup --compose-only` works too. `on` makes the compose regen publish `127.0.0.1:1455:1455` and set the container's bind to `0.0.0.0`; Docker then holds the host's 1455 while the stack runs. The compose always sets it explicitly in the service environment, so an `.env` flipped without the regen changes nothing. |
 | `NEURALIS_TRUSTED_PROXIES` | Reverse proxies (addresses / CIDR blocks, comma- or space-separated) whose `X-Forwarded-For` the host believes | **Default empty: no forwarding header is believed** — the connecting socket is the client. Written by the full setup (asked, default = the current `.env` value) and read at boot. One invalid entry voids the whole list (warned). Topology, not a tunable — never a platform-config key. See "Sessions and request identity". |
 | `QDRANT_DASHBOARD` | Qdrant web dashboard switch (`on` / `off`, default `on`) | Operator switch for the static dashboard SPA at `127.0.0.1:<NEURALIS_QDRANT_PORT>/dashboard`. `off` makes the compose regen emit `QDRANT__SERVICE__ENABLE_STATIC_CONTENT=false` to the qdrant service (the API is unaffected). Flow: edit `.env` → `npx neuralis setup --compose-only` → `docker compose up -d`. Not a secret; a full setup re-run rewrites the line to `on`. Bounded exposure either way: the dashboard is a static SPA, its API calls 401 without the key, and after the network isolation it is reachable only from the app container and the host loopback. |
 | `OLLAMA_URL` | Bootstrap default for embedding-Ollama URL | Read once by setup to seed `platform.json`. Runtime embedding URL lives in platform config; this env is only used at first-boot. |

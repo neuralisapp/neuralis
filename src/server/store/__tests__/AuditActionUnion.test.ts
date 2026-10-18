@@ -25,7 +25,13 @@ describe('AuditAction union — SF-AC2-hooks additions', () => {
       // Self-scope workflow signing-secret writes at the host port.
       'workflows.signing_secret_write',
       'workflows.signing_secret_delete',
+      // Paired devices — emitted by agent-core through the host audit port.
+      'device.pair',
+      'device.link',
+      'device.revoke',
+      'device.rename',
+      'device.purge',
     ];
-    expect(actions).toHaveLength(8);
+    expect(actions).toHaveLength(13);
   });
 });

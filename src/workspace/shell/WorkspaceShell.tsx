@@ -75,7 +75,7 @@ function clusterMargin(align: DockAlign, vertical: boolean): string {
 }
 
 export function WorkspaceShell({ children, snapshotReady = false }: Props) {
-  const { backgroundTheme: theme } = useTheme();
+  const { backgroundTheme: theme, backgroundImage } = useTheme();
   const showUniverse = theme.useUniverseBackground !== false;
   const { agentId, stageMode, openOrder, byId, phoneForegroundId } = useStageShell();
   const phone = stageMode === 'phone';
@@ -303,7 +303,7 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
       <div className="w-screen overflow-hidden relative bg-black" style={{ height: '100dvh' }}>
         <div className="absolute inset-0" style={{ background: 'var(--bg-gradient)' }} />
         {/* The Background material decides how strongly an image shows; the Universe draws OVER it and never dims it. */}
-        <div className="absolute inset-0 bg-center bg-cover bg-no-repeat" style={{ backgroundImage: 'var(--bg-image)', opacity: backgroundImageOpacity(layout.backgroundTransparency) }} />
+        <div className="absolute inset-0 bg-center bg-cover bg-no-repeat" style={{ backgroundImage: backgroundImage ? `url(${JSON.stringify(backgroundImage)})` : 'none', opacity: backgroundImageOpacity(layout.backgroundTransparency) }} />
         {showUniverse ? <AnimatedUniverseBackground starColor={theme.colors.canvasStar} /> : null}
         <div className="absolute inset-0" style={{ backgroundImage: 'var(--bg-pattern)', backgroundSize: '48px 48px' }} />
         {appsOpen ? <AppMenu key={appsOpening} onClose={closeApps} /> : null}

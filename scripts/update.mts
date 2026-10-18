@@ -19,6 +19,11 @@
  *     lines are other dependencies of the folder, untouched by construction.
  *     `npm update` cannot do this: the pin is exact, so it is a no-op, and
  *     `npm install neuralis@latest` without `--save-exact` would write a range.
+ *     Before that install the folder manifest's `overrides` / `allowScripts`
+ *     become the TARGET release's (`releaseInstallPolicy`): npm reads both only
+ *     from the folder's root manifest, never from the host package. The
+ *     re-executed new code checks it again against its own manifest and installs
+ *     once more when the folder lacks it (a move started by older code).
  *   - a clone of the public host repository: the code moves with
  *     `git fetch --tags && git checkout v<v>`, which this command PRINTS and
  *     never runs — a checkout is the operator's working tree.
@@ -111,6 +116,93 @@ export function npmInvocation(args: string[], env: Readonly<Record<string, strin
   // Windows outside npm (pnpm, yarn, a bare node): the npm Node ships beside itself.
   const bundled = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   return platform === 'win32' && existsSync(bundled) ? [process.execPath, [bundled, ...args]] : ['npm', args];
+}
+
+/** The two host-manifest fields an npm install folder carries for its release. */
+const INSTALL_POLICY_KEYS = ['overrides', 'allowScripts'] as const;
+type InstallPolicy = Partial<Record<(typeof INSTALL_POLICY_KEYS)[number], Record<string, unknown>>>;
+
+/**
+ * The install policy a release ships, read from `npm view neuralis@<exact>
+ * --json` — the WHOLE version object (npm 12 wraps it in an array; a
+ * field-list view loses the key when one field is absent): the dependency
+ * floors its lock was fixed with and the install scripts npm may run. A release
+ * that ships neither yields `{}`.
+ */
+export function releaseInstallPolicy(viewJson: string): InstallPolicy {
+  const parsed = JSON.parse(viewJson) as unknown;
+  return installPolicyOf((Array.isArray(parsed) ? parsed.at(-1) : parsed) as Record<string, unknown> | null);
+}
+
+/** The policy fields of one host manifest (a registry version object or the running code's own `package.json`). */
+function installPolicyOf(release: Record<string, unknown> | null): InstallPolicy {
+  const policy: InstallPolicy = {};
+  for (const key of INSTALL_POLICY_KEYS) {
+    const value = release?.[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) policy[key] = value as Record<string, unknown>;
+  }
+  return policy;
+}
+
+/**
+ * The folder manifest with its policy fields replaced by `policy` (absent ones
+ * removed), placed right after `dependencies` — `pkg add|remove` edits the FIRST
+ * `"<name>": "<spec>"` line, and `overrides` names packages too; a manifest
+ * without `dependencies` gets them at the end. Serialised the
+ * way `create-neuralis` writes it (2 spaces, trailing newline); `null` when the
+ * fields already match, so an unchanged folder is not rewritten.
+ */
+export function withInstallPolicy(manifestText: string, policy: InstallPolicy): string | null {
+  const manifest = JSON.parse(manifestText) as Record<string, unknown>;
+  if (INSTALL_POLICY_KEYS.every((key) => JSON.stringify(manifest[key]) === JSON.stringify(policy[key]))) return null;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(manifest)) {
+    if ((INSTALL_POLICY_KEYS as readonly string[]).includes(key)) continue;
+    out[key] = value;
+    if (key === 'dependencies') Object.assign(out, policy);
+  }
+  if (!('dependencies' in manifest)) Object.assign(out, policy);
+  return `${JSON.stringify(out, null, 2)}\n`;
+}
+
+/**
+ * Write `policy` into the folder manifest and print the one `install policy`
+ * line. Returns the manifest text it replaced (a failed install puts it back
+ * byte for byte), or null when the fields already matched and nothing was written.
+ */
+function writeInstallPolicy(installDir: string, policy: InstallPolicy, release: string): string | null {
+  const manifestPath = join(installDir, 'package.json');
+  const before = readFileSync(manifestPath, 'utf-8');
+  const after = withInstallPolicy(before, policy);
+  if (after !== null) writeFileSync(manifestPath, after);
+  const keys = Object.keys(policy);
+  console.log(`  ${dot} install policy : ${keys.length > 0 ? keys.join(' + ') : `none — ${HOST_PACKAGE}@${release} ships no overrides or allowScripts`}${after === null ? ' (unchanged)' : ''}`);
+  return after === null ? null : before;
+}
+
+/**
+ * In the code of the line (after the swap, or a folder already on it): the
+ * running host package IS the release, so its own manifest carries the policy —
+ * no registry read. A folder the update left without it (moved by code that
+ * predates the policy write, or interrupted) gets it now and installs once under
+ * it; npm then runs the install scripts `allowScripts` approves, which an earlier
+ * install may have blocked. Fields already matching cost nothing.
+ */
+function settleInstallPolicy(installDir: string, packageDir: string, layout: InstallLayout, release: string): void {
+  const policy = installPolicyOf(readJson(join(packageDir, 'package.json')));
+  const before = writeInstallPolicy(installDir, policy, release);
+  if (before === null) return;
+  const approved = Object.entries(policy.allowScripts ?? {}).filter(([, allowed]) => allowed === true).map(([name]) => name);
+  for (const step of [['install'], ...(approved.length > 0 ? [['rebuild', ...approved]] : [])]) {
+    const result = spawnSync(...npmInvocation(step), { cwd: installDir, stdio: 'inherit' });
+    if (result.status === 0) continue;
+    writeFileSync(join(installDir, 'package.json'), before);
+    throw new CliExit(1, `the code moved, the install policy did not: npm ${step.join(' ')} failed (${result.error?.message ?? `exit ${result.status}`})`, [
+      'The folder manifest is back as it was; the image tag, the companion images and the stack were not touched.',
+      `Fix the cause, then run \`${spellOn(layout, `update --version ${release} --apply`)}\` again — it repeats this step.`,
+    ]);
+  }
+  console.log(`  ${ok} installed under the release's install policy.`);
 }
 
 function installedVersion(installDir: string, name: string): string {
@@ -454,8 +546,21 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   if (layout === 'clone') return afterHostSwap({ args, ctx, layout, manifest, tag, previous: host.current });
 
   console.log(`  ${dot} installing     : ${c.bold}${HOST_PACKAGE}@${target}${c.reset}`);
+  // The target release's install policy goes into the folder manifest BEFORE the install that needs it.
+  const view = spawnSync(...npmInvocation(['view', `${HOST_PACKAGE}@${target}`, '--json']), { cwd: installDir, encoding: 'utf-8' });
+  if (view.status !== 0) throw new CliExit(1, `npm view ${HOST_PACKAGE}@${target} failed (${view.error?.message ?? `exit ${view.status}`})`, ['The installation is unchanged.']);
+  let policy: InstallPolicy;
+  try {
+    policy = releaseInstallPolicy(view.stdout);
+  } catch {
+    throw new CliExit(1, `npm view ${HOST_PACKAGE}@${target} --json printed no JSON`, ['The installation is unchanged.']);
+  }
+  const manifestBefore = writeInstallPolicy(installDir, policy, target);
   const install = spawnSync(...npmInvocation(['install', `${HOST_PACKAGE}@${target}`, '--save-exact']), { cwd: installDir, stdio: 'inherit' });
-  if (install.status !== 0) throw new CliExit(1, `npm install failed (${install.error?.message ?? `exit ${install.status}`})`, ['The installation is unchanged.']);
+  if (install.status !== 0) {
+    if (manifestBefore !== null) writeFileSync(join(installDir, 'package.json'), manifestBefore);
+    throw new CliExit(1, `npm install failed (${install.error?.message ?? `exit ${install.status}`})`, ['The installation is unchanged.']);
+  }
   console.log(`\n  ${ok} installed.`);
 
   // The post-install steps run in the code that was just installed: re-exec its bin.
@@ -498,6 +603,9 @@ async function afterHostSwap(input: {
 }): Promise<number> {
   const { args, ctx, layout, manifest, tag } = input;
   const previous = input.previous ?? ctx.env.NEURALIS_UPDATE_PREVIOUS ?? '<previous version>';
+  const version = manifest ? manifest.packages[HOST_PACKAGE]! : args.targetVersion!;
+  // First, so a failure here leaves the tag unmoved and a re-run comes back through this step.
+  if (layout === 'folder') settleInstallPolicy(ctx.installDir, ctx.packageDir, layout, version);
   const neuralisHome = resolveNeuralisHome().home;
   const configDir = resolveConfigDir({ projectRoot: ctx.installDir, neuralisHome }, null);
   if (tag.move) {
@@ -516,7 +624,6 @@ async function afterHostSwap(input: {
   }
   const images = companionVersionsFor({ manifest, targetVersion: args.targetVersion, onePackage: false });
   if (images) await moveCompanionImages(images, configDir, neuralisHome);
-  const version = manifest ? manifest.packages[HOST_PACKAGE]! : args.targetVersion!;
   if (layout === 'folder') return runStack({ ctx, layout, previous }, PROCESS_PORTS);
   const steps: string[] = [
     `git fetch --tags && git checkout v${version} && npm install ${c.dim}(the code of this clone moves with the tag)${c.reset}`,
@@ -531,11 +638,25 @@ async function afterHostSwap(input: {
   return 0;
 }
 
+/**
+ * Data first: an older build refuses to boot on data a newer one raised, and
+ * the code line restarts the app. On a folder the code + images line is the
+ * update itself — an explicit `--version` may move down, it moves the images and
+ * writes that release's install policy back into the folder.
+ */
 function printWayBack(layout: InstallLayout, previous: string, checkpoint: string | null): void {
-  console.log(`  ${dot} going back (app stopped):`);
-  console.log(`  ${dot}   code   : ${layout === 'clone' ? `git checkout v${previous} && npm install` : `npm install ${HOST_PACKAGE}@${previous} --save-exact`}`);
-  console.log(`  ${dot}   images : ${spellOn(layout, `update --manifest <the ${previous} release-manifest.json> --apply`)} ${c.dim}(or write the previous NEURALIS_IMAGE_TAG / NEURALIS_MACHINE_IMAGE back into .env)${c.reset}`);
-  console.log(`  ${dot}   data   : ${spellOn(layout, `checkpoint restore ${checkpoint ?? '<id>'}`)} ${c.dim}(${checkpoint ? 'the checkpoint this upgrade took' : `no new checkpoint this run — a resumed upgrade keeps its first run's; \`${spellOn(layout, 'checkpoint list')}\` names it`})${c.reset}`);
+  const data = `${spellOn(layout, `checkpoint restore ${checkpoint ?? '<id>'}`)} ${c.dim}(${checkpoint ? 'the checkpoint this upgrade took' : `no new checkpoint this run — a resumed upgrade keeps its first run's; \`${spellOn(layout, 'checkpoint list')}\` names it`})${c.reset}`;
+  if (layout === 'clone') {
+    console.log(`  ${dot} going back (app stopped):`);
+    console.log(`  ${dot}   data   : ${data}`);
+    console.log(`  ${dot}   code   : git checkout v${previous} && npm install`);
+    console.log(`  ${dot}   images : ${spellOn(layout, `update --manifest <the ${previous} release-manifest.json> --apply`)} ${c.dim}(or write the previous NEURALIS_IMAGE_TAG / NEURALIS_MACHINE_IMAGE back into .env)${c.reset}`);
+  } else {
+    console.log(`  ${dot} going back (the update stops and restarts the app itself):`);
+    // `checkpoint restore` is offline-only: it refuses while the app the update restarted is running.
+    console.log(`  ${dot}   data           : docker compose stop neuralis && ${data}`);
+    console.log(`  ${dot}   code + images  : ${spellOn(layout, `update --version ${previous} --apply`)}`);
+  }
   console.log('');
 }
 

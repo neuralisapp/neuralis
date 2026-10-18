@@ -1,6 +1,6 @@
 ---
 name: neuralis-operations
-description: "Every host operator command for a Neuralis deployment — setup and compose, rebuild, live package sync, filesystem mounts, first-party package registration, the host-access broker, break-glass user recovery, vector reset, the Qdrant upgrade and the backup and restore of the whole install. Use when someone asks how to install, update, restart, mount, extend or diagnose the deployment itself, rather than to work inside it."
+description: "Every host operator command for a Neuralis deployment — setup and compose, rebuild, live package sync, filesystem mounts, first-party package registration, the host-access plane (the server as a paired device), break-glass user recovery, vector reset, the Qdrant upgrade and the backup and restore of the whole install. Use when someone asks how to install, update, restart, mount, extend or diagnose the deployment itself, rather than to work inside it."
 allowed-tools: [execute]
 ---
 
@@ -21,8 +21,8 @@ folder's channel does:
 
 | How it was installed | The install folder | The spelling |
 |---|---|---|
-| `npm create neuralis <dir>` | `<dir>` — an npm project the operator owns: its `package.json` depends on one exact `neuralis` | `npx neuralis <verb>` |
-| `git clone` of the public host repo | the clone root — the repo *is* the host package (run with Docker it cannot carry operator packages) | `npx neuralis <verb>` (npx runs the package's own bin) |
+| `npm create neuralis <dir>` | `<dir>` — an npm project the operator owns: its `package.json` depends on one exact `neuralis` and carries that release's `overrides` and `allowScripts` (npm reads them only there; `update` rewrites them) | `npx neuralis <verb>` |
+| `git clone` of the public host repo | the clone root — the repo *is* the host package (run with Docker it cannot carry operator packages), so its `npm install` applies the release's `overrides` and `allowScripts` with nothing to copy | `npx neuralis <verb>` (npx runs the package's own bin) |
 | the private monorepo | `neuralis/` inside the checkout | `pnpm neuralis:<verb>` |
 | the image alone (Docker, no Node.js) | the folder setup wrote from the image — `.env` and the compose files, **no `package.json`** | the image forms below |
 
@@ -51,11 +51,12 @@ cannot recreate itself. Say so plainly rather than trying. Writing goes through 
 one-shot container of the image instead — setup and its `--compose-only` (below), and
 `upgrade` / `checkpoint restore` with the app stopped.
 
-**Running these yourself requires the host-access plane** — `exec.host`, an
-operator-provisioned broker, and the target path inside the broker's allowlist. None of
-that can be arranged from inside the platform; it is a deliberate floor, described in
-`references/host-plane.md`. Without it, report the command for a human to run instead
-of attempting it.
+**Running these yourself requires the host-access plane** — the server running as a paired
+device (`neuralis device`), `device.own` on it as its owner (`exec.device` for anyone
+else's), and the target path inside that device's
+ceiling. None of that can be arranged from inside the platform; it is a deliberate floor,
+described in `references/host-plane.md`. Without it, report the command for a human to run
+instead of attempting it.
 
 ## The commands
 
@@ -65,11 +66,22 @@ In the command blocks, UPPERCASE words are the values you supply.
 
 ```bash
 npx neuralis setup                 # wizard: data dirs, .env, compose file
+npx neuralis setup --advanced      # the same, asking every question
 npx neuralis setup --compose-only  # regenerate docker-compose.yml only
 ```
 
 With Docker and no Node.js (Linux or WSL2), setup runs from the image into a folder
-of your own, as your user, through the Docker socket:
+of your own, as your user, through the Docker socket. The installer does all of it in one line —
+checks Docker, creates `~/.neuralis` and `~/neuralis` (`NEURALIS_DIR`), runs setup from
+`neuralisapp/neuralis:latest` (`NEURALIS_TAG`), asks whether to start the stack, and downloads the
+desktop image in the background (log: `~/.neuralis/app/logs/machine-image-prefetch.log`):
+
+```bash
+curl -fsSL https://neuralisapp.com/install.sh | sh
+```
+
+To read it first: `curl -fsSLO https://neuralisapp.com/install.sh && sh install.sh`. It needs a
+terminal (setup asks questions). The manual form — what the installer runs:
 
 ```bash
 NEURALIS_TAG=latest   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags
@@ -93,6 +105,26 @@ directories first and they end up root-owned. It writes `~/.neuralis/{app,projec
 the `.env` (including `NEXTAUTH_SECRET` and — in docker/binary Qdrant modes — a minted
 `QDRANT_API_KEY` the server then enforces on every request), the first owner account
 and project, and **generates `docker-compose.yml`** for this machine.
+
+**What it asks:** the owner account (the password typed twice), the public origin, a free port for
+a busy one, Docker or native on a checkout with Docker, which Qdrant when one it did not set up answers, and
+trusted proxies only for a non-loopback origin; a re-run keeps every user and asks no owner, but asks
+which project to maintain and whether to overwrite the `.env` and compose file it wrote. A checkout
+with no reachable Docker is asked ONE question first, before anything is written — the vector store
+and the virtual desktop both need Docker: [1] install Docker first (Enter; prints the install link
+and exits, writing nothing), [2] continue natively (the pinned Qdrant binary, downloaded and
+started, no virtual desktop; a platform with no published binary or a failed download is named and
+runs in-memory), [3] continue in-memory only; either answer runs natively. Nothing else picks an install. Every other question
+takes its default answer — no provider key, no OpenAI sign-in, the compose-managed Qdrant, a
+detected Ollama or local LLM server added, the recommended embedding model as the target with
+`embeddingEnabled: false`, the desktop image pulled in the background, the project `My Workspace`,
+no ChatGPT-callback publish — and the summary's "Next, in the app" names where each is set: Admin →
+Credentials (keys, Sign in with ChatGPT), Admin → Vector (embedding), Credentials → Custom
+endpoints. `setup --advanced` asks every question (an external Qdrant URL included); `--help`
+lists the flags. An npm folder and a Docker clone then offer "Start Neuralis now?"
+(`docker compose up -d` in the folder). Setup in the image offers no start and starts no pull — a
+pull there dies with the one-shot container — and names `docker pull <the desktop image>` after
+the next steps; the installer does both on the host.
 
 **Re-running is supported and non-destructive** — it is how infrastructure answers
 change (ports, public origin, vector backend, desktop variant). What a re-run does
@@ -118,7 +150,7 @@ One answer has no safe default: the **public origin**. It is what `NEXTAUTH_URL`
 `APP_URL` and `MCP_BASE_URL` become, and the wizard cannot detect how users will
 reach the deployment. Leave it at localhost only for a single-machine install.
 
-The Vector step asks for the embedding model and **its own key** — `embedding.openai`,
+With `--advanced` the Vector step asks for the embedding model and **its own key** — `embedding.openai`,
 `embedding.gemini`, `embedding.qwen`, `embedding.voyage`, or `embedding.endpoint.<id>` for a
 custom OpenAI-compatible `/v1/embeddings` server. It is not the chat key: embedding spend is
 counted and capped on its own. Leaving the key empty, picking **No embedding model**, or
@@ -273,7 +305,7 @@ of two `.env` lines (`NEURALIS_IMAGE_TAG=<version>`,
 is changed in Admin → Config only — setup never writes it):
 
 ```bash
-NEURALIS_TAG=0.3.1   # the release in .env NEURALIS_IMAGE_TAG
+NEURALIS_TAG=0.3.2   # the release in .env NEURALIS_IMAGE_TAG
 cd ~/neuralis   # the folder that holds docker-compose.yml
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \
@@ -285,13 +317,16 @@ docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply
 docker compose up -d -V
 ```
 
-The way back, which the command prints:
+The way back, which the command prints — data first, because an older build refuses to boot on
+data a newer one raised:
 
-- **code** — `npm install neuralis@<previous> --save-exact` (a clone: `git checkout v<previous> &&
-  npm install`). A published version is immutable, so the previous one is always installable;
-- **images** — `npx neuralis update --manifest <the previous release-manifest.json> --apply` (an
-  explicit manifest may move down), or the previous `.env` lines by hand;
-- **data** — `npx neuralis checkpoint restore <id>`, the checkpoint the upgrade took (`update --apply` prints its id).
+- **data** — `docker compose stop neuralis && npx neuralis checkpoint restore <id>`, the checkpoint
+  the upgrade took (`update --apply` prints its id; restore runs only with the app stopped);
+- **code and images** — `npx neuralis update --version <previous> --apply`: a named version may
+  move down, and the command moves the images and restarts the app itself. A published version is
+  immutable, so the previous one is always installable. A clone: `git checkout v<previous> &&
+  npm install`, then the images with `npx neuralis update --manifest <the previous
+  release-manifest.json> --apply` or the previous `.env` lines by hand.
 
 **From a 0.1.0 folder (once).** The first public scaffolder unpacked the host package INTO the
 folder, and its own update command never moves the host. Convert the folder once, with the app
@@ -299,7 +334,7 @@ stopped:
 
 ```bash
 docker compose stop neuralis
-npx --yes create-neuralis@0.3.1 convert .   # the new layout; your .env, compose files and package lines stay
+npx --yes create-neuralis@0.3.2 convert .   # the new layout; your .env, compose files and package lines stay
 npx neuralis update --apply                 # the latest release: image tag + companions, then the stack steps above
 ```
 
@@ -312,8 +347,8 @@ the old package did not ship are never touched. A natively run folder (a `.next/
 with nothing written — native runs move to a source clone. A refusal before the checkpoint (the app
 still answering) puts `package.json`, the lock and `.npmrc` back and reinstalls the 0.1.0 tree; a run
 stopped after it resumes when re-run; a converted folder is left alone. Going back: `npx neuralis convert --rollback <id> && rm -rf node_modules && npm install`
-restores the 0.1.0 folder. A host-broker unit written before the conversion names the old script
-path — re-render it once with `npx neuralis host-broker upgrade`.
+restores the 0.1.0 folder. A host-broker unit written before the conversion runs the old broker —
+replace it once with `neuralis device install` (The host-access plane, below).
 
 ### Raise the stored data formats — `npx neuralis upgrade`
 
@@ -327,8 +362,23 @@ data is a one-shot upgrade on a **stopped** app, never a converter inside the ru
 that meets such a kind behind its code version — or an upgrade that was interrupted — refuses
 to start and names this command (`upgrade_required`). The order after an update is therefore
 `docker compose stop neuralis` → `npx neuralis upgrade --apply` → `docker compose up -d -V`
-(on an npm install folder `update --apply` runs it), and "nothing to do" is a
-normal answer. The move from 0.1.0 to this release raises `neuralis/credential` (a check: it
+(`npx neuralis rebuild` where the folder builds; on an npm install folder `update --apply` runs
+all three) → on a server that had the host broker, `neuralis device install` there, and "nothing
+to do" is a normal answer. The release that brings paired devices raises
+`agent-core/device-registry`, `agent-core/host-source-config` and `neuralis/project`
+(`source-device-v1`): it registers the server's broker as the operator device from the secret it
+already holds and writes `~/.neuralis/device/device.json` (so `neuralis device install` adopts it
+without pairing), stamps that device into every host source and host background shell, and gives
+`device.own` to the stored builtin roles the manifests grant it. Its owner is the ONE user the
+host sources name; when they name none or several, the dry run asks for
+`NEURALIS_DEVICE_OWNER=<userId>`, and a host source with no broker secret on the machine blocks —
+run it on the server (an image-only folder binds `~/.neuralis/host-broker` and
+`~/.neuralis/device` into that one `docker compose run`). The release that gives the feature ids
+their two-word names (`files.*`, `sources.*`, `exec.local`, …) raises `neuralis/project` once more
+(`two-word-features-v1`: every stored role, custom ones included, takes the new ids; a role that
+held the removed host-mount feature without `device.own` is named in the dry run and does not gain
+it) and `neuralis/platform-config` (`platform-config-v2`: the retired host-broker address keys
+leave `platform.json`). The move from 0.1.0 to this release raises `neuralis/credential` (a check: it
 names every credential the key file cannot open and writes nothing) and `brain-core/vector-proof`,
 which reads Qdrant — so Qdrant must be RUNNING while the app is stopped; the release that adds
 the `@neuralis/cli` sign-in raises `agent-core/oauth-tokens` (`oauth-resource-v1`: every stored
@@ -488,30 +538,27 @@ tarball or registry package ships it prebuilt and its owner rebuilds it after a 
 kernel upgrade. Without a module the placeholder *"This widget cannot be rendered by this
 host."* shows, and a refused module names its reason there.
 
-### The host-access plane — `npx neuralis host-broker`
+### The host-access plane — `neuralis device`
 
 ```bash
-npx neuralis host-broker init      # secret + scratch + a DENY-ALL ceiling; prints the unit
-npx neuralis host-broker install   # the confinement helper: copied from the built image, PROVED by --selftest, placed
-npx neuralis host-broker upgrade   # install + unit refresh + broker restart — run it after every rebuild
-npx neuralis host-broker run       # run the broker in the foreground
-npx neuralis host-broker status    # readiness: secret, ceiling, helper + drift, transport, confinement mode, detached runs, pending requests
-npx neuralis host-broker grant --exec|--read|--write DIR   # widen the ceiling for a recorded request; atomic + SIGHUP
-npx neuralis host-broker attach    # write a host-plane source config for a project
-npx neuralis setup --compose-only  # regenerate compose with the broker binds
+npm install -g @neuralis/cli     # on the machine the app should reach — the server too
+neuralis device pair             # one sign-in; skip it on a server the upgrade already registered
+neuralis device install          # the login service, the helper, a DENY-ALL ceiling (--unconfined: one person's machine)
+neuralis device grant DIR        # read DIR (--write, --exec for more)
+neuralis device status           # pairing, ceiling, helper, link, readiness, pending requests
 ```
 
-The allowlist ships **empty**, which denies every host command until the operator names
-the paths it may reach — "not configured" never means "unlimited". The broker runs on
-the host, never in a container, and an image rebuild never reloads it — nor the
-confinement helper it spawns through: a rebuild produces a fresh helper in the image,
-`status` (and the end of `neuralis:rebuild`) prints whether the host copy still matches,
-and `upgrade` is the one command that brings it back in line (it refuses to restart while a
-background host shell is still running, unless forced — a restart kills every host PTY and
-every detached run). A helper the selftest cannot prove is reported unusable and the plane
-stays dark until then. The ceiling has two modes — sandboxed (default) and the single-operator
-`unconfined` — and it is the operator's file: an agent that needs more asks through the
-`reason` of the refused command, and `status` lists those requests for `grant`.
+These are the separate client's verbs, run on the machine itself as the user whose files the app
+should reach; `npx neuralis host-broker` only names them now. The device's broker runs on that
+machine, never in a container, and dials OUT to the app, so the container holds no host secret and
+no compose bind. The allowlist ships **empty**,
+which denies every host command until the device's owner names the paths it may reach — "not
+configured" never means "unlimited". An image rebuild never reloads a device nor its helper: a new
+client release is `npm install -g @neuralis/cli` + `device install`, and the end of
+`npx neuralis rebuild` prints whether the server's helper still matches the image. The ceiling has
+two modes — sandboxed (Linux, default) and the single-person `unconfined` (the only mode on macOS and
+Windows; such a device serves its owner alone) — and it is the owner's file: an agent that needs more
+asks through the `reason` of the refused command, and `status` lists those requests for `grant`.
 `references/host-plane.md`.
 
 ### Recover a locked-out account — `npx neuralis user`
@@ -529,7 +576,7 @@ name. A reset forces a new password at login and refuses every earlier sign-in a
 every earlier MCP client token at its next use. The command runs outside the app
 process, so it closes no connection already open — live updates, terminals, desktop
 streams, a running turn: those stay until `docker compose restart neuralis` in the host
-folder (it only bounces the process; a host-plane terminal ends with the broker). A
+folder (it only bounces the process; a host-plane terminal ends with its device's broker). A
 reset made in the app closes them at once. An enable resumes nothing that paused
 meanwhile. It never disables or deletes — those stay in the app.
 
@@ -632,7 +679,7 @@ npx neuralis restore DIR --home TMP_HOME --volume CLONED_VOLUME   # into a throw
 ```
 
 A backup is one consistent point: `<NEURALIS_HOME>` (`app/` with the credential master key,
-`projects/`, `checkpoints/`, `host-broker/`, `qdrant-version.json`, and in binary Qdrant mode
+`projects/`, `checkpoints/`, `device/` (a server's device; `host-broker/` before its `device install`), `qdrant-version.json`, and in binary Qdrant mode
 `qdrant-storage/` — minus `qdrant-backups/`, the upgrade's own rollback tars), the
 `<project>_qdrant-data` volume — **primary data, not a rebuildable index: `brain://` content
 lives only there** — the install folder's `.env` (it sits outside the home and carries
@@ -699,5 +746,5 @@ data-format ledger have no such guard: the first published beta is the floor of 
 | Explain why a rebuild "changed nothing", or why sync refused | `references/rebuild-and-sync.md` |
 | Explain why a mounted folder is not visible, or what the overlay does | `references/mounts.md` |
 | Walk someone through developing their own first-party package | `references/own-packages.md` |
-| Explain what the host plane requires, or why a host command was denied | `references/host-plane.md` |
+| Explain what a device needs, pair or install one, or say why a host command was denied | `references/host-plane.md` |
 | Explain what the image build does, or why a package edit needs a rebuild | `references/build-pipeline.md` |

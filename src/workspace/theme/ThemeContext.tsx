@@ -239,7 +239,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
           '--bg-gradient': backgroundTheme.colors.background,
           '--bg-pattern': backgroundTheme.colors.backgroundPattern,
           '--bg-overlay': backgroundTheme.colors.backgroundOverlay,
-          '--bg-image': backgroundImage ? `url("${backgroundImage}")` : 'none',
           '--bg-universe-opacity': String(backgroundTheme.useUniverseBackground !== false ? backgroundTheme.colors.universeOpacity : 0),
           ...themeVariables(baseTheme),
         } as React.CSSProperties}

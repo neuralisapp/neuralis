@@ -51,7 +51,7 @@ describe('migrateProjectRecord — the first read seeds an unseeded record, and 
   ] as const) {
     it(`${label} is seeded with the canonical roles at the current role-grant version`, () => {
       const seeded = migrateProjectRecord(JSON.parse(JSON.stringify(record())));
-      expect(seeded.roleGrantVersion).toBe(19);
+      expect(seeded.roleGrantVersion).toBe(21);
       expect(Object.keys(seeded.roles).sort()).toEqual(Object.keys(DEFAULT_ROLES).sort());
       for (const [name, definition] of Object.entries(DEFAULT_ROLES)) {
         expect(sortGrants(seeded.roles[name]!), `${name} is the canonical definition`).toEqual(sortGrants(definition));
@@ -72,7 +72,7 @@ describe('migrateProjectRecord — the first read seeds an unseeded record, and 
       expect(r.roleGrantVersion).toBeUndefined();
     });
     // PAIRED CONTROL — the same record with the healthy union seeds.
-    expect(migrateProjectRecord(JSON.parse(JSON.stringify(RELEASE_0_1_0_FIRST_PROJECT))).roleGrantVersion).toBe(19);
+    expect(migrateProjectRecord(JSON.parse(JSON.stringify(RELEASE_0_1_0_FIRST_PROJECT))).roleGrantVersion).toBe(21);
   });
 
   it('never mutates the module-level DEFAULT_ROLES seed', () => {

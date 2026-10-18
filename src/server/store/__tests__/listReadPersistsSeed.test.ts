@@ -45,10 +45,10 @@ describe('list reads persist the seed of a setup-written project', () => {
     await writeFile(join(projectsDir, 'future.json'), newerText);
 
     const listed = await listAllProjects();
-    expect(listed.find((p) => p.id === 'acme')?.roleGrantVersion).toBe(19);
+    expect(listed.find((p) => p.id === 'acme')?.roleGrantVersion).toBe(21);
 
     const acme = await onDisk('acme');
-    expect(acme.roleGrantVersion).toBe(19);
+    expect(acme.roleGrantVersion).toBe(21);
     expect(Object.keys(acme.roles as object)).toContain('owner');
     expect((acme.roles as Record<string, { grantedFeatures: string[] }>).owner!.grantedFeatures).toEqual(['*']);
     expect(await readFile(join(projectsDir, 'future.json'), 'utf-8')).toBe(newerText);
@@ -60,6 +60,6 @@ describe('list reads persist the seed of a setup-written project', () => {
     await new Promise((r) => setTimeout(r, 2_100));
     const mine = await listProjectsForUser('user-1');
     expect(mine.map((p) => p.id)).toContain('beta');
-    expect((await onDisk('beta')).roleGrantVersion).toBe(19);
+    expect((await onDisk('beta')).roleGrantVersion).toBe(21);
   });
 });

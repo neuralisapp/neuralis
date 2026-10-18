@@ -188,7 +188,7 @@ const NEVER_SYNC = new Set(['@neuralis/package-system']);
 
 /** Source paths that do not reach a tarball at all. */
 const NON_SHIPPING = [
-  { prefix: 'host-broker/', why: 'runs on the HOST, not in the container — restart the broker unit' },
+  { prefix: 'host-broker/', why: 'bundled into the device client (`@neuralis/cli`), never loaded by the app — update the client, then `neuralis device install` on the device' },
   { prefix: 'docker/', why: 'builds a SEPARATE image (mcp-sidecar) — rebuild that image' },
   { prefix: 'sidecar/', why: 'baked into the WEBTOP image — rebuild that image' },
   { prefix: 'scripts/check-build-tools.mjs', why: 'the npm install preinstall — never loaded by the running app' },

@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { CliExit, OPS_COMMANDS, RESERVED_VERBS, dispatch, exitCodeFor, type CliContext } from '../cli/registry.mts';
+import { CliExit, MOVED_VERBS, OPS_COMMANDS, RESERVED_VERBS, dispatch, exitCodeFor, type CliContext } from '../cli/registry.mts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const scriptsDir = join(HERE, '..');
@@ -38,7 +38,7 @@ function context(): CliContext & { out: string[]; err: string[] } {
   };
 }
 
-const OPS = ['setup', 'rebuild', 'sync', 'update', 'upgrade', 'mount', 'pkg', 'user', 'checkpoint', 'backup', 'restore', 'qdrant-upgrade', 'reset-vector', 'host-broker', 'convert'];
+const OPS = ['setup', 'rebuild', 'sync', 'update', 'upgrade', 'mount', 'pkg', 'user', 'checkpoint', 'backup', 'restore', 'qdrant-upgrade', 'reset-vector', 'convert'];
 const RESERVED = ['login', 'logout', 'whoami', 'device', 'mcp', 'plugin', 'skill', 'fs', 'agent', 'workflow', 'shells', 'git', 'source', 'connect', 'up', 'down', 'tunnel'];
 
 describe('the verbs', () => {
@@ -56,6 +56,16 @@ describe('the verbs', () => {
     }
   });
 
+  it('a moved verb answers where the work lives now — text only, no module loads', async () => {
+    const ctx = context();
+    expect(await dispatch(['host-broker', 'status'], ctx)).toBe(1);
+    const text = ctx.err.join('');
+    expect(text).toContain('"host-broker" moved to `neuralis device` (@neuralis/cli)');
+    for (const step of ['npm install -g @neuralis/cli', 'neuralis device pair', 'neuralis device install', 'neuralis device status', 'neuralis device grant', 'neuralis device run']) expect(text).toContain(step);
+    expect(OPS_COMMANDS.map((m) => m.name)).not.toContain('host-broker');
+    expect(readFileSync(join(scriptsDir, 'cli', 'registry.mts'), 'utf-8')).not.toMatch(/host-broker\.mts/);
+  });
+
   it('control: an unknown verb is "unknown", help lists every verb and exits 0', async () => {
     const unknown = context();
     expect(await dispatch(['frobnicate'], unknown)).toBe(1);
@@ -68,7 +78,7 @@ describe('the verbs', () => {
   it('every verb module loads with no side effect at import and exports the run the adapter calls', async () => {
     const registry = readFileSync(join(scriptsDir, 'cli', 'registry.mts'), 'utf-8');
     const targets = [...new Set([...registry.matchAll(/import\('(\.\.\/[a-z-]+\.mts)'\)/g)].map((m) => m[1]!))];
-    expect(targets.length).toBe(14); // `backup.mts` serves backup and restore
+    expect(targets.length).toBe(13); // `backup.mts` serves backup and restore
     for (const target of targets) {
       const mod = (await import(join(scriptsDir, 'cli', target))) as { run?: unknown };
       expect(typeof mod.run, target).toBe('function');
@@ -110,7 +120,8 @@ describe('one dispatch path', () => {
     for (const [name, command] of aliases) {
       const verb = /^node --import tsx scripts\/cli\/registry\.mts ([a-z-]+)$/.exec(command)?.[1];
       expect(verb, `${name}: ${command}`).toBeDefined();
-      expect(OPS, name).toContain(verb);
+      // A moved verb's alias still enters the registry, which answers where the work lives now.
+      expect([...OPS, ...Object.keys(MOVED_VERBS)], name).toContain(verb);
     }
     expect(Object.values(manifest.scripts).filter((c) => /scripts\/(?!cli\/|build\/|release-version|mcp-http)[a-z-]+\.mts/.test(c))).toEqual([]);
   });

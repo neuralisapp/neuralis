@@ -416,7 +416,7 @@ async function addNeuralisOverlay(installDir: string, hostPath: string, withDock
   console.log(`${c.cyan}Next steps:${c.reset}`);
   console.log(`  1. ${c.bold}docker compose up -d neuralis${c.reset}    restart the container`);
   console.log(`  2. Open the Sources panel → "Neuralis Tree" appears as a discoverable suggestion`);
-  console.log(`     (needs drive.mount.privileged; configure permissions there before attaching)`);
+  console.log(`     (needs sources.privileged; configure permissions there before attaching)`);
 }
 
 async function removeNeuralisOverlay(installDir: string): Promise<void> {
@@ -936,7 +936,7 @@ ${c.bold}Options:${c.reset}
                     (the flat WORKDIR root). Image-built node_modules/ and
                     .next/ survive via anonymous volumes. Surfaces in the
                     Sources panel as a "Neuralis Tree" suggestion (needs the
-                    drive.mount.privileged feature to see and attach).
+                    sources.privileged feature to see and attach).
   --with-docker     (with --neuralis) Flips NEURALIS_DOCKER_OVERLAY=1 so
                     the runtime can flag the elevated capability. The
                     Docker socket is already bind-mounted by default for

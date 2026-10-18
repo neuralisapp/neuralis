@@ -4,6 +4,7 @@ import type { ReactNode, CSSProperties, ComponentType, DragEvent, KeyboardEvent,
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BrushCleaning, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, GripVertical, Plus, RectangleHorizontal, RectangleVertical, RotateCw, Trash2, X } from 'lucide-react';
 import { createFrameLoop, type FrameLoop } from './frameLoop';
+import { agentDisplayLabel } from '@neuralis/package-system/client';
 import { cn } from '@/lib/cn';
 import { newGroupId, useWorkspaceStore } from '../store/workspaceStore';
 import { useAgentsState, useDockEditing, usePresentation, useProjectGroups } from '../store/selectors';
@@ -1357,7 +1358,7 @@ function GroupDraftPanel({ draft, onChange, placement, anchorRef, horizontal }: 
                   checked={selected.memberIds.includes(id)}
                   onChange={(event) => update({ memberIds: event.target.checked ? [...selected.memberIds, id] : selected.memberIds.filter((m) => m !== id) })}
                 />
-                <span className="min-w-0 truncate">{byId[id]?.name || id}</span>
+                <span className="min-w-0 truncate">{agentDisplayLabel(byId[id] ?? { id })}</span>
               </label>
             ))}
           </div>

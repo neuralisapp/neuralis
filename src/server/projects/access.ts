@@ -14,7 +14,7 @@ import {
 } from '@neuralis/package-system/access';
 import { validateProjectInvariants } from '../store/projectInvariants';
 import { resolveMember } from '../auth/memberSession';
-import { listProjectsForUser } from '../store/ProjectStore';
+import { listAllProjects, listProjectsForUser } from '../store/ProjectStore';
 import {
   AppearanceImageError,
   AppearancePatchError,
@@ -271,6 +271,32 @@ export function canGovernUserRecord(input: {
       callerPriority: rolePriority(caller.role, callerRole.priority),
       targetPriority: rolePriority(target.role, p.roles[target.role]?.priority),
     }).allowed;
+  });
+}
+
+/**
+ * {@link canGovernUserRecord} with both inputs derived LIVE — the kernel
+ * `HostMembersPort.canGovernUser` read predicate a package asks before acting on
+ * something a user owns (agent-core's revocation of another user's device):
+ * "whoever may disable the user may cut their device off". The caller must be an
+ * active member of `projectId` (the ONE member chain); `platform.users` is read
+ * from THAT membership; every project, archived included, is the record set.
+ * Answers `false` on any refusal — it never writes.
+ */
+export async function canGovernUserLive(
+  callerUserId: string,
+  projectId: string,
+  targetUserId: string,
+  verb: Extract<UserRecordVerb, 'disable'>,
+): Promise<boolean> {
+  const caller = await resolveMember(callerUserId, projectId);
+  if (!caller) return false;
+  return canGovernUserRecord({
+    callerId: callerUserId,
+    targetId: targetUserId,
+    projects: await listAllProjects({ includeArchived: true }),
+    verb,
+    callerHoldsPlatformUsers: hasFeature(caller.session, 'platform.users'),
   });
 }
 

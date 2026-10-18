@@ -3,7 +3,8 @@
  *
  * Every surface on the `:3101` companion HTTP server is a package's: the
  * external MCP endpoint with its OAuth 2.1 authorization server, the terminal
- * PTY socket, machine-core's KasmVNC stream and the host-broker proxy.
+ * PTY socket, machine-core's KasmVNC stream, the host-terminal proxy and the
+ * device link a paired device dials.
  *
  * This used to be three hardcoded `mountTerminalWs` / `mountMachine*` blocks
  * with the AUTH CLOSURES living in host code. They now live in their owning
@@ -19,7 +20,10 @@
  *     server (absent ⇒ read-only session, not a rejection).
  *   - machine-core: session cookie → membership → **`machine.read`** through
  *     `authorizeStreamAccess` (SF-MC1).
- *   - host broker (H2'): additionally `exec.host`.
+ *   - agent-core (host terminal): additionally the device gate — the device's
+ *     owner with `device.own`, or `terminal.device` on a live-`sandboxed` device.
+ *   - agent-core (device link): no session at all — the device's own secret,
+ *     compared by hash; the link carries answers, never a call.
  *
  * Lifting authentication into a shared wrapper here would silently drop the
  * strictest gate. The host therefore injects capabilities only; every package
@@ -51,10 +55,10 @@ export type CompanionMountHandle = {
 export type CompanionMountPorts = {
   resolveSessionUser: (input: {
     headers: Record<string, string | string[] | undefined>;
-  }) => Promise<{ userId: string; email?: string; name?: string; sessionEpoch?: number; mustChangePassword?: boolean } | null>;
+  }) => Promise<{ userId: string; email?: string; name?: string; sessionEpoch?: number; mustChangePassword?: boolean; appearance?: { iconName?: string; color?: string; background?: 'filled' | 'transparent'; imageUrl?: string } } | null>;
   getProjectById: (projectId: string) => Promise<CompanionProject | null>;
-  /** The user's non-archived projects with their names — the OAuth consent picker. */
-  listProjects: (userId: string) => Promise<Array<{ id: string; name: string }>>;
+  /** The user's non-archived projects with their names and appearance (picture as an ABSOLUTE app-origin URL) — the OAuth consent picker. */
+  listProjects: (userId: string) => Promise<Array<{ id: string; name: string; appearance?: { iconName?: string; color?: string; background?: 'filled' | 'transparent'; imageUrl?: string } }>>;
   /** The public `:3101` base URL (`MCP_BASE_URL`) — the OAuth issuer. A host env read. */
   mcpBaseUrl: string;
   /** Where the OAuth consent sends a browser without a session (`APP_URL` → `NEXTAUTH_URL`). */

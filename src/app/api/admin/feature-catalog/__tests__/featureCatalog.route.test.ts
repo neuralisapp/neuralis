@@ -114,7 +114,7 @@ describe('GET /api/admin/feature-catalog — R2b project-aware override union', 
  * was kept global on the reasoning that a feature may legitimately be referenced
  * from another package. True — but `summarizeConsumers` emits each consumer's
  * NAME, so a foreign drop declaring any contribution with
- * `requires.features:['drive.read']` had its contribution name rendered in this
+ * `requires.features:['files.read']` had its contribution name rendered in this
  * project's Roles editor. An assertion that the consumers index was UNCHANGED
  * would have pinned that leak.
  *
@@ -124,11 +124,11 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
   const FOREIGN_TOOL = 'foreign_secret_tool';
 
   const SCOPED_DEFS = [
-    // A BUILTIN — visible in every project, and the owner of `drive.read`.
+    // A BUILTIN — visible in every project, and the owner of `files.read`.
     {
       id: 'brain-core',
       name: 'Brain Core',
-      requires: { providesFeatures: [{ id: 'drive.read', title: 'Read files' }] },
+      requires: { providesFeatures: [{ id: 'files.read', title: 'Read files' }] },
     },
     // A BUILTIN consuming another builtin's feature — the legitimate
     // cross-first-party reference that must SURVIVE the filter.
@@ -136,14 +136,14 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
       id: 'agent-core',
       name: 'Agent Core',
       requires: { providesFeatures: [{ id: 'core.agents' }] },
-      tools: [{ name: 'delegate', requires: { features: ['drive.read'] } }],
+      tools: [{ name: 'delegate', requires: { features: ['files.read'] } }],
     },
     // ANOTHER project's `_packages/` drop. Not installed here.
     {
       id: 'foreign-drop',
       name: 'Foreign Drop',
       requires: { providesFeatures: [{ id: 'foreign.feature', title: 'FOREIGN TITLE', description: 'FOREIGN DESC' }] },
-      tools: [{ name: FOREIGN_TOOL, requires: { features: ['drive.read'] } }],
+      tools: [{ name: FOREIGN_TOOL, requires: { features: ['files.read'] } }],
     },
   ];
 
@@ -168,8 +168,8 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
   it('omits the foreign drop’s contribution NAME from a VISIBLE feature’s consumers', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
     const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'drive.read');
-    // `drive.read` is first-party and survives the group filter — which is
+    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
+    // `files.read` is first-party and survives the group filter — which is
     // exactly why its consumers list was the leak channel.
     expect(driveRead.consumers.byKind.tool ?? []).not.toContain(FOREIGN_TOOL);
     expect(JSON.stringify(body)).not.toContain(FOREIGN_TOOL);
@@ -178,7 +178,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
   it('KEEPS the cross-first-party consumer (the still-works control)', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
     const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'drive.read');
+    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
     expect(driveRead.consumers.byKind.tool).toContain('delegate');
     expect(driveRead.consumers.total).toBe(1);
   });
@@ -188,7 +188,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
     expect(body.groups.map((g: any) => g.packageId)).toContain('foreign-drop');
     const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'drive.read');
+    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
     expect(driveRead.consumers.byKind.tool).toContain(FOREIGN_TOOL);
   });
 });

@@ -33,7 +33,7 @@ import { getProjectPackageScanner, getScannerForDir, type ProjectPackageScanner 
 import { toResolvedRecord } from '../../src/server/packages/packageRecords';
 import { selectFlaggedPackageRoots } from '../../src/server/packages/projectPackages';
 // The host's own kind declarations (the upgrade command verifies modules against every loaded one).
-import { HOST_DATA_FORMATS } from '../../src/server/store/dataFormats';
+import { HOST_DATA_FORMATS, PROJECT_UPGRADE_STEPS } from '../../src/server/store/dataFormats';
 
 type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; uriRoot: string };
 
@@ -69,7 +69,7 @@ function deps(ctx: OfflineUpgradeContext, overrideFile: string): Omit<PackageIde
     roots: { home: ctx.home, appRoot: ctx.appRoot, projectsRoot: ctx.projectsRoot },
     sourceRoots,
     builtinIds: BUILTIN_PACKAGE_IDS,
-    recordVersions: { project: HOST_DATA_FORMATS.project.version, sourceConfig: SOURCE_CONFIG_FORMAT.version },
+    recordVersions: { project: PROJECT_UPGRADE_STEPS.identity.to, sourceConfig: SOURCE_CONFIG_FORMAT.version },
     // The activation path's scanners, metadata only: no watcher, no load.
     async enumerateInstances(projectIds, roots): Promise<PackageIdentityInstance[]> {
       const result: PackageIdentityInstance[] = [];
@@ -103,10 +103,11 @@ function deps(ctx: OfflineUpgradeContext, overrideFile: string): Omit<PackageIde
  */
 export function createPackageIdentityUpgrade(overrideFile: string, options: Pick<PackageIdentityUpgradeDeps, 'onPhase'> = {}): OfflineUpgradeModule {
   return {
-    id: 'package-identity-v2',
-    // Each kind's target is its owner's declaration — the same constants the rewrite stamps.
+    id: PROJECT_UPGRADE_STEPS.identity.id,
+    // Each kind's target is its owner's declaration — the same constants the rewrite stamps
+    // (`neuralis/project`: this module's step of its chain).
     kinds: [
-      { kind: HOST_DATA_FORMATS.project.kind, to: HOST_DATA_FORMATS.project.version },
+      { kind: HOST_DATA_FORMATS.project.kind, to: PROJECT_UPGRADE_STEPS.identity.to },
       ...PACKAGE_IDENTITY_AGENT_CORE_KINDS,
       { kind: SOURCE_CONFIG_FORMAT.kind, to: SOURCE_CONFIG_FORMAT.version },
     ],

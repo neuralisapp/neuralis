@@ -568,9 +568,18 @@ export async function detectEnvironment(projectRoot: string): Promise<DetectedEn
 /** The image's own data home (`ENV NEURALIS_HOME` in the Dockerfile): a bind target, never a host path. */
 const IMAGE_DATA_HOME = '/.neuralis';
 
-/** The fix lines every image-channel refusal ends with; `folder` is the install folder when known. */
+/** The one-line installer: it runs the first-install command with every flag derived. */
+export const INSTALLER_COMMAND = 'curl -fsSL https://neuralisapp.com/install.sh | sh';
+
+/** The fix lines every image-channel refusal ends with; `folder` is the install folder when known.
+ * A first install also names the installer, after the command that fixes the flag in question. */
 export function imageFix(version: string, composeOnly: boolean, folder: string | null = null): string[] {
-  return ['Run it from the image like this (Linux or WSL2):', ...imageSetupCommand(version, composeOnly, folder).map((line) => `  ${line}`), 'Nothing was written.'];
+  return [
+    'Run it from the image like this (Linux or WSL2):',
+    ...imageSetupCommand(version, composeOnly, folder).map((line) => `  ${line}`),
+    ...(composeOnly ? [] : [`or: ${INSTALLER_COMMAND}`]),
+    'Nothing was written.',
+  ];
 }
 
 export const INSTALL_HELP = 'https://docs.neuralisapp.com/getting-started/installation#if-something-fails';

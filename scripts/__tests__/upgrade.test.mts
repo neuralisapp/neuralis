@@ -18,12 +18,29 @@ import {
   listCheckpoints,
   listDataFormatDeclarations,
   markDataFormatUpgrade,
+  offlineUpgradeSteps,
   readDataFormatLedger,
   resetDataFormatsForTesting,
+  type OfflineUpgradeKind,
 } from '@neuralis/package-system/data';
 import { checkpointKeep, loadUpgradeModules, runUpgrade, UPGRADES_DIR, type UpgradeOptions } from '../upgrade.mts';
 
 const dirs: string[] = [];
+
+/** A ledger one step below every module kind, and the begin marks a run would record (a chained kind once, at its last step). */
+function belowEveryStep(kinds: readonly OfflineUpgradeKind[]): { ledger: Record<string, { version: number; raisedAt: string }>; marks: Array<OfflineUpgradeKind & { from: number }>; finals: Map<string, number> } {
+  const firsts = new Map<string, number>();
+  const finals = new Map<string, number>();
+  for (const { kind, to } of kinds) {
+    firsts.set(kind, Math.min(firsts.get(kind) ?? to, to));
+    finals.set(kind, Math.max(finals.get(kind) ?? to, to));
+  }
+  return {
+    ledger: Object.fromEntries([...firsts].map(([kind, to]) => [kind, { version: to - 1, raisedAt: 'x' }])),
+    marks: [...finals].map(([kind, to]) => ({ kind, to, from: firsts.get(kind)! - 1 })),
+    finals,
+  };
+}
 afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
 
 type Calls = { applied: string[]; failOnce: boolean; blocked?: boolean; seen: Array<{ state?: string; checkpoints: number }> };
@@ -212,27 +229,106 @@ describe('neuralis:upgrade — the offline apply order', () => {
   });
 });
 
+describe('neuralis:upgrade — a kind raised by a CHAIN of modules', () => {
+  type ChainCalls = { applied: string[]; failIn?: string };
+  const CHAIN_CALLS = Symbol.for('neuralis-upgrade-test-chain');
+  const chainCalls = (): ChainCalls => (globalThis as unknown as Record<symbol, ChainCalls>)[CHAIN_CALLS]!;
+
+  /** Two step modules on `test/chain` (v1 → v2 → v3), in the given file names. */
+  function chainHome(names: { identity: string; device: string }, ledgerVersion: number): UpgradeOptions & { ledgerFile: string } {
+    const home = mkdtempSync(join(tmpdir(), 'nrs-upgrade-chain-'));
+    dirs.push(home);
+    const appRoot = join(home, 'app');
+    mkdirSync(join(appRoot, 'config'), { recursive: true });
+    const ledgerFile = join(appRoot, 'config', 'data-formats.json');
+    writeFileSync(ledgerFile, JSON.stringify({ 'test/chain': { version: ledgerVersion, raisedAt: 'x' } }));
+    const modulesDir = join(home, 'upgrades');
+    mkdirSync(modulesDir);
+    for (const [file, id, to] of [[names.identity, 'step-a', 2], [names.device, 'step-b', 3]] as const) {
+      writeFileSync(join(modulesDir, file), `
+        const calls = () => globalThis[Symbol.for('neuralis-upgrade-test-chain')];
+        export default { id: '${id}', kinds: [{ kind: 'test/chain', to: ${to} }],
+          async dryRun() { return { files: ['app/${id}'], summary: ['${id}'] }; },
+          async apply() { if (calls().failIn === '${id}') { calls().failIn = undefined; throw new Error('stopped in ${id}'); } calls().applied.push('${id}'); } };
+      `);
+    }
+    return { apply: true, modulesDir, roots: { home, appRoot, projectsRoot: join(home, 'projects') }, offline: async () => ({ offline: true }), log: () => {}, ledgerFile };
+  }
+
+  beforeEach(() => {
+    resetDataFormatsForTesting();
+    declareDataFormats([{ kind: 'test/chain', version: 3, upgrade: [{ to: 2, id: 'step-a' }, { to: 3, id: 'step-b' }] }]);
+    (globalThis as unknown as Record<symbol, ChainCalls>)[CHAIN_CALLS] = { applied: [] };
+  });
+
+  it('runs every step above the stored version, in chain order; a re-run writes nothing', async () => {
+    const opts = chainHome({ identity: 'a-identity.mts', device: 'b-device.mts' }, 1);
+    expect(await runUpgrade(opts)).toMatchObject({ pending: ['test/chain'], applied: true });
+    expect(chainCalls().applied).toEqual(['step-a', 'step-b']);
+    expect((await readDataFormatLedger(opts.roots.appRoot))['test/chain']).toEqual({ version: 3, raisedAt: expect.any(String) });
+    const done = homeFiles(opts.roots.home);
+    expect(await runUpgrade(opts)).toEqual({ pending: [], applied: false });
+    expect(homeFiles(opts.roots.home)).toEqual(done);
+
+    // Data already at the first step: only the second runs.
+    chainCalls().applied = [];
+    const second = chainHome({ identity: 'a-identity.mts', device: 'b-device.mts' }, 2);
+    await runUpgrade(second);
+    expect(chainCalls().applied).toEqual(['step-b']);
+  });
+
+  it('an interruption inside the second step resumes from the recorded `from`: both steps again, no second checkpoint', async () => {
+    const opts = chainHome({ identity: 'a-identity.mts', device: 'b-device.mts' }, 1);
+    chainCalls().failIn = 'step-b';
+    await expect(runUpgrade(opts)).rejects.toThrow('stopped in step-b');
+    expect((await readDataFormatLedger(opts.roots.appRoot))['test/chain']).toEqual({ version: 3, raisedAt: expect.any(String), state: 'upgrading', from: 1 });
+    const resumed = await runUpgrade(opts);
+    expect(resumed.checkpoint).toBeUndefined();
+    expect(chainCalls().applied).toEqual(['step-a', 'step-a', 'step-b']);
+    expect((await readDataFormatLedger(opts.roots.appRoot))['test/chain']).toEqual({ version: 3, raisedAt: expect.any(String) });
+  });
+
+  it('module files that sort against the chain order are refused before anything runs', async () => {
+    const opts = chainHome({ identity: 'z-identity.mts', device: 'b-device.mts' }, 1);
+    const before = homeFiles(opts.roots.home);
+    await expect(runUpgrade({ ...opts, apply: false })).rejects.toThrow(/test\/chain: its upgrade chain \(step-a → step-b\) must run in that order/);
+    expect(chainCalls().applied).toEqual([]);
+    expect(homeFiles(opts.roots.home)).toEqual(before);
+  });
+});
+
 // Loading the real modules evaluates the host, agent-core and brain-core module graphs.
 describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
   it('own exactly the offline kinds the host, agent-core and brain-core declare, at their code versions', async () => {
     resetDataFormatsForTesting();
     const modules = await loadUpgradeModules(UPGRADES_DIR);
+    const byStep = (a: { kind: string; to: number }, b: { kind: string; to: number }): number => a.kind.localeCompare(b.kind) || a.to - b.to;
     const declared = listDataFormatDeclarations()
-      .filter((decl) => decl.upgrade)
-      .map((decl) => ({ id: decl.upgrade!.id, kind: decl.kind, to: decl.version }))
-      .sort((a, b) => a.kind.localeCompare(b.kind));
+      .flatMap((decl) => offlineUpgradeSteps(decl).map((step) => ({ id: step.id, kind: decl.kind, to: step.to })))
+      .sort(byStep);
     const shipped = modules
       .flatMap(({ module }) => module.kinds.map((k) => ({ id: module.id, kind: k.kind, to: k.to })))
-      .sort((a, b) => a.kind.localeCompare(b.kind));
+      .sort(byStep);
     expect(shipped).toEqual(declared);
     expect(new Set(declared.map((row) => row.kind))).toEqual(new Set([
       'neuralis/project', 'agent-core/agent', 'agent-core/workflow-entry', 'agent-core/conversation-meta',
       'agent-core/pending-interactions', 'agent-core/delegate-run', 'brain-core/source-config', 'brain-core/embedding-lock',
       'agent-core/package-data-zone', 'agent-core/conversation-summary', 'brain-core/vector-proof', 'neuralis/credential',
-      'agent-core/oauth-tokens',
+      'agent-core/oauth-tokens', 'agent-core/device-registry', 'agent-core/host-source-config',
+      'neuralis/platform-config',
     ]));
     // The zone module sorts AFTER the identity module: it moves the zones that one writes.
-    expect(modules.map(({ file }) => file).indexOf('package-zone-v1.mts')).toBeGreaterThan(modules.map(({ file }) => file).indexOf('package-identity-v2.mts'));
+    const files = modules.map(({ file }) => file);
+    expect(files.indexOf('package-zone-v1.mts')).toBeGreaterThan(files.indexOf('package-identity-v2.mts'));
+    // `neuralis/project` is a chain: the identity step (v2), the device step (v3), then the two-word
+    // feature ids (v4), in file order.
+    expect(declared.filter((row) => row.kind === 'neuralis/project')).toEqual([
+      { id: 'package-identity-v2', kind: 'neuralis/project', to: 2 },
+      { id: 'source-device-v1', kind: 'neuralis/project', to: 3 },
+      { id: 'two-word-features-v1', kind: 'neuralis/project', to: 4 },
+    ]);
+    expect(files.indexOf('source-device-v1.mts')).toBeGreaterThan(files.indexOf('package-zone-v1.mts'));
+    expect(files.indexOf('two-word-features-v1.mts')).toBeGreaterThan(files.indexOf('source-device-v1.mts'));
   });
 
   it('package-identity-v2 dry-runs a stopped install read-only', async () => {
@@ -274,9 +370,9 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
 
     // No ledger reset here: the modules' graphs declared their kinds when the first row loaded them.
     const modules = await loadUpgradeModules(UPGRADES_DIR);
-    const kinds = modules.flatMap(({ module }) => module.kinds);
-    writeFileSync(join(roots.appRoot, 'config', 'data-formats.json'), JSON.stringify(Object.fromEntries(kinds.map(({ kind, to }) => [kind, { version: to - 1, raisedAt: 'x' }]))));
-    await markDataFormatUpgrade(roots.appRoot, kinds, 'begin');
+    const { ledger: below, marks, finals } = belowEveryStep(modules.flatMap(({ module }) => module.kinds));
+    writeFileSync(join(roots.appRoot, 'config', 'data-formats.json'), JSON.stringify(below));
+    await markDataFormatUpgrade(roots.appRoot, marks, 'begin');
     const interrupted = createPackageIdentityUpgrade(join(home, 'no-override.yml'), { onPhase: (phase) => { if (phase === 'zones') throw new Error('stopped before the records'); } });
     await expect(interrupted.apply({ ...roots, log: () => {} })).rejects.toThrow('stopped before the records');
     expect(readdirSync(join(roots.appRoot, 'config'))).toEqual(expect.arrayContaining(['package-identity-migration.json', 'package-identity-zone-journal']));
@@ -293,8 +389,8 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     expect(agent.config.packages.overrides).toEqual({ [id]: { enabled: false } });
     expect(JSON.parse(readFileSync(join(roots.appRoot, 'projects', 'main.json'), 'utf8'))).toMatchObject({ formatVersion: 2, packageTrust: { [id]: 'trusted' } });
     const ledger = await readDataFormatLedger(roots.appRoot);
-    expect(kinds.map(({ kind }) => [kind, ledger[kind]?.state])).toEqual(kinds.map(({ kind }) => [kind, undefined]));
-    expect(kinds.every(({ kind, to }) => ledger[kind]?.version === to)).toBe(true);
+    expect([...finals.keys()].map((kind) => [kind, ledger[kind]?.state])).toEqual([...finals.keys()].map((kind) => [kind, undefined]));
+    expect([...finals].every(([kind, to]) => ledger[kind]?.version === to)).toBe(true);
     // Resumed with BOTH pending: the zone identity-v2 had already written (hashed + marker) is moved on.
     expect(logs.join('\n')).toMatch(/zones: 1 moved to runtime\/ .*1 by identity marker.*0 left to package-identity-v2/);
     expect(readFileSync(join(roots.projectsRoot, 'main', 'data', 'runtime', 'packages', 'sample', 'content'), 'utf8')).toBe('kept');
@@ -316,8 +412,8 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     mkdirSync(join(roots.appRoot, 'config'), { recursive: true });
     writeFileSync(join(roots.appRoot, 'config', 'embedding-lock.json'), JSON.stringify({ version: 3, mode: 'metadata', collection: 'serving', createdAt: 'now' }));
     const modules = await loadUpgradeModules(UPGRADES_DIR);
-    const kinds = modules.flatMap(({ module }) => module.kinds);
-    writeFileSync(join(roots.appRoot, 'config', 'data-formats.json'), JSON.stringify(Object.fromEntries(kinds.map(({ kind, to }) => [kind, { version: to - 1, raisedAt: 'x' }]))));
+    const { ledger: below, finals } = belowEveryStep(modules.flatMap(({ module }) => module.kinds));
+    writeFileSync(join(roots.appRoot, 'config', 'data-formats.json'), JSON.stringify(below));
 
     // The real command with the zone module swapped for one that stops after its first zone.
     const crashing = join(home, 'upgrades');
@@ -341,7 +437,7 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     expect(readFileSync(join(roots.projectsRoot, 'main', 'data', 'runtime', 'packages', 'sample', 'content'), 'utf8')).toBe('kept');
     expect(readdirSync(join(roots.projectsRoot, 'main', 'data'))).not.toContain('_installed');
     const ledger = await readDataFormatLedger(roots.appRoot);
-    expect(kinds.every(({ kind, to }) => ledger[kind]?.version === to && ledger[kind]?.state === undefined)).toBe(true);
+    expect([...finals].every(([kind, to]) => ledger[kind]?.version === to && ledger[kind]?.state === undefined)).toBe(true);
   });
 
   // The documented command runs on the HOST, where a flagged source's container root

@@ -1,7 +1,7 @@
 /**
  * GET /api/events — the unified workspace notification stream.
  *
- * ONE multiplexed SSE connection that fans seven low-rate channels out to the
+ * ONE multiplexed SSE connection that fans eight low-rate channels out to the
  * client over a single HTTP/1.1 connection:
  *   - `runtime`      — package-runtime invalidation (host PackageRuntime)
  *   - `presence`     — project user presence (agent-core `presenceBus`)
@@ -10,6 +10,9 @@
  *                      bounds, never message content), so a turn no browser is
  *                      driving reaches an open tab
  *   - `filesystem`   — file change / sync events (brain-core, per-agent authorized)
+ *   - `devices`      — a paired device's state transition (agent-core; `{deviceId,
+ *                      status}` only, for a device the caller owns, may list
+ *                      platform-wide, or sees a source of in this project)
  *   - `project`      — a project record this user is (or just was) a member of
  *                      changed (host `ProjectStore`; the payload is the project id
  *                      only, the client re-reads its own projected list)
@@ -30,14 +33,22 @@
  * connection and must not be merged.
  *
  * SECURITY: auth runs ONCE at connect via `resolveSessionContext` (every catch-all
- * deny gate; 403 BEFORE the stream is constructed — F8), and EACH channel keeps
+ * deny gate; 403 BEFORE the stream is constructed — F8): the browser's cookie,
+ * or — for an external client such as `neuralis device list --watch`, and only
+ * when no cookie is present — the client's OAuth access token for the host API
+ * resource (`routes:call`; its project and agent are the token's, a supplied
+ * `projectId` may only agree; an `nrs1.` ticket is refused). A bearer connection
+ * CLOSES when its access token expires; the client renews and reconnects. And
+ * EACH channel keeps
  * its own per-event authorization: presence is membership-gated at connect;
  * workflow applies BOTH halves of its route's gate — the module feature
  * (`workflow.read`) AND the M9 `isWorkflowVisibleTo` filter per event; conversation
  * pairs its module feature (`core.execute`) with the per-conversation uri-policy
  * read check, re-minted on a short TTL — both inside agent-core's adapters;
  * filesystem authorizes EACH requested agentId deny-by-default inside the brain-core
- * adapter; project is membership-gated per event inside the host store;
+ * adapter; devices pairs its module feature (`core.agents`) with the device rule
+ * per event (owner · `platform.users` · a source visible in this project) inside
+ * agent-core; project is membership-gated per event inside the host store;
  * notifications reaches only the recipient user's own connections. No channel can emit an event the per-route gate would block. The
  * connection itself CLOSES when the host revokes its principal (disabled,
  * deleted, sessions reset, removed from or archived out of this project) —
@@ -46,6 +57,9 @@
  * Package feeds come from the runtime channel contracts — the buses are resolved
  * through the bootstrapped package instances (the globalThis+Symbol.for anchors),
  * never re-`new`ed.
+ *
+ * `?channels=a,b` NARROWS the connection to those channels (an intersection —
+ * it never adds one the caller's gates refuse); absent, every channel rides.
  *
  * Frame shape: every event is `event: message` with JSON
  * `{ channel, name, payload }`; the client demuxes by `channel`.
@@ -80,25 +94,36 @@ function csv(value: string | null): string[] {
   return (value ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** The longest delay `setTimeout` honours; a later expiry is re-armed, never fired early. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export async function GET(req: NextRequest): Promise<Response> {
   const projectId = req.nextUrl.searchParams.get('projectId') ?? '';
 
   // F8 — auth (every deny gate) BEFORE constructing the stream.
   let session;
+  let bearerExpiresAt: number | undefined;
   try {
-    session = await resolveSessionContext(req, projectId);
+    session = await resolveSessionContext(req, projectId, {
+      acceptBearer: true,
+      onBearer: (grant) => { bearerExpiresAt = grant.expiresAt; },
+    });
   } catch (err) {
     if (err instanceof SessionResolutionError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json({ error: err.message }, { status: err.status, ...(err.headers ? { headers: err.headers } : {}) });
     }
     throw err;
   }
+  // The bearer arm binds the connection to the TOKEN's project.
+  const boundProjectId = session.projectId;
+  const wanted = req.nextUrl.searchParams.has('channels') ? new Set(csv(req.nextUrl.searchParams.get('channels'))) : null;
+  const rides = (channel: string): boolean => wanted === null || wanted.has(channel);
 
   const agentIds = csv(req.nextUrl.searchParams.get('agentIds'));
   const types = csv(req.nextUrl.searchParams.get('types'));
 
   await ensureCommunityRuntime();
-  await ensureProjectPackagesLoaded(projectId);
+  await ensureProjectPackagesLoaded(boundProjectId);
   const runtime = getCommunityPackageRuntime();
   const core = await getRuntime();
   await core.whenReady();
@@ -106,11 +131,13 @@ export async function GET(req: NextRequest): Promise<Response> {
   const encoder = new TextEncoder();
   const unsubscribers: Array<() => void> = [];
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
   const teardown = (): void => {
     for (const unsub of unsubscribers.splice(0)) {
       try { unsub(); } catch { /* ignore */ }
     }
     if (heartbeat) clearInterval(heartbeat);
+    if (expiry) clearTimeout(expiry);
   };
 
   const stream = new ReadableStream({
@@ -128,19 +155,21 @@ export async function GET(req: NextRequest): Promise<Response> {
       };
 
       // runtime — process-global invalidation signal (no project payload).
-      send('runtime', 'snapshot', { revision: runtime.getRevision() });
-      unsubscribers.push(
-        runtime.onInvalidation((event) =>
-          send('runtime', 'invalidated', { revision: event.newRevision, reason: event.reason }),
-        ),
-      );
+      if (rides('runtime')) {
+        send('runtime', 'snapshot', { revision: runtime.getRevision() });
+        unsubscribers.push(
+          runtime.onInvalidation((event) =>
+            send('runtime', 'invalidated', { revision: event.newRevision, reason: event.reason }),
+          ),
+        );
+      }
 
       // Package channels retain their per-event scope gates. The declared
       // entry feature is checked before any subscription or replay runs.
       for (const channel of core.channels()) {
-        if (!hasFeature(session, channel.feature)) continue;
+        if (!rides(channel.channel) || !hasFeature(session, channel.feature)) continue;
         try {
-          const unsubscribe = await channel.subscribe(session, { projectId, agentIds, types },
+          const unsubscribe = await channel.subscribe(session, { projectId: boundProjectId, agentIds, types },
             (name, payload) => send(channel.channel, name, payload));
           unsubscribers.push(unsubscribe);
         } catch {
@@ -151,20 +180,24 @@ export async function GET(req: NextRequest): Promise<Response> {
       // project — gated in the store: only records this user is a member of,
       // and the frame carries the id alone. It deliberately reaches a hub bound
       // to ANOTHER of the user's projects, so a rename refreshes the switcher.
-      unsubscribers.push(
-        onProjectRecordChange(session.userId, ({ projectId: changed }) =>
-          send('project', 'record_changed', { projectId: changed }),
-        ),
-      );
+      if (rides('project')) {
+        unsubscribers.push(
+          onProjectRecordChange(session.userId, ({ projectId: changed }) =>
+            send('project', 'record_changed', { projectId: changed }),
+          ),
+        );
+      }
 
       // notifications — the store delivers a user's counts to that user's own
       // listeners only; like `project`, it reaches a hub bound to another of
       // the user's projects (the switcher's per-row number).
-      unsubscribers.push(
-        onNotificationCounts(session.userId, ({ projectId: changed, unread }) =>
-          send('notifications', 'counts', { projectId: changed, unread }),
-        ),
-      );
+      if (rides('notifications')) {
+        unsubscribers.push(
+          onNotificationCounts(session.userId, ({ projectId: changed, unread }) =>
+            send('notifications', 'counts', { projectId: changed, unread }),
+          ),
+        );
+      }
 
       heartbeat = setInterval(() => {
         if (closed) return;
@@ -176,16 +209,25 @@ export async function GET(req: NextRequest): Promise<Response> {
       }, heartbeatMs());
       heartbeat.unref?.();
 
-      // Principal revocation — a server-side close, so the teardown `cancel`
-      // would run is run here.
-      unsubscribers.push(
-        onConnectionPrincipalRevoked({ userId: session.userId, projectId }, () => {
-          if (closed) return;
-          closed = true;
-          teardown();
-          try { controller.close(); } catch { /* already closed */ }
-        }),
-      );
+      // A server-side close — the teardown `cancel` would run is run here.
+      const closeFromServer = (): void => {
+        if (closed) return;
+        closed = true;
+        teardown();
+        try { controller.close(); } catch { /* already closed */ }
+      };
+      // Principal revocation.
+      unsubscribers.push(onConnectionPrincipalRevoked({ userId: session.userId, projectId: boundProjectId }, closeFromServer));
+      // A bearer connection lives no longer than its access token.
+      if (bearerExpiresAt !== undefined) {
+        const armExpiry = (): void => {
+          const left = bearerExpiresAt! - Date.now();
+          if (left <= 0) { closeFromServer(); return; }
+          expiry = setTimeout(armExpiry, Math.min(left, MAX_TIMER_MS));
+          expiry.unref?.();
+        };
+        armExpiry();
+      }
 
       send('meta', 'connected', {});
     },

@@ -40,6 +40,7 @@ import { createMemberCredentialWriter } from './memberCredentialWriter';
 import { getUserById, hasAnyUsers } from '../store/UserStore';
 import { getProjectById, listAllProjects, listProjectsForUser, updateProject } from '../store/ProjectStore';
 import { isPrincipalActive, resolveMemberSession } from '../auth/memberSession';
+import { canGovernUserLive } from '../projects/access';
 import { getEnv } from '../config/env';
 import { getLogger } from '../logging/setup';
 import { listAllActivatedPackages } from '../packages/projectPackages';
@@ -641,7 +642,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     // The host ports every host-assigned first-party `ctx.hostPorts` carries
     // (the kernel hands them to first-party contexts only).
     const hostPorts: HostPorts = {
-      members: { getUserById, getProjectById, listProjectsForUser, isPrincipalActive },
+      members: { getUserById, getProjectById, listProjectsForUser, isPrincipalActive, canGovernUser: canGovernUserLive },
       audit: onAuditEvent,
       // The SessionResolverPort every unattended fire/wake re-resolves its
       // principal through (workflow runs, background delegates, inbox drains) —

@@ -4,7 +4,7 @@
  * eventHub — ONE multiplexed EventSource for the whole workspace.
  *
  * Replaces the separate client EventSources (runtime, presence, workflow,
- * conversation, filesystem, project, notifications) with a single connection to the host
+ * conversation, filesystem, project, devices, notifications) with a single connection to the host
  * `GET /api/events` hub. On
  * HTTP/1.1 the browser caps ~6 connections per origin; the workspace used to
  * hold one always-on connection per channel PLUS one workflow connection per
@@ -22,7 +22,7 @@
  * filesystem subscribers register an `agentId`, and the union drives the
  * `?agentIds=` query so the server authorizes exactly the visible agents
  * (per-agent authz happens server-side). A set change reopens the connection
- * (debounced); presence/workflow/runtime/project carry no agent scope.
+ * (debounced); presence/workflow/runtime/project/devices carry no agent scope.
  */
 
 import { createReconnectDetector } from '@neuralis/package-system/client';
@@ -33,7 +33,7 @@ import { createReconnectDetector } from '@neuralis/package-system/client';
  * connections only). It is deliberately absent from the kernel
  * `subscribeRealtime` union — no package subscribes to it; the shell does.
  */
-export type HubChannel = 'runtime' | 'presence' | 'workflow' | 'filesystem' | 'conversation' | 'project' | 'notifications' | 'meta';
+export type HubChannel = 'runtime' | 'presence' | 'workflow' | 'filesystem' | 'conversation' | 'project' | 'devices' | 'notifications' | 'meta';
 
 type ChannelListener = (name: string, payload: unknown) => void;
 type ChangeListener = () => void;
@@ -69,6 +69,7 @@ const channelListeners: Record<HubChannel, Set<ChannelListener>> = {
   filesystem: new Set(),
   conversation: new Set(),
   project: new Set(),
+  devices: new Set(),
   notifications: new Set(),
   meta: new Set(),
 };

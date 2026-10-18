@@ -13,6 +13,37 @@
 import { decode } from 'next-auth/jwt';
 import { getEnv } from '../config/env';
 import { resolveActiveUser } from '../auth/memberSession';
+import { resolveTrustedAppOrigin } from '../oauth/appOrigin';
+import { appearanceImageUrl } from '../../lib/appearanceImageUrl';
+import type { StoredAppearance } from '../appearance/appearanceImageStore';
+
+/** A user's or project's appearance as the `:3101` consent page draws it. */
+export type ConsentAppearance = {
+  iconName?: string;
+  color?: string;
+  background?: 'filled' | 'transparent';
+  /** ABSOLUTE `<app origin>/api/appearance/…` URL — the page is served from `:3101`. */
+  imageUrl?: string;
+};
+
+/**
+ * Project a stored appearance for the consent page. The picture becomes an
+ * ABSOLUTE app-origin URL: the browser loads it from the `:3100` origin with
+ * its own cookie, under the same read gate the workspace uses.
+ */
+export function toConsentAppearance(
+  kind: 'user' | 'project',
+  ownerId: string,
+  stored: StoredAppearance | undefined,
+): ConsentAppearance | undefined {
+  if (!stored) return undefined;
+  return {
+    ...(stored.iconName ? { iconName: stored.iconName } : {}),
+    ...(stored.color ? { color: stored.color } : {}),
+    ...(stored.background ? { background: stored.background } : {}),
+    ...(stored.image?.hash ? { imageUrl: `${resolveTrustedAppOrigin()}${appearanceImageUrl(kind, ownerId, stored.image.hash)}` } : {}),
+  };
+}
 
 export type SessionUser = {
   userId: string;
@@ -22,6 +53,8 @@ export type SessionUser = {
   sessionEpoch: number;
   /** The record's forced-password-change flag — the OAuth consent refuses such a user, like the catch-all does. */
   mustChangePassword: boolean;
+  /** The user's avatar on the OAuth consent page. */
+  appearance?: ConsentAppearance;
 };
 
 type RequestLike = {
@@ -54,12 +87,14 @@ export async function resolveSessionUser(req: RequestLike): Promise<SessionUser 
     const record = await resolveActiveUser(userId, { sessionEpoch: token.sessionEpoch });
     if (!record) return null;
 
+    const appearance = toConsentAppearance('user', userId, record.appearance);
     return {
       userId,
       email: typeof token.email === 'string' ? token.email : '',
       name: typeof token.name === 'string' ? token.name : '',
       sessionEpoch: typeof token.sessionEpoch === 'number' ? token.sessionEpoch : 0,
       mustChangePassword: record.mustChangePassword === true,
+      ...(appearance ? { appearance } : {}),
     };
   } catch {
     return null;

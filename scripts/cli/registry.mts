@@ -97,7 +97,7 @@ function verb(name: string, summary: string, usage: string, load: () => Promise<
 
 /** The operator verbs — one thin adapter each over the script that owns the work. */
 export const OPS_COMMANDS: readonly CommandModule[] = [
-  verb('setup', 'Install wizard: data directories, .env, the compose file', 'neuralis setup [--compose-only] [--output <dir>]', () => import('../setup.mts')),
+  verb('setup', 'Install wizard: data directories, .env, the compose file', 'neuralis setup [--advanced] [--compose-only] [--output <dir>] [--help]', () => import('../setup.mts')),
   verb('rebuild', 'Rebuild the image (an install folder: its derived image) and recreate the stack', 'neuralis rebuild [--no-sidecar]', () => import('../rebuild.mts')),
   verb('sync', 'Swap a package into the running container without a rebuild', 'neuralis sync [status | <package> | --all] [--dry-run] [--no-restart] [--json]', () => import('../sync.mts')),
   verb('update', 'Move this install to a published release line', 'neuralis update [<package>] [--version <x> | --manifest <https url|file>] [--apply] [--json]', () => import('../update.mts')),
@@ -110,9 +110,23 @@ export const OPS_COMMANDS: readonly CommandModule[] = [
   verb('restore', 'Restore a whole-install backup (app stopped)', 'neuralis restore <dir> [--home <dir> --volume <name>]', () => import('../backup.mts'), ['restore']),
   verb('qdrant-upgrade', 'Upgrade the Qdrant engine one minor at a time', 'neuralis qdrant-upgrade [--dry-run | --rehearse <volume> | --rollback <dir>]', () => import('../qdrant-upgrade.mts')),
   verb('reset-vector', 'Drop the vector collections and the embedding lock', 'neuralis reset-vector', () => import('../reset-vector.mts')),
-  verb('host-broker', 'Provision, run and maintain the host-access broker', 'neuralis host-broker <init|install|upgrade|run|status|grant|attach>', () => import('../host-broker.mts')),
   verb('convert', 'Turn a 0.1.0 unpacked install folder into an npm project (one-shot, app stopped)', 'neuralis convert --from <old version> | --rollback <checkpoint id>', () => import('../convert.mts')),
 ];
+
+/**
+ * Verbs a release moved out of this command line. Dispatching one answers where
+ * the work lives now — text only: nothing is loaded, nothing is spawned.
+ */
+export const MOVED_VERBS: Readonly<Record<string, readonly string[]>> = {
+  'host-broker': [
+    'Every machine the app reaches — this server too — is a paired device now, run by the separate client.',
+    'On that machine, as the user whose files and shell the app should reach:',
+    '  npm install -g @neuralis/cli',
+    '  neuralis device pair      sign in once in the browser (the server: skip it after `upgrade --apply`)',
+    '  neuralis device install   the login service; `--unconfined` on a machine one person uses',
+    '  neuralis device status    neuralis device grant <dir> [--write|--exec]    neuralis device run',
+  ],
+};
 
 /**
  * Verbs a later release adds to this same registry (remote and device
@@ -202,6 +216,9 @@ export async function dispatch(argv: string[], ctx: CliContext): Promise<number>
       const manifest = JSON.parse(readFileSync(join(ctx.packageDir, 'package.json'), 'utf-8')) as { version?: unknown };
       ctx.stdout(`${String(manifest.version)}\n`);
       return 0;
+    }
+    if (Object.hasOwn(MOVED_VERBS, name)) {
+      throw new CliExit(1, `"${name}" moved to \`neuralis device\` (@neuralis/cli)`, MOVED_VERBS[name]!);
     }
     if ((RESERVED_VERBS as readonly string[]).includes(name)) {
       throw new CliExit(1, `"${name}" is reserved for a later release`, ['`neuralis --help` lists the commands this release has.', 'Signing in from your own machine, `request`, `skill`, `mcp`, `plugin` and `launch` are the separate client: `npm i -g @neuralis/cli`.']);

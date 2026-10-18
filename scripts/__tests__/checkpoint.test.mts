@@ -188,7 +188,7 @@ describe('a container-form checkpoint is a way back only on the persistent mount
       qdrantImage: qdrantImageRef('1.13.6'), qdrantDashboard: false, codexLoopbackPublish: false, composeOllama: false,
       neuralisHome: '/home/op/.neuralis',
       machine: { desktopVariant: 'ubuntu-xfce', image: 'neuralisapp/webtop-ubuntu-xfce:0.1.0', containerScope: 'user', idleMinutes: 30, screen: '1920x1080', sidecarPort: 9400, cdpPort: 9222, seccompUnconfined: false, dockerSocket: '/var/run/docker.sock' },
-      monorepo: false, imageTag: '0.2.0', hostBroker: { enabled: false, socketPath: '/x/s', secretFile: '/x/f' }, build: NO_BUILD_INPUTS, operatorImage: null,
+      monorepo: false, imageTag: '0.2.0', build: NO_BUILD_INPUTS, operatorImage: null,
     }, { date: '2026-10-09', version: '0.2.0' });
     expect(content).toContain('      - /home/op/.neuralis/checkpoints:/.neuralis/checkpoints\n');
   });

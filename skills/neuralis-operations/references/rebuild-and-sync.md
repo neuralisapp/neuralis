@@ -51,7 +51,7 @@ its supposed ceiling. A failed build cleans nothing and exits with the build's o
 | `docker-compose.override.yml` (a mount) | `docker compose up -d` — recreate, no build |
 | `.env` | regenerate compose, then `up -d` |
 | `~/.neuralis` config or credentials | nothing — read live |
-| the host-access broker's confinement helper (every rebuild produces a fresh one in the image) | `npx neuralis host-broker upgrade` — the host copy never follows a rebuild by itself; `status` and the end of `neuralis:rebuild` print the drift |
+| the server device's confinement helper (every rebuild produces a fresh one in the image) | `npm install -g @neuralis/cli`, then `neuralis device install` on the server — a device never follows a rebuild by itself; `neuralis device status` and the end of `neuralis:rebuild` print the drift |
 
 Three facts are **computed at image build and frozen**: the host's own generated CSS, the
 list of packages kept out of the server bundle, and every `NEXT_PUBLIC_*` value. No runtime
