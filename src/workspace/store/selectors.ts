@@ -1,10 +1,9 @@
 'use client';
 
 import { useShallow } from 'zustand/react/shallow';
-import { useWorkspaceStore, agentRuntimeKey, type WorkspaceStore, effectiveStageMode, activeRuntimeKeyOf, activeGroup, activeGroupScope, authorizedWindowOrder, boundAgentOf, getDefaultChatWidgetType, newWindowAgentOf } from './workspaceStore';
-import type { DockPrefs, WidgetInstance, WorkspaceGroup, WorkspacePresentation } from './types';
+import { useWorkspaceStore, groupScopeKey, agentRuntimeKey, type WorkspaceStore, effectiveStageMode, activeRuntimeKeyOf, activeGroup, activeGroupScope, authorizedWindowOrder, boundAgentOf, getDefaultChatWidgetType, newWindowAgentOf } from './workspaceStore';
+import type { DockPrefs, DockPrefsId, WidgetInstance, WorkspaceGroup, WorkspacePresentation } from './types';
 import { getWidgetDefinition } from '../widgets/registry';
-import type { DockId } from '../shell/dockPlacement';
 
 const EMPTY_ARRAY: string[] = [];
 const EMPTY_OBJECT: Record<string, never> = {};
@@ -94,17 +93,21 @@ export function useAgentHasStore(agentId: string): boolean {
 }
 
 /**
- * One dock's stored arrangement in the ACTIVE project, or `undefined` (the
- * default order). Reference-stable: every `projectStateById` writer spreads the
+ * A desktop arrangement in the active project, or phone preferences for the
+ * live user/project. Missing scope reads empty. Each desktop writer spreads the
  * entry, so the `dock` object keeps its identity until `setDockPrefs` replaces it.
  */
-export function useDockPrefs(dockId: DockId): DockPrefs | undefined {
-  return useWorkspaceStore((s) => (s.session.projectId ? s.projectStateById[s.session.projectId]?.dock?.[dockId] : undefined));
+export function useDockPrefs(dockId: DockPrefsId): DockPrefs | undefined {
+  return useWorkspaceStore((s) => {
+    const projectId = s.session.projectId;
+    if (!projectId) return undefined;
+    return dockId === 'phone' ? (s.liveUserId ? s.phoneDockPrefsByScope?.[groupScopeKey(s.liveUserId, projectId)] : undefined) : s.projectStateById[projectId]?.dock?.[dockId];
+  });
 }
 
 /** Is this dock in edit mode (Layout → Edit docks)? */
-export function useDockEditing(dockId: DockId): boolean {
-  return useWorkspaceStore((s) => s.dockEditing[dockId]);
+export function useDockEditing(dockId: DockPrefsId): boolean {
+  return useWorkspaceStore((s) => Boolean(s.dockEditing[dockId]));
 }
 
 /** The "has a store" broom predicate per PROJECT row (see `projectsWithStoreKey`). */
@@ -140,6 +143,24 @@ export function useStageShell() {
       };
     }),
   );
+}
+
+/** Current authorized live window, without subscribing the launcher to geometry. */
+export function useCurrentWindowId(): string | null {
+  return useWorkspaceStore((s) => {
+    const key = activeRuntimeKey(s);
+    if (!key) return null;
+    const { openOrder, byId } = visibleWindows(s, key);
+    const allowed = new Set(openOrder);
+    if (effectiveStageMode(s, key) === 'phone') {
+      const id = phoneForegroundId(openOrder, byId, s.phoneForegroundByRuntimeKey[key]);
+      return id && allowed.has(id) ? id : null;
+    }
+    return (s.focusOrderByRuntimeKey[key] ?? EMPTY_ARRAY).find((id) => {
+      const instance = byId[id];
+      return allowed.has(id) && instance && !instance.hidden && Boolean(getWidgetDefinition(instance.type));
+    }) ?? null;
+  });
 }
 
 /** The Phone foreground window id alone (null off Phone) — a primitive, so the dock re-renders only when it changes. */

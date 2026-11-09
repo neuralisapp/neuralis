@@ -23,7 +23,7 @@ import {
   resetDataFormatsForTesting,
   type OfflineUpgradeKind,
 } from '@neuralis/package-system/data';
-import { checkpointKeep, loadUpgradeModules, runUpgrade, UPGRADES_DIR, type UpgradeOptions } from '../upgrade.mts';
+import { checkpointKeep, loadUpgradeModules, pendingUpgrades, runUpgrade, UPGRADES_DIR, type UpgradeOptions } from '../upgrade.mts';
 
 const dirs: string[] = [];
 
@@ -89,6 +89,7 @@ function fixture(): { opts: UpgradeOptions; ledgerFile: string; logs: string[] }
       modulesDir,
       roots: { home, appRoot, projectsRoot: join(home, 'projects') },
       offline: async () => ({ offline: true }),
+      appRuns: 'docker',
       log: (line) => logs.push(line),
     },
   };
@@ -126,6 +127,17 @@ describe('neuralis:upgrade — the offline apply order', () => {
     expect(outcome).toEqual({ pending: ['test/alpha'], applied: false });
     expect(f.logs.join('\n')).toContain('Dry run');
     expect(homeFiles(f.opts.roots.home)).toEqual(before);
+  });
+
+  it('--check: pending names the module and kind, a current ledger answers none — no module dry run, nothing written', async () => {
+    const f = fixture();
+    calls().blocked = true; // a dry run would list a blocker; the check never runs one
+    const before = homeFiles(f.opts.roots.home);
+    expect(await pendingUpgrades(f.opts.modulesDir, f.opts.roots.appRoot)).toEqual(['alpha-v2: test/alpha → v2']);
+    expect(homeFiles(f.opts.roots.home)).toEqual(before);
+    calls().blocked = false;
+    await runUpgrade({ ...f.opts, apply: true });
+    expect(await pendingUpgrades(f.opts.modulesDir, f.opts.roots.appRoot)).toEqual([]);
   });
 
   it('a failed checkpoint leaves the ledger untouched: the manifest is durable before the first ledger write', async () => {
@@ -252,7 +264,7 @@ describe('neuralis:upgrade — a kind raised by a CHAIN of modules', () => {
           async apply() { if (calls().failIn === '${id}') { calls().failIn = undefined; throw new Error('stopped in ${id}'); } calls().applied.push('${id}'); } };
       `);
     }
-    return { apply: true, modulesDir, roots: { home, appRoot, projectsRoot: join(home, 'projects') }, offline: async () => ({ offline: true }), log: () => {}, ledgerFile };
+    return { apply: true, modulesDir, roots: { home, appRoot, projectsRoot: join(home, 'projects') }, offline: async () => ({ offline: true }), log: () => {}, appRuns: 'docker', ledgerFile };
   }
 
   beforeEach(() => {
@@ -314,8 +326,8 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
       'neuralis/project', 'agent-core/agent', 'agent-core/workflow-entry', 'agent-core/conversation-meta',
       'agent-core/pending-interactions', 'agent-core/delegate-run', 'brain-core/source-config', 'brain-core/embedding-lock',
       'agent-core/package-data-zone', 'agent-core/conversation-summary', 'brain-core/vector-proof', 'neuralis/credential',
-      'agent-core/oauth-tokens', 'agent-core/device-registry', 'agent-core/host-source-config',
-      'neuralis/platform-config',
+      'agent-core/oauth-tokens', 'agent-core/device-registry', 'agent-core/conversation-messages', 'agent-core/shell-run',
+      'neuralis/platform-config', 'neuralis/session-secret',
     ]));
     // The zone module sorts AFTER the identity module: it moves the zones that one writes.
     const files = modules.map(({ file }) => file);
@@ -326,9 +338,39 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
       { id: 'package-identity-v2', kind: 'neuralis/project', to: 2 },
       { id: 'source-device-v1', kind: 'neuralis/project', to: 3 },
       { id: 'two-word-features-v1', kind: 'neuralis/project', to: 4 },
+      { id: 'written-role-agents-v1', kind: 'neuralis/project', to: 5 },
     ]);
+    expect(files.indexOf('written-role-agents-v1.mts')).toBeGreaterThan(files.indexOf('two-word-features-v1.mts'));
+    // `agent-core/conversation-messages`: the plane rename (v2), then the stored refusal codes (v3).
+    expect(declared.filter((row) => row.kind === 'agent-core/conversation-messages')).toEqual([
+      { id: 'source-to-host-v1', kind: 'agent-core/conversation-messages', to: 2 },
+      { id: 'stored-device-codes-v1', kind: 'agent-core/conversation-messages', to: 3 },
+    ]);
+    expect(files.indexOf('stored-device-codes-v1.mts')).toBeGreaterThan(files.indexOf('source-to-host-v1.mts'));
     expect(files.indexOf('source-device-v1.mts')).toBeGreaterThan(files.indexOf('package-zone-v1.mts'));
     expect(files.indexOf('two-word-features-v1.mts')).toBeGreaterThan(files.indexOf('source-device-v1.mts'));
+    // `brain-core/source-config` is a chain too: package identity (v2, a PINNED 2 — never the live
+    // version, which the next step raises), then the root pair (v3), then the folder-kind merge (v4),
+    // in file order — the merge after `source-device-v1`, which stamps every host record's device first.
+    expect(declared.filter((row) => row.kind === 'brain-core/source-config')).toEqual([
+      { id: 'package-identity-v2', kind: 'brain-core/source-config', to: 2 },
+      { id: 'source-root-pair-v1', kind: 'brain-core/source-config', to: 3 },
+      { id: 'source-to-folder-v1', kind: 'brain-core/source-config', to: 4 },
+      { id: 'source-to-host-v1', kind: 'brain-core/source-config', to: 5 },
+      { id: 'source-uri-subject-v1', kind: 'brain-core/source-config', to: 6 },
+      { id: 'source-use-grants-v1', kind: 'brain-core/source-config', to: 7 },
+    ]);
+    expect(files.indexOf('source-uri-subject-v1.mts')).toBeGreaterThan(files.indexOf('source-to-host-v1.mts'));
+    expect(files.indexOf('source-use-grants-v1.mts')).toBeGreaterThan(files.indexOf('source-uri-subject-v1.mts'));
+    // `agent-core/agent`: package identity (a PINNED v2), then the private-agent record (v3).
+    expect(declared.filter((row) => row.kind === 'agent-core/agent')).toEqual([
+      { id: 'package-identity-v2', kind: 'agent-core/agent', to: 2 },
+      { id: 'source-use-grants-v1', kind: 'agent-core/agent', to: 3 },
+    ]);
+    expect(files.indexOf('source-use-grants-v1.mts')).toBeGreaterThan(files.indexOf('package-identity-v2.mts'));
+    expect(files.indexOf('source-root-pair-v1.mts')).toBeGreaterThan(files.indexOf('package-identity-v2.mts'));
+    expect(files.indexOf('source-to-folder-v1.mts')).toBeGreaterThan(files.indexOf('source-root-pair-v1.mts'));
+    expect(files.indexOf('source-to-folder-v1.mts')).toBeGreaterThan(files.indexOf('source-device-v1.mts'));
   });
 
   it('package-identity-v2 dry-runs a stopped install read-only', async () => {
@@ -379,13 +421,14 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     expect(JSON.parse(readFileSync(agentFile, 'utf8')).formatVersion).toBeUndefined();
 
     const logs: string[] = [];
-    const outcome = await runUpgrade({ apply: true, modulesDir: UPGRADES_DIR, roots, offline: async () => ({ offline: true }), log: (line) => logs.push(line) });
+    const outcome = await runUpgrade({ apply: true, modulesDir: UPGRADES_DIR, roots, offline: async () => ({ offline: true }), log: (line) => logs.push(line), appRuns: 'docker' });
     expect(outcome).toMatchObject({ applied: true });
     expect(outcome.checkpoint).toBeUndefined();
     expect(logs.join('\n')).toContain('(resuming)');
     const id = packageInstanceId({ originUri: 'packages://sample', projectId: 'main', scope: { kind: 'project' } });
     const agent = JSON.parse(readFileSync(agentFile, 'utf8'));
-    expect(agent.formatVersion).toBe(2);
+    // The whole chain ran: package identity stamped its v2, the private-agent step raised it to v3.
+    expect(agent.formatVersion).toBe(3);
     expect(agent.config.packages.overrides).toEqual({ [id]: { enabled: false } });
     expect(JSON.parse(readFileSync(join(roots.appRoot, 'projects', 'main.json'), 'utf8'))).toMatchObject({ formatVersion: 2, packageTrust: { [id]: 'trusted' } });
     const ledger = await readDataFormatLedger(roots.appRoot);
@@ -424,7 +467,7 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     writeFileSync(join(crashing, 'package-zone-v1.mts'), `import { createPackageZoneUpgrade } from ${JSON.stringify(join(UPGRADES_DIR, 'package-zone-v1.mts'))};\nexport default createPackageZoneUpgrade({ onPhase: (phase) => { if (phase === 'zone') throw new Error('stopped after the first zone'); } });\n`);
     void createPackageZoneUpgrade;
     const logs: string[] = [];
-    const run = (modulesDir: string) => runUpgrade({ apply: true, modulesDir, roots, offline: async () => ({ offline: true }), log: (line) => logs.push(line) });
+    const run = (modulesDir: string) => runUpgrade({ apply: true, modulesDir, roots, offline: async () => ({ offline: true }), log: (line) => logs.push(line), appRuns: 'docker' });
     await expect(run(crashing)).rejects.toThrow('stopped after the first zone');
     // Both pending on a pre-identity install: the zone dry run (which precedes every apply) leaves the
     // marker-less slug zone to package-identity-v2 — never an orphan, never a blocker.

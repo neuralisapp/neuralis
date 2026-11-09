@@ -228,3 +228,22 @@ describe('Undo', () => {
     }
   });
 });
+
+
+it('phone drafts block Randomize/Undo, and a manual phone Save invalidates old Undo without rearranging pins', () => {
+  const key = groupScopeKey('u1', 'p1');
+  const prefs = { order: ['pkg:app', 'agent:a1'], hidden: ['pkg:app'] };
+  useWorkspaceStore.setState({ phoneDockPrefsByScope: { [key]: prefs } });
+  expect(randomizeLayout(deps(seeded(15)))).toEqual({ ok: true });
+  expect(s().phoneDockPrefsByScope?.[key]).toEqual(prefs);
+  expect(undoLayout(deps(seeded(15)))).toEqual({ ok: true });
+  expect(s().phoneDockPrefsByScope?.[key]).toEqual(prefs);
+  randomizeLayout(deps(seeded(16)));
+  s().setDockEditing('phone', true);
+  expect(randomizeLayout(deps(seeded(17)))).toMatchObject({ ok: false, reason: 'editing' });
+  expect(undoLayout(deps(seeded(17)))).toMatchObject({ ok: false, reason: 'editing' });
+  s().setDockEditing('phone', false);
+  s().setDockPrefs({ dockId: 'phone', prefs: { ...prefs, hidden: [] } });
+  expect(undoLayout(deps(seeded(17)))).toMatchObject({ ok: false, reason: 'stale' });
+  expect(s().phoneDockPrefsByScope?.[key].hidden).toEqual([]);
+});

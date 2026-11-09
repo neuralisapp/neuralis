@@ -33,6 +33,7 @@ function fixtureTree(version = '0.1.0', localDep = LOCAL_DEP_LINE): string {
   write('pnpm-workspace.yaml', "packages:\n  - 'packages/*'\n  - 'neuralis'\n");
   write('package.json', manifest('neuralis', version));
   write('create-neuralis/package.json', manifest('create-neuralis', version));
+  write('apps/desktop/package.json', manifest('@neuralis/desktop', version));
   write(
     'neuralis/package.json',
     `{\n  "name": "neuralis",\n  "version": "${version}",\n  "dependencies": {\n${localDep}\n` +
@@ -42,6 +43,7 @@ function fixtureTree(version = '0.1.0', localDep = LOCAL_DEP_LINE): string {
       `\n    "zod": "^4.0.0"\n  }\n}\n`,
   );
   for (const name of ['package-system', 'brain-core', 'admin', 'cli']) write(`packages/${name}/package.json`, manifest(`@neuralis/${name}`, version));
+  write('packages/cli/.codex-plugin/plugin.json', `{\n  "name": "neuralis",\n  "version": "${version}",\n  "description": "Neuralis from Codex"\n}\n`);
   for (const file of ['neuralis/.claude-plugin/marketplace.json', 'neuralis/.agents/plugins/marketplace.json']) {
     write(file, `{ "plugins": [{ "name": "neuralis", "source": { "source": "npm", "package": "@neuralis/cli", "version": "${version}" } }] }\n`);
   }
@@ -62,11 +64,11 @@ function fixtureTree(version = '0.1.0', localDep = LOCAL_DEP_LINE): string {
   write('neuralis/.env.example', `# Webtop image\nNEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:${version}\n`);
   write('web/docs/app/(home)/widgets.tsx', `export const install = { command: 'docker pull neuralisapp/neuralis:${version}' };\n`);
   write('neuralis/README.md', `# Neuralis\n\nThe Neuralis ${version} beta is available.\n`);
-  // The first-install block names `latest` on that line; only the update block is a site.
-  const update = `NEURALIS_TAG=${version}   # the release in .env NEURALIS_IMAGE_TAG\n`;
+  // The first-install block names `latest` and an image-only update names no
+  // version (`neuralis update` reads the release line): neither is a site.
   const convert = `npx --yes create-neuralis@${version} convert .\nnpx neuralis update --apply\n`;
-  write('neuralis/skills/neuralis-operations/SKILL.md', `\`\`\`bash\nNEURALIS_TAG=latest   # or a release tag\n\`\`\`\n\n\`\`\`bash\n${update}\`\`\`\n\n\`\`\`bash\n${convert}\`\`\`\n`);
-  write('web/docs/content/docs/enterprise/deployment.mdx', `\`\`\`bash\n${update}\`\`\`\n\n\`\`\`bash\n${convert}\`\`\`\n`);
+  write('neuralis/skills/neuralis-operations/SKILL.md', `\`\`\`bash\nNEURALIS_TAG=latest   # or a release tag\n\`\`\`\n\n\`\`\`bash\nneuralis update --apply\n\`\`\`\n\n\`\`\`bash\n${convert}\`\`\`\n`);
+  write('web/docs/content/docs/getting-started/updating.mdx', `\`\`\`bash\nneuralis update --apply\n\`\`\`\n\n\`\`\`bash\nNEURALIS_VERSION=${version}\n\`\`\`\n\n\`\`\`bash\n${convert}\`\`\`\n`);
   return root;
 }
 
@@ -88,7 +90,7 @@ describe('release:version --check', () => {
     const root = fixtureTree();
     const result = run('--check', '--root', root);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('27 site(s) coherent');
+    expect(result.stdout).toContain('28 site(s) coherent');
     expect(result.stdout).toContain('neuralis/README.md:3');
   });
 
@@ -131,7 +133,7 @@ describe('release:version <semver>', () => {
     const before = new Map(['neuralis/package.json', 'packages/agent-core/package.json', 'neuralis/scripts/setup.mts', 'neuralis/scripts/rebuild.mts', 'neuralis/README.md', 'neuralis/.env.example', 'web/docs/app/(home)/widgets.tsx', 'neuralis/skills/neuralis-operations/SKILL.md'].map((f) => [f, read(root, f)]));
     const { written, problems } = bumpVersion(root, '0.2.0-rc.1');
     expect(problems).toEqual([]);
-    expect(written).toHaveLength(17); // 9 manifests + 2 marketplaces + config.ts + setup.mts + .env.example + widgets.tsx + 2 pages (update + convert blocks); rebuild.mts is derived
+    expect(written).toHaveLength(19); // 9 manifests + the desktop app's + 2 marketplaces + the Codex plugin manifest + config.ts + setup.mts + .env.example + widgets.tsx + 2 pages (convert blocks; the updating page's clone target); rebuild.mts is derived
     expect(checkCoherence(root)).toMatchObject({ version: '0.2.0-rc.1', drift: [] });
     // Exactly the version literals moved: the `file:` line, the nested key, the
     // derived site and the prose are byte-identical once the old version is mapped.

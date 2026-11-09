@@ -50,7 +50,7 @@ const PAIRS = [
   {
     module: 'packages/agent-core/hooks/resolvePackageHooks.ts',
     sentinel: '[hooks] Callback not found',
-    anchor: '@neuralis/agent-core:firstPartyHookResolver',
+    anchor: '@neuralis/agent-core:nativeHookResolver',
   },
   {
     module: 'packages/agent-core/src/shell/ShellProcessRegistry.ts',

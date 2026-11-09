@@ -10,8 +10,9 @@ import { getSessionUser } from '../auth/session';
 import { resolveRequestProjectId } from '../auth/requestProject';
 
 /**
- * The caller of a notification route: the cookie user as an ACTIVE MEMBER of
- * the `X-Project-Id` project, through the ONE member chain — or the refusal.
+ * The caller of a notification route (and of `GET /api/presence`, the same
+ * cookie-only shape): the cookie user as an ACTIVE MEMBER of the
+ * `X-Project-Id` project, through the ONE member chain — or the refusal.
  */
 export async function resolveNotificationReader(
   req: Request,

@@ -10,8 +10,9 @@
  * tracked product file — same family as .env and platform.json. The generator
  * emits CONCRETE values (UID/GID, ports, URLs) instead of ${VAR:-default}
  * interpolations; the .env values are setup INPUTS, baked in at generation
- * time. The deliberate interpolations are NEXTAUTH_SECRET and QDRANT_API_KEY,
- * which must stay in .env (the compose file must never carry a secret), and —
+ * time. The deliberate interpolation is QDRANT_API_KEY, which must stay in
+ * .env (the compose file must never carry a secret; the session secret is a
+ * file in the bound data home, never an env value), and —
  * on the monorepo channel only — the two cosmetic build args NEURALIS_VERSION /
  * NEURALIS_REVISION, which `pnpm neuralis:rebuild` sets per build (a value
  * baked here would name the commit setup ran on, not the one being built).
@@ -21,9 +22,13 @@
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { IMAGE_DATA_HOME } from '@neuralis/package-system/paths';
 import { feedPrivateScopeRecord, npmrcProblems, planLocalSources, sha256Text } from '../build/build-workspace.mjs';
 import { spell } from '../cli/spelling.mts';
+import { CLOUDFLARED_IMAGE, tunnelDir } from './cloudflaredVersion.mts';
+import { OLLAMA_DEFAULT_PORT, OLLAMA_IMAGE } from './ollamaVersion.mts';
 
 export type ComposeEmitInput = {
   /** Compose project name — prefixes volumes, networks and container names. */
@@ -38,7 +43,6 @@ export type ComposeEmitInput = {
    *  app — a SECOND published port = a distinct browser origin for the
    *  isolated-origin MCP Apps iframe; MCP1-C). */
   sandboxPort: number;
-  nextAuthUrl: string;
   brainInfraMode: 'local' | 'inmemory';
   qdrantMode: 'docker' | 'binary' | 'external' | 'skip';
   /** Host-side Qdrant URL (used for binary/external modes). */
@@ -69,13 +73,12 @@ export type ComposeEmitInput = {
   codexLoopbackPublish: boolean;
   /** Emit the compose-managed ollama service (user picked it during setup). */
   composeOllama: boolean;
+  /** Emit the `cloudflared` service (`.env NEURALIS_TUNNEL=cloudflare`, written by `neuralis tunnel on`). */
+  tunnel: boolean;
   /** Concrete host ~/.neuralis root — the two binds + NEURALIS_HOST_HOME. */
   neuralisHome: string;
   machine: {
-    desktopVariant: string;
     image: string;
-    containerScope: string;
-    idleMinutes: number;
     screen: string;
     sidecarPort: number;
     cdpPort: number;
@@ -182,13 +185,6 @@ export function resolveBuildInputs(params: {
   };
 }
 
-/**
- * Pinned ollama image for the optional compose-managed service (never `latest`):
- * tag + manifest-list digest, so a moved tag cannot change what a regenerated
- * compose pulls. Refresh: `docker buildx imagetools inspect ollama/ollama:<tag>`.
- */
-export const OLLAMA_IMAGE =
-  'ollama/ollama:0.35.0@sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01';
 /**
  * The community-edition image at one exact tag. The org segment is `neuralisapp` —
  * OUR Docker Hub namespace. Never emit a bare `neuralis/…` form here: that
@@ -336,6 +332,179 @@ function buildInputLines(build: BuildInputs): string[] {
   return lines;
 }
 
+/**
+ * The `qdrant` service of a generated compose file: the recorded image,
+ * loopback-published on `port`, the named `qdrant-data` volume (never a bind
+ * mount), its own network, the key interpolated from `.env`. The full stack
+ * (`buildComposeContent`) and the desktop app's own Qdrant
+ * (`buildDesktopCompanionCompose`) both emit it.
+ */
+export function qdrantServiceLines(q: { image: string; port: number; dashboard: boolean }): string[] {
+  const lines: string[] = [
+    '  # ── Qdrant (Vector DB — the core knowledge store) ────────────',
+    '  # The image is the version the storage of THIS install is on, digest-',
+    '  # pinned (recorded in <NEURALIS_HOME>/qdrant-version.json). Qdrant',
+    '  # storage is forward-only and upgrades one minor at a time, so never',
+    '  # edit this line: `neuralis qdrant-upgrade` walks every minor with',
+    '  # a cold backup and a rollback, then regenerates this file.',
+    '  # Recovery is that backup, never `down -v` (that deletes the',
+    '  # qdrant-data volume and every embedding with it — re-embedding is the',
+    '  # only way back, and it costs real provider spend).',
+    '  qdrant:',
+    `    image: ${q.image}`,
+    '    ports:',
+    `      - "127.0.0.1:${q.port}:6333"`,
+    '    volumes:',
+    '      - qdrant-data:/qdrant/storage',
+    '      # Snapshots outside the container layer, so one survives a recreate.',
+    '      - qdrant-snapshots:/qdrant/snapshots',
+    '    # Own network only: the app reaches Qdrant over the qdrant network;',
+    '    # webtop/sidecar containers (on the default network) cannot.',
+    '    networks:',
+    '      - qdrant',
+    '    environment:',
+    '      # Keep Qdrant own INFO, but silence the per-request actix access-log',
+    '      # spam (every upsert/scroll/delete logged identically). The meaningful,',
+    '      # uri-aware op log lives host-side (BRAIN_VECTOR_LOG_CONSOLE).',
+    '      - QDRANT__LOG_LEVEL=info,actix_web::middleware::logger=warn',
+    '      # Server-side API key: EVERY request must carry it (only /healthz,',
+    '      # /readyz, /livez, / and the dashboard statics are exempt upstream).',
+    '      # The value stays in .env — the compose file never carries a secret.',
+    '      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Run neuralis setup (the key lives in .env)}',
+    '      # On-prem: no phone-home. Qdrant reports anonymous usage upstream',
+    '      # unless told not to.',
+    '      - QDRANT__TELEMETRY_DISABLED=true',
+  ];
+  if (!q.dashboard) {
+    lines.push(
+      '      # Operator switch: .env QDRANT_DASHBOARD=off disables the static',
+      '      # web UI entirely (the API is unaffected).',
+      '      - QDRANT__SERVICE__ENABLE_STATIC_CONTENT=false',
+    );
+  }
+  lines.push(
+    '    healthcheck:',
+    `      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]`,
+    '      interval: 10s',
+    '      timeout: 5s',
+    '      retries: 5',
+    '      start_period: 15s',
+    '    logging:',
+    '      driver: json-file',
+    '      options:',
+    '        max-size: "10m"',
+    '        max-file: "3"',
+    '    restart: unless-stopped',
+    '    labels:',
+    '      neuralis.kind: "vectorstore"',
+  );
+  return lines;
+}
+
+/**
+ * The `ollama` service of a generated compose file: the pinned image,
+ * published on the HOST's loopback only (Ollama has no authentication, so a
+ * LAN switch or a tunnel never moves it), its models in the named
+ * `ollama-data` volume. The full stack (`buildComposeContent`, reached from the
+ * app at `http://ollama:11434`) and the desktop app's own companions
+ * (`buildDesktopCompanionCompose`, on `hostPort`) both emit it.
+ */
+export function ollamaServiceLines(hostPort: number): string[] {
+  return [
+    '  # ── Ollama (local embeddings / local LLM) — loopback only, no auth ──',
+    '  ollama:',
+    `    image: ${OLLAMA_IMAGE}`,
+    '    ports:',
+    `      - "127.0.0.1:${hostPort}:11434"`,
+    '    volumes:',
+    '      - ollama-data:/root/.ollama',
+    '    environment:',
+    '      - OLLAMA_MAX_LOADED_MODELS=1',
+    '      - OLLAMA_KEEP_ALIVE=5m',
+    '    # Soft limit: guaranteed 2g, may grow while the host has free memory;',
+    '    # hard cap at 6g so a large model can never starve the rest of the VM.',
+    '    mem_reservation: 2g',
+    '    mem_limit: 6g',
+    '    restart: unless-stopped',
+    '    labels:',
+    '      neuralis.kind: "embeddings"',
+  ];
+}
+
+/**
+ * The desktop app's own companions (`setup --native`): its Qdrant
+ * (`QDRANT_MODE=docker` — the same `qdrant` service and named volumes as the
+ * full stack) and/or its Ollama (`OLLAMA_MODE=docker`), no app service. It is
+ * `docker-compose.yml` beside the native `.env` in `<home>/app/config`, so
+ * Compose reads `QDRANT_API_KEY` from that `.env` and every operator command
+ * runs it the one way — in the folder, `-p <project>`, no `-f`. Its header is
+ * not the full stack's, so the folder never reads as an image-only install.
+ */
+export function buildDesktopCompanionCompose(
+  input: { project: string; qdrant: { image: string; port: number } | null; ollama: { port: number } | null },
+  stamp: { date: string; version: string },
+): string {
+  if (!input.qdrant && !input.ollama) throw new Error('the desktop app\'s compose file needs at least one companion');
+  const volumes = [
+    ...(input.qdrant ? ['  qdrant-data:', '    driver: local', '  qdrant-snapshots:', '    driver: local'] : []),
+    ...(input.ollama ? ['  ollama-data:', '    driver: local'] : []),
+  ];
+  return [
+    `# The desktop app's companions — written by neuralis setup --native (${stamp.date}, neuralis ${stamp.version}); do not hand-edit.`,
+    '# `neuralis up` starts them and stops them again, `neuralis backup` copies the Qdrant volume,',
+    '# `neuralis qdrant-upgrade` moves Qdrant to a newer version and rewrites this file. The key lives in .env beside it.',
+    `name: ${input.project}`,
+    '',
+    'services:',
+    ...(input.qdrant ? qdrantServiceLines({ image: input.qdrant.image, port: input.qdrant.port, dashboard: true }) : []),
+    ...(input.qdrant && input.ollama ? [''] : []),
+    ...(input.ollama ? ollamaServiceLines(input.ollama.port) : []),
+    '',
+    ...(input.qdrant ? ['networks:', '  qdrant:', '    driver: bridge', ''] : []),
+    'volumes:',
+    ...volumes,
+    '',
+  ].join('\n');
+}
+
+/** Write `<configDir>/docker-compose.yml` of the desktop app's own companions — the one writer setup and `qdrant-upgrade` share. */
+export async function writeDesktopCompanionCompose(
+  configDir: string,
+  input: { project: string; qdrant: { image: string; port: number } | null; ollama: { port: number } | null },
+  stamp: { date: string; version: string },
+): Promise<void> {
+  const path = join(configDir, 'docker-compose.yml');
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, buildDesktopCompanionCompose(input, stamp), { encoding: 'utf-8', mode: 0o600 });
+  await rename(tmp, path);
+}
+
+/**
+ * The `cloudflared` service of a Docker install with a tunnel (`neuralis tunnel
+ * on`, `.env NEURALIS_TUNNEL=cloudflare`): the pinned image in the APP's network
+ * namespace (`network_mode: service:neuralis`), so it dials the app on
+ * `127.0.0.1` exactly like the desktop app's own connector — one loopback rule
+ * for both (a forwarding header takes the "this machine" verdict away). Its
+ * folder in the data home (certificate, credentials, `config.yml`) is mounted
+ * read-only; nothing in it is a `.env` value.
+ */
+export function cloudflaredServiceLines(tunnelDirOnHost: string): string[] {
+  return [
+    '  # ── Cloudflare tunnel (`neuralis tunnel on`) — reachability, never identity ──',
+    '  cloudflared:',
+    `    image: ${CLOUDFLARED_IMAGE}`,
+    '    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]',
+    '    network_mode: "service:neuralis"',
+    '    volumes:',
+    `      - ${JSON.stringify(`${tunnelDirOnHost}:/etc/cloudflared:ro`)}`,
+    '    depends_on:',
+    '      - neuralis',
+    '    restart: unless-stopped',
+    '    labels:',
+    '      neuralis.kind: "tunnel"',
+  ];
+}
+
 export function buildComposeContent(input: ComposeEmitInput, stamp: { date: string; version: string }): string {
   const m = input.machine;
   const lines: string[] = [
@@ -343,8 +512,8 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '# Re-run setup (or `neuralis setup --compose-only`) to regenerate after',
     '# changing .env or topology. Values are emitted concrete on purpose: this file',
     '# is machine-specific and gitignored; .env holds the setup inputs. The kept',
-    '# interpolations are NEXTAUTH_SECRET and QDRANT_API_KEY — both secrets live in',
-    '# .env, never here — and the build args `neuralis rebuild` sets per build.',
+    '# interpolations are QDRANT_API_KEY — a secret that lives in .env, never',
+    '# here — and the build args `neuralis rebuild` sets per build.',
     '# Machine-local mounts + the --neuralis overlay live in docker-compose.override.yml',
     '# (written by `neuralis mount`, auto-merged by Compose — survives updates).',
     '',
@@ -430,12 +599,12 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '    extra_hosts:',
     '      - "host.docker.internal:host-gateway"',
     '    volumes:',
-    `      - ${input.neuralisHome}/app:/.neuralis/app`,
-    `      - ${input.neuralisHome}/projects:/.neuralis/projects`,
+    `      - ${input.neuralisHome}/app:${IMAGE_DATA_HOME}/app`,
+    `      - ${input.neuralisHome}/projects:${IMAGE_DATA_HOME}/projects`,
     '      # Checkpoints (boot-time format raises, `upgrade --apply`, a restore) are',
     '      # the way back one build: on the host, never in the writable layer a',
     '      # recreate or `run --rm` discards.',
-    `      - ${input.neuralisHome}/checkpoints:/.neuralis/checkpoints`,
+    `      - ${input.neuralisHome}/checkpoints:${IMAGE_DATA_HOME}/checkpoints`,
     '      # machine-core: host Docker socket so MachineSessionManager can spawn',
     '      # per-user Webtop containers. Remove to disable the machine widget.',
     '      - /var/run/docker.sock:/var/run/docker.sock',
@@ -462,12 +631,10 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     // listener binds 0.0.0.0 only when THIS file publishes 1455 — an `.env`
     // flipped to `on` without the regen must not open it to the compose network.
     `      - NEURALIS_CODEX_LOOPBACK=${input.codexLoopbackPublish ? 'on' : 'off'}`,
-    '      - NEURALIS_HOME=/.neuralis',
+    `      - NEURALIS_HOME=${IMAGE_DATA_HOME}`,
     '      # Host-pair root: lets LocalDiskConnector.resolveOsUri translate container',
     '      # paths back to host paths for vectors and UI.',
     `      - NEURALIS_HOST_HOME=${input.neuralisHome}`,
-    `      - NEXTAUTH_URL=${input.nextAuthUrl}`,
-    '      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?Run neuralis setup first}',
     `      - BRAIN_INFRA_MODE=${input.brainInfraMode}`,
     '      # 1 = colour-coded, uri-aware line per meaningful Qdrant vector op to',
     "      # this container log (writes + searches; scroll suppressed). 'all' adds",
@@ -491,10 +658,7 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
     '      # machine-core (LinuxServer Webtop + KasmVNC + Playwright-over-CDP)',
     `      - NEURALIS_MACHINE_DOCKER_SOCKET=${m.dockerSocket}`,
     `      - NEURALIS_MACHINE_IMAGE=${m.image}`,
-    `      - NEURALIS_MACHINE_CONTAINER_SCOPE=${m.containerScope}`,
-    `      - NEURALIS_MACHINE_IDLE_MINUTES=${m.idleMinutes}`,
     `      - NEURALIS_MACHINE_SCREEN=${m.screen}`,
-    `      - NEURALIS_MACHINE_DESKTOP_VARIANT=${m.desktopVariant}`,
     `      - NEURALIS_MACHINE_SIDECAR_PORT=${m.sidecarPort}`,
     `      - NEURALIS_MACHINE_CDP_PORT=${m.cdpPort}`,
     `      - NEURALIS_MACHINE_SECCOMP_UNCONFINED=${m.seccompUnconfined}`,
@@ -533,88 +697,16 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
 
   if (input.qdrantMode === 'docker') {
     if (!input.qdrantImage) throw new Error('docker-mode compose needs the recorded Qdrant image; none was resolved.');
-    lines.push(
-      '',
-      '  # ── Qdrant (Vector DB — the core knowledge store) ────────────',
-      '  # The image is the version the storage of THIS install is on, digest-',
-      '  # pinned (recorded in <NEURALIS_HOME>/qdrant-version.json). Qdrant',
-      '  # storage is forward-only and upgrades one minor at a time, so never',
-      '  # edit this line: `neuralis qdrant-upgrade` walks every minor with',
-      '  # a cold backup and a rollback, then regenerates this file.',
-      '  # Recovery is that backup, never `down -v` (that deletes the',
-      '  # qdrant-data volume and every embedding with it — re-embedding is the',
-      '  # only way back, and it costs real provider spend).',
-      '  qdrant:',
-      `    image: ${input.qdrantImage}`,
-      '    ports:',
-      `      - "127.0.0.1:${input.qdrantPort}:6333"`,
-      '    volumes:',
-      '      - qdrant-data:/qdrant/storage',
-      '      # Snapshots outside the container layer, so one survives a recreate.',
-      '      - qdrant-snapshots:/qdrant/snapshots',
-      '    # Own network only: the app reaches Qdrant over the qdrant network;',
-      '    # webtop/sidecar containers (on the default network) cannot.',
-      '    networks:',
-      '      - qdrant',
-      '    environment:',
-      '      # Keep Qdrant own INFO, but silence the per-request actix access-log',
-      '      # spam (every upsert/scroll/delete logged identically). The meaningful,',
-      '      # uri-aware op log lives host-side (BRAIN_VECTOR_LOG_CONSOLE).',
-      '      - QDRANT__LOG_LEVEL=info,actix_web::middleware::logger=warn',
-      '      # Server-side API key: EVERY request must carry it (only /healthz,',
-      '      # /readyz, /livez, / and the dashboard statics are exempt upstream).',
-      '      # The value stays in .env — the compose file never carries a secret.',
-      '      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Run neuralis setup (the key lives in .env)}',
-      '      # On-prem: no phone-home. Qdrant reports anonymous usage upstream',
-      '      # unless told not to.',
-      '      - QDRANT__TELEMETRY_DISABLED=true',
-    );
-    if (!input.qdrantDashboard) {
-      lines.push(
-        '      # Operator switch: .env QDRANT_DASHBOARD=off disables the static',
-        '      # web UI entirely (the API is unaffected).',
-        '      - QDRANT__SERVICE__ENABLE_STATIC_CONTENT=false',
-      );
-    }
-    lines.push(
-      '    healthcheck:',
-      `      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]`,
-      '      interval: 10s',
-      '      timeout: 5s',
-      '      retries: 5',
-      '      start_period: 15s',
-      '    logging:',
-      '      driver: json-file',
-      '      options:',
-      '        max-size: "10m"',
-      '        max-file: "3"',
-      '    restart: unless-stopped',
-      '    labels:',
-      '      neuralis.kind: "vectorstore"',
-    );
+    lines.push('', ...qdrantServiceLines({ image: input.qdrantImage, port: input.qdrantPort, dashboard: input.qdrantDashboard }));
   }
 
   if (input.composeOllama) {
-    lines.push(
-      '',
-      '  # ── Ollama (compose-managed local embeddings / local LLM) ────',
-      '  # No networks: key — ollama joins the DEFAULT network (never the qdrant',
-      '  # one; it has no business with the vector store).',
-      '  ollama:',
-      `    image: ${OLLAMA_IMAGE}`,
-      '    ports:',
-      '      - "11434:11434"',
-      '    volumes:',
-      '      - ollama-data:/root/.ollama',
-      '    # Soft limit: guaranteed 2g, may grow while the host has free memory;',
-      '    # hard cap at 6g so a large model can never starve the rest of the VM.',
-      '    mem_reservation: 2g',
-      '    mem_limit: 6g',
-      '    restart: unless-stopped',
-      '    labels:',
-      '      neuralis.kind: "embeddings"',
-    );
+    // No networks: key — ollama joins the DEFAULT network (never the qdrant one;
+    // it has no business with the vector store).
+    lines.push('', ...ollamaServiceLines(OLLAMA_DEFAULT_PORT));
   }
+
+  if (input.tunnel) lines.push('', ...cloudflaredServiceLines(tunnelDir(input.neuralisHome)));
 
   if (input.qdrantMode === 'docker') {
     lines.push(

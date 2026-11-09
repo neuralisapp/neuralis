@@ -52,7 +52,9 @@ export default function AuthPage() {
     // `result.url`: with `redirect: false` next-auth returns the server's
     // resolution of the posted callbackUrl against NEXTAUTH_URL, which on any
     // non-localhost deployment is the localhost bounce this fix exists to stop.
-    if (target.kind === 'absolute') {
+    // A companion path forwarded from this origin (the OAuth consent) is not a
+    // page of this app: the client router must not fetch it as one.
+    if (target.kind === 'absolute' || target.url.startsWith('/oauth/')) {
       window.location.assign(target.url);
       return;
     }

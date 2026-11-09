@@ -12,8 +12,6 @@
  * runtime.
  */
 
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { loadRuntimeProvider, resolveServiceProviders } from '@neuralis/package-system';
 import { collectDeclaredConfigSettings } from '@neuralis/package-system/access';
 import type {
@@ -23,7 +21,6 @@ import type {
   CredentialScope,
   GitOAuthAppConfigPort,
   GitOAuthProvider,
-  PackageDefinition,
   PackageDiagnosticsPort,
   RuntimeInstance,
 } from '@neuralis/package-system/contracts';
@@ -39,6 +36,7 @@ import { createSelfScopeCredentialWriter } from './selfScopeCredentialWriter';
 import { createMemberCredentialWriter } from './memberCredentialWriter';
 import { getUserById, hasAnyUsers } from '../store/UserStore';
 import { getProjectById, listAllProjects, listProjectsForUser, updateProject } from '../store/ProjectStore';
+import { listPresence, touchClient } from '../presence/clientRegistry';
 import { isPrincipalActive, resolveMemberSession } from '../auth/memberSession';
 import { canGovernUserLive } from '../projects/access';
 import { getEnv } from '../config/env';
@@ -47,12 +45,20 @@ import { listAllActivatedPackages } from '../packages/projectPackages';
 import { getPackageRuntimeManager } from '../packages/PackageRuntimeManager';
 import { readBuiltinRemovalProof, reconcileBuiltinGrantChanges } from '../packages/reconcileBuiltinGrantChanges';
 import { peekUiModuleRefusals } from '../packages/packageUiModules';
-import { clearProjectPackageCaches, rescanProjectPackages } from '../packages/rescanProjectPackages';
+import {
+  buildProjectPackage,
+  clearProjectPackageCaches,
+  listProjectPackageRows,
+  rescanProjectPackages,
+  setProjectPackageAccessFeature,
+  setProjectPackageTrust,
+} from '../packages/rescanProjectPackages';
 import { canAccessScope, hasFeature } from '@neuralis/package-system';
 import { setOutboundAllowedHostsSource } from '@neuralis/package-system/web-common';
 import { setKernelTunablesSource } from '@neuralis/package-system/contracts';
-import { BUILTIN_PACKAGE_IDS, HOST_ROOT, resolveBuiltinRoot, assignBuiltinTrust } from './builtinSlots';
-import { BUILD_VALIDATE_RECORD, admitBuiltins, readBuildRefusals } from './buildRefusals';
+import { BUILTIN_PACKAGE_IDS, BUILTIN_ROOTS, HOST_ROOT, RUNTIME_INSTALL_DISCOVERY, readBuiltinManifests } from './builtinSlots';
+import { BUILD_VALIDATE_RECORD, DISABLED_BUILTINS_KEY, admitBuiltins, optionalBuiltinIds, readBuildRefusals, readDisabledBuiltins } from './buildRefusals';
+import { createHostPlatformPackages, prepareRuntimePackages } from '../packages/install/hostPlatformPackages';
 import { initHostIdentity } from './HostIdentity';
 import { claimAllDeclaredDataFormats, dataFormatRefusalCode, type DataFormatRefusalCode } from '../store/dataFormats';
 import { startNotificationMaterializer } from '../notifications/materializer';
@@ -62,8 +68,6 @@ import { startNotificationMaterializer } from '../notifications/materializer';
 // ---------------------------------------------------------------------------
 
 export { BUILTIN_PACKAGE_IDS };
-
-const builtinRoots = new Map([...BUILTIN_PACKAGE_IDS].map(id => [id, resolveBuiltinRoot(id)]));
 
 /** Caller identity slice the per-stream scope-hidden resolver gates on. */
 export interface ScopeHiddenCaller {
@@ -117,6 +121,7 @@ export async function resolveScopeHiddenIds(
       owner,
       { userId: input.userId, agentId: input.agentId, role: input.role, grantedFeatures },
       'read',
+      mgr.getPackageOwnerOrigin(input.projectId, id),
     );
     if (!ok) hidden.add(id);
   }
@@ -251,28 +256,6 @@ export function peekRuntime(): RuntimeInstance | null {
   return getState().instance;
 }
 
-/**
- * Every builtin as its RAW manifest (`package.json#neuralis`), id set from the
- * discovered dep name and trust stamped by SOURCE (`assignBuiltinTrust`). The
- * runtime provider resolves each one's files from its root; the host needs the
- * manifest alone — `provides`, `configSettings[]` and `credentials[]` are
- * manifest fields. An unreadable manifest fails the boot: every id here already
- * passed discovery, which read the same file.
- */
-async function readBuiltinManifests(): Promise<PackageDefinition[]> {
-  return Promise.all(
-    [...BUILTIN_PACKAGE_IDS].map(async (id) => {
-      const raw = await readFile(join(builtinRoots.get(id)!, 'package.json'), 'utf-8');
-      const manifest = (JSON.parse(raw) as { neuralis?: Partial<PackageDefinition> }).neuralis;
-      if (!manifest) throw new Error(`builtin "${id}" has no neuralis manifest block`);
-      // A builtin is NAMED by its package id (`@neuralis/admin`): every surface
-      // that lists packages shows builtins under one uniform name. The manifest
-      // `name` is a label for project/installed packages only.
-      return assignBuiltinTrust({ ...manifest, id, name: id } as PackageDefinition);
-    }),
-  );
-}
-
 export async function getRuntime(): Promise<RuntimeInstance> {
   const state = getState();
   if (state.instance) return state.instance;
@@ -308,7 +291,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     // passed the discovery exclusions in builtinSlots (reference-only /
     // no-neuralis-block packages never reach this line).
     const builtinManifests = await readBuiltinManifests();
-    const packageRoots = new Map(builtinRoots);
+    const packageRoots = new Map(BUILTIN_ROOTS);
 
     // The image build's record leaves out every builtin it refused (invalid, or
     // in conflict with another over a contract or a config key) BEFORE the
@@ -322,16 +305,24 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     }
     const { getPlatformConfigStore } = await import('../store/PlatformConfigStore');
     const platformConfig = getPlatformConfigStore(env.appRoot);
+    // The operator's turned-off builtins: the HOST reader is the floor (only a
+    // builtin the platform runs without; anything else is named and ignored).
+    const turnedOff = readDisabledBuiltins(platformConfig.get(DISABLED_BUILTINS_KEY), optionalBuiltinIds(builtinManifests));
+    if (turnedOff.malformed) logger.warn('disabledBuiltinPackages is no list of package names — every builtin is loaded', { key: DISABLED_BUILTINS_KEY });
+    if (turnedOff.ignored.length > 0) logger.warn('disabledBuiltinPackages names packages that cannot be turned off — ignored', { ignored: turnedOff.ignored });
     const { admitted: builtinPackages, refused: refusedBuiltins, keyCollisions } = admitBuiltins(
       builtinManifests,
       buildRecord.kind === 'record' ? buildRecord.refused : [],
       (key) => platformConfig.getRegisteredSetting(key)?.declaredBy,
+      turnedOff.disabled,
+      RUNTIME_INSTALL_DISCOVERY.installed,
     );
     for (const collision of keyCollisions) {
       logger.error('builtin package refused — it declares a config key another declarer owns', { ...collision });
     }
     for (const refusal of refusedBuiltins) {
-      logger.error('builtin package refused — the platform runs without it', { ...refusal });
+      if (refusal.reason === 'disabled') logger.info('builtin package turned off (disabledBuiltinPackages) — the platform runs without it', { ...refusal });
+      else logger.error('builtin package refused — the platform runs without it', { ...refusal });
     }
 
     // Contract providers by id, over the builtin set: exactly one `runtime`
@@ -341,7 +332,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
 
     // Package-declared config registration (tunable-tanager Inc 1) — BEFORE
     // `boot`, so a package `init` can read `ctx.config` on its first line.
-    // First-party-only (the collector trust-gates); boot-frozen (rescans do not
+    // Native-only (the collector trust-gates); boot-frozen (rescans do not
     // re-register); a collision between two packages (no build record) throws
     // loud here at boot.
     for (const { declarer, settings } of collectDeclaredConfigSettings(builtinPackages, (skipped) =>
@@ -358,7 +349,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     setOutboundAllowedHostsSource(() => String(platformConfig.get('webToolsAllowedHosts') ?? ''));
 
     // Kernel tunables source (tunable-tanager Inc 5) — TYPED named fields
-    // (the kernel never learns platform key names); a first-party package
+    // (the kernel never learns platform key names); a native package
     // DECLARES the backing keys, the kernel reads them via this source with
     // hardcoded fallbacks (null/throwing source ⇒ defaults). Wrapped per-field
     // so one unregistered key can never break the whole tunables read.
@@ -424,9 +415,9 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     // package cooperation.
     //
     // LLM provider keys are EXCLUDED in v1 (owner decision): the exclusion set
-    // is DERIVED from FIRST-PARTY manifest `credentials[]` declarations with
+    // is DERIVED from NATIVE manifest `credentials[]` declarations with
     // `category === 'llm'` — never hand-typed, and never trusted from a
-    // non-first-party manifest (`category` is display metadata any package can
+    // non-native manifest (`category` is display metadata any package can
     // set; an untrusted drop must not exempt an id from counting).
     // The gate itself must never hard-break a resolve: store errors read as
     // zero usage and a failed record is logged, not thrown.
@@ -444,7 +435,7 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     // platform-wide.
     const llmExcludedIds = deriveLlmExcludedIds(builtinPackages);
     if (llmExcludedIds.size === 0) {
-      // Structurally impossible on a healthy first-party set — an empty set
+      // Structurally impossible on a healthy native set — an empty set
       // re-opens D-1: LLM keys become countable AND deniable, and an exhausted
       // rule on a provider key kills chat platform-wide. Loud, not silent.
       logger.error('[credential-use] derived LLM exclusion set is EMPTY — provider keys are NOT exempt from use rules');
@@ -474,7 +465,8 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     // Agent-governance port (agent-governance Increment A): the ONE gate body
     // each for invite / project-create / agent-assign / role-map write, shared
     // by the host cookie routes and the admin package's members-invite /
-    // projects-create / agents-assign / config-roles routes. The port shape is
+    // projects-create / agents-assign / config-roles routes, plus the three
+    // invite-LINK verbs (admin `invite-links`, no cookie twin). The port shape is
     // SCALAR caller identity only (callerUserId, projectId) — the services
     // re-derive the floor from the LIVE record; never add role/grants/scope
     // params here. Built BEFORE `boot` so every `init()` sees it; the admin
@@ -485,12 +477,16 @@ export async function getRuntime(): Promise<RuntimeInstance> {
     const { createProjectForUser } = await import('../admin/createProjectForUser');
     const { assignAgentToUser, pruneAgentOwnership } = await import('../admin/assignAgentToUser');
     const { patchProjectRoles } = await import('../admin/patchProjectRoles');
+    const { issueInviteLink, listInviteLinks, revokeInviteLink } = await import('../admin/inviteLinks');
     const governance = {
       inviteUser: inviteUserToProject,
       createProject: createProjectForUser,
       assignAgent: assignAgentToUser,
       patchRoles: patchProjectRoles,
-      // EXACTLY four keys — every one a gated CALLER ACT that re-derives its
+      issueInviteLink,
+      listInviteLinks,
+      revokeInviteLink,
+      // EXACTLY seven keys — every one a gated CALLER ACT that re-derives its
       // own floor from the live record. `pruneAgentOwnership` is deliberately
       // NOT here: it is a consequence of an already-passed gate and carries no
       // floor of its own, so on this port it would be an unguarded ownership
@@ -639,8 +635,8 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       },
     };
 
-    // The host ports every host-assigned first-party `ctx.hostPorts` carries
-    // (the kernel hands them to first-party contexts only).
+    // The host ports every host-assigned native `ctx.hostPorts` carries
+    // (the kernel hands them to native contexts only).
     const hostPorts: HostPorts = {
       members: { getUserById, getProjectById, listProjectsForUser, isPrincipalActive, canGovernUser: canGovernUserLive },
       audit: onAuditEvent,
@@ -652,13 +648,17 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       // is the in-process fire choke point.
       sessionResolver: { resolveProjectMember: resolveMemberSession },
       scopeHidden: scopeHiddenResolver,
-      // quickened-vane (HEALTH1) — host-runtime package mutations the admin
-      // dashboard "Rescan packages"/"Clear cache" buttons + the
-      // `manage-cache-and-rescan` skill reach. Each re-derives
-      // `canManagePackages` FRESH inside the shared host fn.
+      // Project-package governance the admin routes reach (the dashboard
+      // Rescan/Clear-cache buttons, the project Packages list, trust, build and
+      // the access feature — for the CLI and an agent's session too). Each
+      // re-derives `canManagePackages` FRESH inside the shared host fn.
       packageMaintenance: {
         rescanProject: (userId, projectId) => rescanProjectPackages(userId, projectId),
         clearRuntimeCaches: (userId, projectId) => clearProjectPackageCaches(userId, projectId),
+        listProjectPackages: (userId, projectId) => listProjectPackageRows(userId, projectId),
+        setPackageTrust: (userId, projectId, packageId, trust, via) => setProjectPackageTrust(userId, projectId, packageId, trust, via),
+        buildPackage: (userId, projectId, packageId, via) => buildProjectPackage(userId, projectId, packageId, via),
+        setPackageAccessFeature: (userId, projectId, packageId, featureId, via) => setProjectPackageAccessFeature(userId, projectId, packageId, featureId, via),
       },
       // Consequences of an agent create/delete whose `canAccessAgent` gate has
       // already passed. `agentOwnership` lives on the PROJECT record, which no
@@ -711,8 +711,25 @@ export async function getRuntime(): Promise<RuntimeInstance> {
       packageDiagnostics: getPackageDiagnosticsPort(),
       governance,
       platformConfig,
+      // Who is online: the in-memory client registry the `/api/events` hub
+      // writes; the token verifier touches it per bearer request, the admin
+      // presence route reads it through the ONE kernel predicate.
+      clientActivity: { touch: touchClient },
+      platformPackages: createHostPlatformPackages({
+        appRoot: env.appRoot, builtinManifests, refusedBuiltins, packageDiagnostics: getPackageDiagnosticsPort(), configGet: (key) => platformConfig.get(key),
+        configKeyOwner: (key) => platformConfig.getRegisteredSetting(key)?.declaredBy, runtimeProviderRoot: packageRoots.get(runtimeProviderId)!, audit: onAuditEvent,
+      }),
+      presence: {
+        list: async (viewer, query) => {
+          const project = await getProjectById(viewer.projectId);
+          if (!project) return [];
+          return listPresence(viewer, { ...query, memberIds: new Set(Object.keys(project.members)) });
+        },
+      },
     };
 
+    // The runtime install record's peer links, before any package is imported.
+    prepareRuntimePackages(env.appRoot, logger);
     // Register raw manifest keys before importing any provider module.
     const runtimeProvider = await loadRuntimeProvider(packageRoots.get(runtimeProviderId)!);
     const instance = await runtimeProvider.boot({

@@ -31,7 +31,14 @@ describe('AuditAction union — SF-AC2-hooks additions', () => {
       'device.revoke',
       'device.rename',
       'device.purge',
+      // A package installed into the host while it runs: the request flow.
+      'package.update',
+      'package.request',
+      'package.request_dismissed',
+      'package.restart',
+      // A source config write through the admin route (agent attach/detach).
+      'source.config.write',
     ];
-    expect(actions).toHaveLength(13);
+    expect(actions).toHaveLength(18);
   });
 });

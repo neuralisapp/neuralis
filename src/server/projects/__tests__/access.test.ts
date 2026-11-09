@@ -3,7 +3,6 @@ import { hasFeature } from '@neuralis/package-system/access';
 import {
   canManagePackages,
   canManageProjectRoles,
-  hasPlatformFeatureInAnyProject,
   hasProjectFeature,
   isOwnerStrengthOf,
   isOwnerStrengthOfAnyProject,
@@ -143,22 +142,6 @@ describe('project access helpers', () => {
     const p = projectWithMember('p1', 'someone-else', 'member');
     p.ownerId = u;
     expect(isOwnerStrengthOf(p, u)).toBe(false);
-  });
-
-  it('hasPlatformFeatureInAnyProject — the ONE hasFeature predicate, per project', () => {
-    const u = 'user-1';
-    const withFeature = projectWithMember('p1', u, 'ops');
-    withFeature.roles.ops!.grantedFeatures = ['platform.users'];
-    const without = projectWithMember('p2', u, 'ops');
-    without.roles.ops!.grantedFeatures = ['core.agents'];
-
-    expect(hasPlatformFeatureInAnyProject(u, [without], 'platform.users')).toBe(false);
-    expect(hasPlatformFeatureInAnyProject(u, [without, withFeature], 'platform.users')).toBe(true);
-    // Wildcard holders still pass (same predicate, same `'*'` arm).
-    expect(hasPlatformFeatureInAnyProject(u, [projectWithMember('p3', u, 'owner')], 'platform.users')).toBe(true);
-    // Non-member of every project ⇒ false.
-    expect(hasPlatformFeatureInAnyProject('nobody', [withFeature], 'platform.users')).toBe(false);
-    expect(hasPlatformFeatureInAnyProject(u, [], 'platform.users')).toBe(false);
   });
 
   // D-F — the declared range is a code FLOOR, enforced through the ONE kernel

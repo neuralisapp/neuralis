@@ -1,13 +1,13 @@
 /**
  * Drift-guard for every value the shipped authoring preflight
- * (`check-package.sh`) must keep in lockstep with the platform: the 2 MiB
+ * (`check-package.mjs`) must keep in lockstep with the platform: the 2 MiB
  * per-file asset floor, the session-free lane's per-scope 64-file / 8 MiB
  * budget, and the kernel's absolute-asset-url predicate.
  *
  * Each floor exists as TWO independent literals by necessity: the host route
  * constant (`packageAppAssetCsp.ts`) and the shipped authoring preflight's twin
- * (`check-package.sh`). The preflight
- * is a standalone shell/node script an author runs before the package ever
+ * (`check-package.mjs`). The preflight
+ * is a standalone node script an author runs before the package ever
  * reaches a host, so it cannot import TypeScript — the duplicate hardcode is
  * unavoidable, but the DIVERGENCE is not.
  *
@@ -40,7 +40,7 @@ const PREFLIGHT_SCRIPT = join(
   'skills',
   'create-package',
   'scripts',
-  'check-package.sh',
+  'check-package.mjs',
 );
 
 /**
@@ -56,7 +56,7 @@ function readPreflightNumber(name: string): number {
   const matches = [...source.matchAll(new RegExp(`^\\s*const\\s+${name}\\s*=\\s*(\\d+)\\s*;`, 'gm'))];
   expect(
     matches,
-    `check-package.sh must declare exactly one \`const ${name} = <number>;\``,
+    `check-package.mjs must declare exactly one \`const ${name} = <number>;\``,
   ).toHaveLength(1);
   return Number(matches[0][1]);
 }
@@ -78,7 +78,7 @@ function normalizePredicate(param: string, expression: string): string {
 function readPreflightAbsUrl(): string {
   const source = readFileSync(PREFLIGHT_SCRIPT, 'utf-8');
   const matches = [...source.matchAll(/^\s*const\s+isAbsUrl\s*=\s*\((\w+)\)\s*=>\s*(.+?);\s*$/gm)];
-  expect(matches, 'check-package.sh must declare exactly one `const isAbsUrl = (u) => …;`').toHaveLength(1);
+  expect(matches, 'check-package.mjs must declare exactly one `const isAbsUrl = (u) => …;`').toHaveLength(1);
   return normalizePredicate(matches[0][1], matches[0][2]);
 }
 

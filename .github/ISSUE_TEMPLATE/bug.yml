@@ -1,0 +1,68 @@
+name: Something did not work
+description: A bug or a confusing moment while using Neuralis — no code knowledge needed.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for telling us. Describe it the way you experienced it; you do not need to know which part of the code is involved.
+
+        **Never paste passwords, API keys, tokens or your `.env`.** Screenshots and logs can show them too: check before you post.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Neuralis?
+      options:
+        - Chat with an agent
+        - Agents, skills and workflows
+        - Files, sources and search
+        - Virtual desktop and browser
+        - Desktop app (Windows, Linux, macOS)
+        - Devices and connected computers
+        - Admin, users and permissions
+        - Packages and the package protocol
+        - The neuralis command line
+        - Installing or updating
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What were you trying to do?
+      placeholder: For example, I asked my agent to summarise a folder of PDFs.
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened instead?
+      description: The message you saw, what stayed empty or what took too long. A screenshot helps.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we see it too?
+      description: The steps in order, if you remember them.
+  - type: input
+    id: version
+    attributes:
+      label: Neuralis version
+      description: "`neuralis --version`, or `npx neuralis --version` in an npm install folder; with the Docker image, `NEURALIS_IMAGE_TAG` in the install folder's `.env`. The desktop app's tray says when a newer version is available."
+  - type: dropdown
+    id: channel
+    attributes:
+      label: How do you run Neuralis?
+      options:
+        - Desktop app
+        - Docker image
+        - npm (npm create neuralis)
+        - From the source repository
+        - Not sure
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: For example Windows 11, Ubuntu 24.04, macOS 15.

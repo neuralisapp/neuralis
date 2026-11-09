@@ -8,7 +8,7 @@ import { agentDisplayLabel } from '@neuralis/package-system/client';
 import { cn } from '@/lib/cn';
 import { newGroupId, useWorkspaceStore } from '../store/workspaceStore';
 import { useAgentsState, useDockEditing, usePresentation, useProjectGroups } from '../store/selectors';
-import type { DockPrefs, WorkspaceGroup } from '../store/types';
+import type { DockPrefs, DockPrefsId, WorkspaceGroup } from '../store/types';
 import { applyDockPrefs, draftFromItems, dropPlacement, extendDraft, moveDockKey, setDockKeyHidden, stepDockKey } from './dockOrder';
 import { DockBadge } from './DockBadge';
 import { popoverPosition } from './NotificationPopover';
@@ -27,10 +27,12 @@ import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
 import { DEFAULT_THEME } from '../theme/themes';
 import { DockScrollContainer } from './DockScrollContainer';
 import type { TransparencyLevel } from '../store/types';
-import { DockTransparencyProvider, dockCapsuleStyle, dockSurface, useDockTransparency, type DockSurfaceState } from './dockSurface';
+import { DockTransparencyProvider, dockNavigationSurface, dockCapsuleStyle, dockSurface, useDockTransparency, type DockSurfaceState } from './dockSurface';
 import { CONTROL_SURFACE, CONTROL_SURFACE_THEME_ID } from './widgetSurface';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
+
+export type DockItemPresentation = { iconSize?: number; logoOnly?: boolean; phoneNavigation?: TransparencyLevel };
 
 export type DockItem = {
   id: string;
@@ -66,18 +68,21 @@ export type DockItem = {
   section?: 'header' | 'main' | 'footer';
   /**
    * Item kind. 'separator' items render as a thin dividing line / gap
-   * between groups (e.g. between first-party and trusted package docks).
+   * between groups (e.g. between native and trusted package docks).
    * Default: 'item'.
    */
   kind?: 'item' | 'separator';
   /** Where the icon sits relative to the label. Default: 'left'. */
   iconAlign?: 'left' | 'right';
-  renderCustom?: () => ReactNode;
+  renderCustom?: (presentation?: DockItemPresentation) => ReactNode;
   /**
    * The arrangement key (`dockOrder.ts`). Present ⇒ the item can be moved and
    * hidden in edit mode; absent ⇒ FIXED (headers, Layout, Create agent).
    */
   prefKey?: string;
+  /** Preference owner carried by the live catalog projection. */
+  prefsId?: 'primary' | 'secondary';
+  phoneSection?: 'apps' | 'agents';
   /** Reordering stays inside one group (trust tier / own vs other agents). */
   group?: string;
   /** Hidden by the user's arrangement — rendered only in the edit-mode tray. */
@@ -214,13 +219,15 @@ function DockSeparator({ horizontal }: { horizontal: boolean }) {
 }
 
 export function DockItemButton({
-  item, hasLabels, pinned, horizontal, edge = 'left', chromeless = false,
+  item, hasLabels, pinned, horizontal, edge = 'left', chromeless = false, iconSize, logoOnly = false,
 }: {
   item: DockItem; hasLabels: boolean; pinned: boolean; horizontal: boolean;
   /** The dock's edge — the badge's popover opens away from it. */
   edge?: DockEdge;
   /** Edit mode: the item alone, without its broom or badge. */
   chromeless?: boolean;
+  iconSize?: number;
+  logoOnly?: boolean;
 }) {
   // Hook must run before any early return (rules of hooks). Custom/separator
   // items ignore it — their renderers (UserInfo/DockModeSwitch/AgentDockButton)
@@ -232,8 +239,9 @@ export function DockItemButton({
   useEffect(() => () => {
     if (singleClickTimer.current) clearTimeout(singleClickTimer.current);
   }, []);
+  const resolvedIconSize = iconSize ?? (item.phoneSection ? 32 : item.section === 'header' || item.section === 'footer' ? 28 : 26);
   if (item.kind === 'separator') return <DockSeparator horizontal={horizontal} />;
-  if (item.renderCustom) return <>{item.renderCustom()}</>;
+  if (item.renderCustom) return <>{item.renderCustom({ iconSize: resolvedIconSize, logoOnly })}</>;
 
   // Several windows of this app: the click asks which one (zero → open the
   // first, one → bring it forward, both through `onClick`).
@@ -276,14 +284,16 @@ export function DockItemButton({
       ref={anchorRef}
       type="button"
       onClick={handleClick}
+      aria-pressed={Boolean(item.active)}
       aria-haspopup={opensWindowChooser(item) ? 'dialog' : undefined}
       onDoubleClick={item.onDoubleClick ? handleDoubleClick : undefined}
       disabled={item.disabled}
       className={cn(
         'rounded-xl flex items-center transition shrink-0',
         iconRight ? 'flex-row-reverse' : '',
-        horizontal ? 'h-10 px-1' : 'w-full h-10',
-        surf.bg,
+        logoOnly ? 'h-14 w-14 justify-center' : horizontal ? 'h-10 px-1' : 'w-full h-10',
+        !logoOnly && surf.bg,
+        item.active && 'ring-1 ring-white/35',
         !horizontal && hasLabels ? 'px-0' : (!horizontal ? 'justify-center' : ''),
         pinned
           ? 'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/12'
@@ -296,7 +306,7 @@ export function DockItemButton({
         'flex items-center justify-center shrink-0',
         horizontal ? 'w-10 h-full' : 'w-12 h-full',
       )}>
-        <AppGlyph image={item.image} icon={item.icon} size={item.section === 'footer' ? 24 : 20} className={cn(item.section === 'footer' ? 'w-6 h-6' : 'w-5 h-5', surf.icon)} style={item.color ? { color: item.color } : undefined} />
+        <AppGlyph image={item.image} icon={item.icon} size={resolvedIconSize} className={cn(item.section === 'footer' ? 'w-6 h-6' : 'w-5 h-5', surf.icon)} style={{ ...(item.color ? { color: item.color } : {}), width: resolvedIconSize, height: resolvedIconSize }} />
       </div>
       {hasLabels ? (
         <div className={cn(
@@ -376,6 +386,7 @@ export function DockWindowChooser({ item, anchor, edge, onClose }: {
       <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={onClose} aria-hidden="true" />
       <div
         ref={panelRef}
+        data-launcher-popover=""
         role="dialog"
         aria-label={`${item.title} windows`}
         data-theme-id={CONTROL_SURFACE_THEME_ID}
@@ -568,36 +579,27 @@ export const SHEET_DISMISS_DRAG_PX = 80;
 export const PHONE_LAUNCHER_ROW = '2.5rem';
 export const PHONE_SAFE_BOTTOM = 'max(4px, env(safe-area-inset-bottom))';
 
-/**
- * One dock as an icon grid inside the Phone sheet: the desktop item visuals
- * (icon tile, avatar, badge) with a one-line label under each. The broom sits
- * in the tile's corner on a 32 px hit area that does not enlarge the glyph.
- * An app or agent tap acts and closes the sheet; the header items (account,
- * project) open their own popups and keep it.
- */
-function PhoneDockGrid({ dockId, label, items, onAct }: { dockId: 'primary' | 'secondary'; label: string; items: DockItem[]; onAct: () => void }) {
-  const editing = useDockEditing(dockId);
+/** Transparent logo/name cells; existing callbacks own launch, badges and cleanup. */
+export function LauncherGrid({ label, items, onAct, actions, onActions, phone = false }: { label: string; items: DockItem[]; onAct: () => void; actions?: (item: DockItem) => ReactNode; onActions?: (item: DockItem, anchor: HTMLElement) => void; phone?: boolean }) {
   const tiles = useMemo(() => items.filter((i) => !i.hidden && i.kind !== 'separator').sort((a, b) => a.position - b.position), [items]);
   // An app with several windows (or the selected agent) asks which one, as a row of tiles in the sheet.
   const [choosing, setChoosing] = useState<string | null>(null);
   const chosen = choosing ? tiles.find((i) => i.id === choosing && opensWindowChooser(i)) ?? null : null;
   return (
     <section aria-label={label} className="flex flex-col gap-2">
-      <h4 className="text-[11px] font-semibold uppercase tracking-wider text-white/40">{label}</h4>
-      {editing ? (
-        <DockEditor dockId={dockId} items={items} horizontal={false} hasLabels pinned cornerReverse={false} modeSwitch={null} groupPanel="inline" />
-      ) : (
-        <div className="grid grid-cols-4 gap-x-2 gap-y-3">
+        <div className={cn('grid gap-x-3 gap-y-5', phone ? 'grid-cols-4' : 'grid-cols-6')}>
           {tiles.map((item) => {
             const several = opensWindowChooser(item);
             const tile = item.renderCustom
-              ? item.renderCustom()
-              : <DockItemButton item={{ ...item, onDoubleClick: undefined, windows: undefined, chooserWhenActive: undefined, ...(several ? { onClick: () => setChoosing(item.id) } : {}) }} hasLabels={false} pinned horizontal={false} chromeless />;
+              ? item.renderCustom({ iconSize: phone ? 40 : 44, logoOnly: true })
+              : <DockItemButton item={{ ...item, onDoubleClick: undefined, windows: undefined, chooserWhenActive: undefined, ...(several ? { onClick: () => setChoosing(item.id) } : {}) }} hasLabels={false} pinned horizontal={false} chromeless logoOnly iconSize={phone ? 40 : 44} />;
             return (
               <div
                 key={item.id}
                 data-phone-dock-item={item.id}
-                className="flex min-w-0 flex-col items-center gap-1"
+                className="relative flex min-w-0 flex-col items-center gap-1"
+                onContextMenu={(event) => { if (onActions) { event.preventDefault(); onActions(item, event.currentTarget); } }}
+                onKeyDown={(event) => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); onActions?.(item, event.currentTarget); } }}
                 // A custom tile (the agent) that asks which window: the sheet's chooser row, never the tile's own act.
                 onClickCapture={several && item.renderCustom ? (event) => {
                   if (!(event.target as HTMLElement).closest('[data-dock-tile-act]')) return;
@@ -620,13 +622,13 @@ function PhoneDockGrid({ dockId, label, items, onAct }: { dockId: 'primary' | 's
                     </button>
                   ) : null}
                 </div>
-                <span className="w-full truncate text-center text-[11px] leading-tight text-white/70">{item.title}</span>
+                <span className="w-full line-clamp-2 text-center text-[11px] leading-tight text-white/70">{item.title}</span>
+                <div className="absolute -right-1 -top-2">{actions?.(item)}</div>
               </div>
             );
           })}
         </div>
-      )}
-      {chosen && !editing ? (
+      {chosen ? (
         <PhoneTileRow label={`${chosen.title} windows`}>
           {(chosen.windows ?? []).map((w) => (
             <PhoneTile key={w.id} label={w.label} icon={chosen.icon} dim={w.minimized} onTap={() => { w.onSelect(); setChoosing(null); onAct(); }} onClean={w.onClean} />
@@ -675,108 +677,46 @@ function PhoneTile({ label, icon: Icon, onTap, selected = false, dim = false, on
   );
 }
 
-/** The sheet's view choice: per-agent layouts or one of the project's Groups, as tiles. */
-function PhoneViewChoices({ onAct }: { onAct: () => void }) {
+/** Compact current-view selector, using the existing presentation actions. */
+export function LauncherViewChoices() {
   const { presentation, groupId, available } = usePresentation();
   const groups = useProjectGroups();
+  const editing = useWorkspaceStore((s) => Boolean(s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone));
   if (!available) return null;
-  const store = useWorkspaceStore.getState;
-  return (
-    <section aria-label="View" className="flex flex-col gap-2">
-      <h4 className="text-[11px] font-semibold uppercase tracking-wider text-white/40">View</h4>
-      <PhoneTileRow label="Workspace view">
-        <PhoneTile label="Per agent" icon={RectangleVertical} selected={presentation === 'agent'} onTap={() => { store().setPresentation('agent'); onAct(); }} />
-        {groups.length === 0 ? (
-          <PhoneTile label="Group" icon={RectangleHorizontal} selected={false} onTap={() => { store().setPresentation('group'); onAct(); }} />
-        ) : groups.map((g) => (
-          <PhoneTile key={g.id} label={g.name} icon={RectangleHorizontal} selected={presentation === 'group' && g.id === groupId} onTap={() => { store().selectGroup(g.id); onAct(); }} />
-        ))}
-      </PhoneTileRow>
-    </section>
-  );
+  return <select aria-label="Workspace view" disabled={editing} value={presentation === 'agent' ? 'agent' : groupId ?? 'group'} className="h-7 max-w-40 rounded-md bg-white/10 px-2 text-xs" onChange={(event) => {
+    const value = event.target.value; const store = useWorkspaceStore.getState();
+    if (value === 'agent' || value === 'group') store.setPresentation(value); else store.selectGroup(value);
+  }}><option value="agent">Per agent</option>{groups.length ? groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>) : <option value="group">Group</option>}</select>;
 }
 
 export type PhoneWindow = { id: string; title: string; icon: ComponentType<{ className?: string; style?: CSSProperties }>; foreground: boolean; minimized: boolean };
 
-/**
- * The Phone dock surface: ONE sheet the launcher opens, on the fixed control
- * material. Top: the open windows as a row of tiles (tap = bring to front,
- * × = minimize). Below: each dock as an icon grid. It closes on a tap outside,
- * a drag down, Escape, or the launcher again — there is no Close button.
- */
-export function PhoneDockSheet({ windows, onWindow, onMinimize, primaryItems, secondaryItems, onClose }: {
-  windows: PhoneWindow[];
-  onWindow: (id: string) => void;
-  onMinimize: (id: string) => void;
-  primaryItems: DockItem[];
-  secondaryItems: DockItem[];
-  onClose: () => void;
-}) {
-  const sheet = useRef<HTMLDivElement>(null);
-  const dragStart = useRef<{ pointerId: number; y: number } | null>(null);
-  useEffect(() => { sheet.current?.focus(); }, []);
-  const dragTo = (dy: number): void => { if (sheet.current) sheet.current.style.transform = dy > 0 ? `translateY(${dy}px)` : ''; };
-  return (
-    <div
-      data-phone-sheet-scrim=""
-      className="fixed inset-x-0 top-0 z-[90] flex items-end bg-black/40"
-      style={{ bottom: `calc(${PHONE_LAUNCHER_ROW} + ${PHONE_SAFE_BOTTOM})` }}
-      onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-    >
-      <div
-        ref={sheet}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Docks"
-        tabIndex={-1}
-        data-theme-id={CONTROL_SURFACE_THEME_ID}
-        className="flex max-h-[85dvh] w-full flex-col rounded-t-[24px] border-t outline-none"
-        style={CONTROL_SURFACE}
-        onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
-      >
-        <div
-          aria-hidden="true"
-          className="flex h-6 shrink-0 cursor-grab touch-none items-center justify-center"
-          onPointerDown={(event) => { dragStart.current = { pointerId: event.pointerId, y: event.clientY }; event.currentTarget.setPointerCapture(event.pointerId); }}
-          onPointerMove={(event) => { const s = dragStart.current; if (s && s.pointerId === event.pointerId) dragTo(event.clientY - s.y); }}
-          onPointerUp={(event) => { const s = dragStart.current; dragStart.current = null; dragTo(0); if (s && event.clientY - s.y > SHEET_DISMISS_DRAG_PX) onClose(); }}
-          onPointerCancel={() => { dragStart.current = null; dragTo(0); }}
-        >
-          <span className="h-1 w-10 rounded-full bg-white/25" />
-        </div>
-        <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-4 pb-4">
-          <section aria-label="Open windows" className="flex flex-col gap-2">
-            <h4 className="text-[11px] font-semibold uppercase tracking-wider text-white/40">Open windows</h4>
-            {windows.length ? (
-              <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pt-1">
-                {windows.map((w) => (
-                  <div key={w.id} className="relative shrink-0">
-                    <button
-                      type="button"
-                      aria-pressed={w.foreground}
-                      onClick={() => { onWindow(w.id); onClose(); }}
-                      className={cn('flex w-[72px] flex-col items-center gap-1 rounded-xl px-1 py-2 transition-colors', w.foreground ? 'bg-white/15 ring-1 ring-[#cba6f7]/60' : 'bg-white/5 hover:bg-white/10', w.minimized && 'opacity-60')}
-                    >
-                      <w.icon className="h-6 w-6" />
-                      <span className="w-full truncate text-center text-[11px] leading-tight">{w.title}</span>
-                    </button>
-                    {w.minimized ? null : (
-                      <button type="button" aria-label={`Minimize ${w.title}`} onClick={() => onMinimize(w.id)} className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center">
-                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-black/70 text-white/70"><X className="h-2.5 w-2.5" /></span>
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : <p className="text-xs text-white/45">No open windows</p>}
-          </section>
-          <PhoneDockGrid dockId="primary" label="Apps" items={primaryItems} onAct={onClose} />
-          <PhoneViewChoices onAct={onClose} />
-          <PhoneDockGrid dockId="secondary" label="Agents" items={secondaryItems} onAct={onClose} />
-        </div>
-      </div>
+/** Native horizontal window strip, shared by both launcher presentations. */
+export function LauncherWindows({ windows, onWindow, onMinimize, onClose }: { windows: PhoneWindow[]; onWindow: (id: string) => void; onMinimize: (id: string) => void; onClose: () => void }) {
+  return <section aria-label="Open windows" className="shrink-0 px-3 py-2 border-b border-white/8">
+    <div role="group" aria-label="Open windows" className="flex gap-2 overflow-x-auto">{windows.length ? windows.map((w) => <div key={w.id} className={cn('flex h-9 shrink-0 items-center rounded-lg border border-white/10', w.foreground ? 'bg-white/15 ring-1 ring-white/30' : 'bg-white/5', w.minimized && 'opacity-55')}>
+      <button type="button" aria-pressed={w.foreground} title={w.title} className="flex h-full max-w-44 items-center gap-2 px-2 text-xs" onClick={() => { onWindow(w.id); onClose(); }}><w.icon className="h-4 w-4 shrink-0" /><span className="truncate">{w.title}</span></button>
+      {!w.minimized ? <button type="button" aria-label={`Minimize ${w.title}`} onClick={() => onMinimize(w.id)} className="flex h-8 w-8 items-center justify-center"><X className="h-3 w-3" /></button> : null}
+    </div>) : <p className="text-xs text-white/45">No open windows</p>}</div>
+  </section>;
+}
+
+/** One reserved Phone band; item callbacks, custom agents and window choosers remain dock-owned. */
+export function PhoneDockBand({ items, headers, launcher, renderItem, transparency = 'opaque', background = 'classic' }: { items: DockItem[]; headers: boolean; launcher: ReactNode; renderItem?: (item: DockItem) => ReactNode; transparency?: TransparencyLevel; background?: 'classic' | 'toolbar' }) {
+  const editing = useDockEditing('phone');
+  const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
+  if (editing && !renderItem) return <DockEditor dockId="phone" items={items} horizontal hasLabels={false} pinned cornerReverse={false} modeSwitch={launcher} phoneAppearance={{ headers, transparency, background }} />;
+  const render = renderItem ?? ((item: DockItem) => <DockItemButton item={{ ...item, onDoubleClick: undefined }} hasLabels={false} pinned horizontal edge="bottom" />);
+  const live = items.filter((item) => item.section !== 'header' && item.section !== 'footer' && !item.hidden);
+  const header = (side: 'apps' | 'agents') => <div data-phone-header={side} className="flex shrink-0 items-center" style={!headers ? { visibility: 'hidden' } : undefined}>{items.filter((item) => item.section === 'header' && (item.phoneSection ?? 'apps') === side).map((item) => <div key={item.id} className="w-10 h-10 shrink-0">{item.renderCustom?.({ phoneNavigation: transparency, iconSize: 32 })}</div>)}</div>;
+  return <DockTransparencyProvider value={background === 'toolbar' ? 'transparent' : transparency}><div data-phone-launcher-row="" className="relative grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center" style={{ ...themeScopeStyle(dockTheme), ...dockCapsuleStyle(transparency, background, true) }} data-theme-id={dockTheme.id}>
+    <div data-phone-apps="" className="flex min-w-0 items-center">
+      {header('apps')}
+      <DockScrollContainer><div className="flex items-center gap-1">{live.filter((item) => item.phoneSection !== 'agents').map((item) => <div key={item.id} className="shrink-0">{render(item)}</div>)}</div></DockScrollContainer>
     </div>
-  );
+    <div data-phone-center="" className={cn('h-full rounded-xl', background === 'toolbar' && dockNavigationSurface(transparency).bg)}>{launcher}</div>
+    <div data-phone-agents="" className="flex min-w-0 items-center"><DockScrollContainer><div className="flex items-center gap-1">{live.filter((item) => item.phoneSection === 'agents').map((item) => <div key={item.id} className="shrink-0">{render(item)}</div>)}</div></DockScrollContainer>{header('agents')}</div>
+  </div></DockTransparencyProvider>;
 }
 
 // ─── Main Dock Component ───────────────────────────────────────────────────
@@ -1019,18 +959,7 @@ export function Dock({
         onKeyDown={(event) => { if (event.key === 'Escape') pointerCancel(); }}
       >
         {grip}
-        {editing ? (
-          <DockEditor
-            dockId={dockId}
-            items={items}
-            horizontal={horizontal}
-            hasLabels={hasLabels}
-            pinned={pinned}
-            cornerReverse={cornerReverse}
-            modeSwitch={modeSwitch}
-          />
-        ) : (
-          <>
+        {editing ? <DockEditor dockId={dockId} items={items} horizontal={horizontal} hasLabels={hasLabels} pinned={pinned} cornerReverse={cornerReverse} modeSwitch={modeSwitch} /> : <>
             {cornerReverse ? footer : null}
             {horizontal ? (
               <DockScrollContainer>
@@ -1064,8 +993,7 @@ export function Dock({
               </DockScrollContainer>
             )}
             {cornerReverse ? null : footer}
-          </>
-        )}
+          </>}
         {loading ? (
           <div className="absolute inset-0 z-20 rounded-2xl bg-black/40 backdrop-blur-sm flex items-center justify-center transition-opacity duration-500">
             <div className="w-5 h-5 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
@@ -1085,24 +1013,26 @@ export function Dock({
  * (`setDockPrefs` → one persist write), Cancel drops the draft.
  */
 export function DockEditor({
-  dockId, items, horizontal, hasLabels, pinned, cornerReverse, modeSwitch, groupPanel = 'portal',
+  dockId, items, horizontal, hasLabels, pinned, cornerReverse, modeSwitch, groupPanel = 'portal', phoneAppearance,
 }: {
-  dockId: 'primary' | 'secondary';
+  dockId: DockPrefsId;
   items: DockItem[];
   horizontal: boolean;
   hasLabels: boolean;
   pinned: boolean;
   cornerReverse: boolean;
   modeSwitch: ReactNode;
-  /** Where the Group draft shows (Group view, agent dock): beside the dock, or in flow (the Phone sheet). */
+  /** Where the Group draft shows (Group view, agent dock): beside the dock, or in an inline embedding. */
   groupPanel?: 'portal' | 'inline';
+  phoneAppearance?: { headers: boolean; transparency: TransparencyLevel; background: 'classic' | 'toolbar' };
 }) {
   const [draft, setDraft] = useState<DockPrefs>(() => draftFromItems(items));
   // Group view: the agent dock's draft also holds the Groups (names and
   // members) — the same Save/Cancel commits or drops both.
   const { presentation, groupId } = usePresentation();
   const savedGroups = useProjectGroups();
-  const editsGroups = dockId === 'secondary' && presentation === 'group';
+  const [intent] = useState(() => ({ dockId, userId: useWorkspaceStore.getState().liveUserId, projectId: useWorkspaceStore.getState().session.projectId, editsGroups: (dockId === 'secondary' || dockId === 'phone') && presentation === 'group' }));
+  const editsGroups = intent.editsGroups;
   const [groupDraft, setGroupDraft] = useState<GroupDraft>(() => ({
     groups: savedGroups.map((g) => ({ ...g, memberIds: [...g.memberIds] })),
     selectedGroupId: groupId,
@@ -1156,11 +1086,13 @@ export function DockEditor({
     useWorkspaceStore.getState().setDockEditing(dockId, false);
   };
   const save = (): void => {
+    const state = useWorkspaceStore.getState();
+    if (state.liveUserId !== intent.userId || state.session.projectId !== intent.projectId) { endEditing(); return; }
     if (editsGroups) {
-      useWorkspaceStore.getState().saveGroups({ ...groupDraft, dock: { dockId, prefs: live } });
+      useWorkspaceStore.getState().saveGroups({ ...groupDraft, dock: { dockId: intent.dockId, prefs: live } });
       return;
     }
-    useWorkspaceStore.getState().setDockPrefs({ dockId, prefs: live });
+    useWorkspaceStore.getState().setDockPrefs({ dockId: intent.dockId, prefs: live });
   };
 
   const startDrag = (event: DragEvent<HTMLDivElement>, key: string): void => {
@@ -1238,8 +1170,14 @@ export function DockEditor({
   );
   const bar = <DockEditBar onSave={save} onCancel={endEditing} hasLabels={hasLabels} horizontal={horizontal} />;
   const groups = editsGroups ? (
-    <GroupDraftPanel draft={groupDraft} onChange={setGroupDraft} placement={groupPanel} anchorRef={listRef} horizontal={horizontal} />
+    <GroupDraftPanel draft={groupDraft} onChange={setGroupDraft} placement={groupPanel} anchorRef={listRef} horizontal={horizontal} phone={dockId === 'phone'} />
   ) : null;
+
+  if (dockId === 'phone') return <div ref={listRef} className="relative h-full min-w-0" data-dock-editor="phone">
+    <PhoneDockBand items={arranged} headers={phoneAppearance?.headers ?? true} transparency={phoneAppearance?.transparency} background={phoneAppearance?.background} launcher={modeSwitch} renderItem={renderItem} />
+    {createPortal(<div data-phone-edit-bar="" className="fixed inset-x-1 z-[110] flex items-center justify-end gap-2 rounded-xl border p-1" data-theme-id={CONTROL_SURFACE_THEME_ID} style={{ ...CONTROL_SURFACE, bottom: `calc(${PHONE_LAUNCHER_ROW} + ${PHONE_SAFE_BOTTOM} + 4px)` }}><div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">{tray}</div>{bar}</div>, document.body)}
+    {groups}
+  </div>;
 
   if (horizontal) {
     return (
@@ -1285,12 +1223,13 @@ type GroupDraft = { groups: WorkspaceGroup[]; selectedGroupId: string | null };
  * consequence). Nothing is written until the dock's Save. Membership organizes
  * the view only — it grants nothing; removing an agent leaves its open windows.
  */
-function GroupDraftPanel({ draft, onChange, placement, anchorRef, horizontal }: {
+function GroupDraftPanel({ draft, onChange, placement, anchorRef, horizontal, phone = false }: {
   draft: GroupDraft;
   onChange: (next: GroupDraft) => void;
   placement: 'portal' | 'inline';
   anchorRef: { current: HTMLDivElement | null };
   horizontal: boolean;
+  phone?: boolean;
 }) {
   const { byId, ids } = useAgentsState();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1320,8 +1259,8 @@ function GroupDraftPanel({ draft, onChange, placement, anchorRef, horizontal }: 
       role="group"
       aria-label="Group"
       data-theme-id={CONTROL_SURFACE_THEME_ID}
-      className={cn('w-64 rounded-xl border p-2 text-sm shadow-2xl shadow-black/60', placement === 'inline' && 'w-full shadow-none')}
-      style={{ ...CONTROL_SURFACE, ...(placement === 'portal' && anchor ? groupPanelPosition(anchor, horizontal) : {}) }}
+      className={cn('w-64 max-h-[calc(100dvh-8rem)] overflow-y-auto rounded-xl border p-2 text-sm shadow-2xl shadow-black/60', placement === 'inline' && 'w-full shadow-none')}
+      style={{ ...CONTROL_SURFACE, ...(placement === 'portal' && anchor ? { ...groupPanelPosition(anchor, horizontal), ...(phone ? { bottom: `calc(${PHONE_LAUNCHER_ROW} + ${PHONE_SAFE_BOTTOM} + 52px)`, top: undefined } : {}) } : {}) }}
     >
       <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Groups">
         {draft.groups.map((g) => (

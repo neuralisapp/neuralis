@@ -19,8 +19,9 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
 
-import { NO_BUILD_INPUTS, buildComposeContent, operatorDependencies, planOperatorImage, resolveBuildInputs, type ComposeEmitInput } from '../setup/compose.mts';
+import { NO_BUILD_INPUTS, buildComposeContent, ollamaServiceLines, operatorDependencies, planOperatorImage, resolveBuildInputs, type ComposeEmitInput } from '../setup/compose.mts';
 import { packageBindTarget } from '../mount/packageBind.mts';
 import { qdrantImageRef } from '../setup/qdrantVersion.mts';
 
@@ -35,7 +36,6 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
     appPort: 3100,
     mcpPort: 3101,
     sandboxPort: 3102,
-    nextAuthUrl: 'http://localhost:3100',
     brainInfraMode: 'local',
     qdrantMode: 'docker',
     qdrantUrl: 'http://localhost:6333',
@@ -44,12 +44,10 @@ function baseInput(overrides: Partial<ComposeEmitInput> = {}): ComposeEmitInput 
     qdrantDashboard: true,
     codexLoopbackPublish: false,
     composeOllama: true,
+    tunnel: false,
     neuralisHome: '/home/op/.neuralis',
     machine: {
-      desktopVariant: 'ubuntu-xfce',
       image: 'neuralisapp/webtop-ubuntu-xfce:dev',
-      containerScope: 'user',
-      idleMinutes: 30,
       screen: '1920x1080',
       sidecarPort: 9400,
       cdpPort: 9222,
@@ -71,6 +69,16 @@ describe('custom published MCP port', () => {
       expect(content).toContain('      - "43393:3101"\n');
       expect(content).toContain('      - MCP_HTTP_PORT=3101\n');
       expect(content).not.toContain('      - MCP_HTTP_PORT=43393\n');
+    }
+  });
+});
+
+describe('the app origin has ONE source: the .env', () => {
+  it('the compose environment carries no NEXTAUTH_URL that would override the env_file copy', () => {
+    for (const monorepo of [true, false]) {
+      const content = buildComposeContent(baseInput({ monorepo, imageTag: '0.2.1' }), STAMP);
+      expect(content).toContain('    env_file:\n      - path: .env\n');
+      expect(content).not.toMatch(/NEXTAUTH_URL|APP_URL|MCP_BASE_URL/);
     }
   });
 });
@@ -122,6 +130,18 @@ describe('Qdrant API key — interpolation, never a value', () => {
   });
 });
 
+describe('the session secret — a file in the bound home, never compose', () => {
+  it('no mode interpolates or carries it, so removing the .env line never stops a compose command; the app still reads the whole .env', () => {
+    for (const qdrantMode of ['docker', 'binary', 'external', 'skip'] as const) {
+      const content = buildComposeContent(baseInput({ qdrantMode }), STAMP);
+      expect(content, qdrantMode).not.toContain('NEXTAUTH_SECRET');
+      // `env_file: .env` stays: an image-only folder's one-shot `upgrade` reads the old line through it
+      // (`session-secret-v1`) in the window before a writer drops it.
+      expect(serviceBlock(content, 'neuralis'), qdrantMode).toContain('    env_file:\n      - path: .env\n');
+    }
+  });
+});
+
 describe('network topology — qdrant isolated, app dual-homed, ollama on default', () => {
   it('declares both networks top-level in docker mode', () => {
     const content = buildComposeContent(baseInput(), STAMP);
@@ -143,6 +163,19 @@ describe('network topology — qdrant isolated, app dual-homed, ollama on defaul
   it('the ollama service carries NO networks key (falls to the default network)', () => {
     const block = serviceBlock(buildComposeContent(baseInput(), STAMP), 'ollama');
     expect(block).not.toContain('networks:');
+  });
+
+  it('ollama (no login of its own) publishes on LOOPBACK only — in the stack and in the desktop companion lines', () => {
+    const block = serviceBlock(buildComposeContent(baseInput(), STAMP), 'ollama');
+    const companion = ollamaServiceLines(11500).join('\n');
+    for (const text of [block, companion]) {
+      const published = [...text.matchAll(/- "([^"]*):11434"/g)].map((m) => m[1]!);
+      expect(published.length).toBe(1);
+      // Every published mapping is bound to 127.0.0.1 — never a bare port or 0.0.0.0.
+      expect(published.every((p) => p.startsWith('127.0.0.1:'))).toBe(true);
+      expect(text).not.toMatch(/- "(?:0\.0\.0\.0:)?\d+:11434"/);
+    }
+    expect(companion).toContain('      - "127.0.0.1:11500:11434"');
   });
 
   it('no networks block outside docker mode (single implicit default)', () => {
@@ -309,7 +342,7 @@ describe('the monorepo build inputs — named contexts and the .npmrc secret', (
   });
 });
 
-describe('the generated compose holds no host secret and no host-plane bind', () => {
+describe('the generated compose holds no host secret and no device-plane bind', () => {
   it('the server reaches the app as a paired device over the device link: no broker runtime bind, no secret file env, no plan names', () => {
     const content = buildComposeContent(baseInput(), STAMP);
     expect(content).not.toMatch(/host-broker|NEURALIS_HOST_BROKER|\/run\/neuralis/);
@@ -546,4 +579,44 @@ describe('setup --compose-only in an npm install folder writes the derived image
     expect(block).not.toContain('    build:\n');
     expect(existsSync(join(dirs.folder, 'operator-image'))).toBe(false);
   });
+});
+
+describe('setup --compose-only in an image-only folder (inside its one-shot container) regenerates without a package.json', () => {
+  const realHost = join(dirname(new URL(import.meta.url).pathname), '..', '..');
+  // The one-shot binds the folder; a tmpfs mount point stands in for that bind (setup refuses an unbound folder).
+  const BOUND_ROOT = '/dev/shm';
+  const bindable = existsSync(BOUND_ROOT) && readFileSync('/proc/self/mountinfo', 'utf8').split('\n').some((l) => l.split(' ')[4] === BOUND_ROOT);
+
+  it.skipIf(!bindable)('writes the compose file on the folder\'s own tag, records the install, and reads no package.json anywhere in the folder', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neuralis-image-regen-'));
+    const host = join(root, 'host');
+    mkdirSync(host, { recursive: true });
+    cpSync(join(realHost, 'scripts'), join(host, 'scripts'), { recursive: true });
+    symlinkSync(join(realHost, 'node_modules'), join(host, 'node_modules'), 'dir');
+    symlinkSync(join(realHost, 'src'), join(host, 'src'), 'dir');
+    writeFileSync(join(host, 'package.json'), JSON.stringify({ name: 'neuralis', version: '0.3.3', bin: { neuralis: 'bin/neuralis.mjs' } }));
+    const folder = mkdtempSync(join(BOUND_ROOT, 'neuralis-image-folder-'));
+    const home = join(root, 'home');
+    mkdirSync(home);
+    try {
+      writeFileSync(join(folder, 'docker-compose.yml'), '# GENERATED by neuralis setup (2026-10-19, neuralis 0.3.2) — do not hand-edit.\nname: neuralis\n');
+      writeFileSync(join(folder, '.env'), 'NEURALIS_IMAGE_TAG=0.3.3\nQDRANT_MODE=skip\nBRAIN_INFRA_MODE=inmemory\nNEURALIS_COMPOSE_PROJECT=neuralis\nNEXTAUTH_SECRET=x\n');
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      // A daemon that answers with the Compose plugin; nothing is published, every probe container exits 0.
+      writeFileSync(join(bin, 'docker'), '#!/bin/sh\ncase "$1" in info) echo \'[{"Name":"compose"}]|27.0.0\' ;; inspect) echo sha256:probe ;; compose) case "$*" in *" ls "*) echo "[]" ;; esac ;; esac\nexit 0\n', { mode: 0o755 });
+      const res = spawnSync(process.execPath, ['--import', pathToFileURL(join(realHost, 'node_modules', 'tsx', 'dist', 'loader.mjs')).href, join(host, 'scripts', 'cli', 'registry.mts'), 'setup', '--compose-only'], {
+        cwd: folder,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, NEURALIS_DOCKER: 'true', NEURALIS_HOME: home, NEURALIS_HOST_HOME: home, QDRANT_URL: 'http://127.0.0.1:9', OLLAMA_URL: 'http://127.0.0.1:9' },
+      });
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
+      expect(serviceBlock(readFileSync(join(folder, 'docker-compose.yml'), 'utf8'), 'neuralis')).toContain('    image: neuralisapp/neuralis:0.3.3\n');
+      expect(existsSync(join(folder, 'package.json'))).toBe(false);
+      expect(JSON.parse(readFileSync(join(home, 'app', 'config', 'installs.json'), 'utf8')).installs).toEqual([{ kind: 'image', dir: folder, composeProject: 'neuralis' }]);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

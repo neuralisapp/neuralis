@@ -95,6 +95,7 @@ function signature(storage: KeyValueStorage, s: WorkspaceStore, keys: string[]):
       return rt ? [key, rt.layout, rt.widgets.openOrder] : [key, null];
     }),
     dock: s.projectStateById[projectId]?.dock ?? null,
+    phoneDock: s.liveUserId ? s.phoneDockPrefsByScope?.[groupScopeKey(s.liveUserId, projectId)] ?? null : null,
     epoch: s.layoutEpoch,
   });
 }
@@ -178,7 +179,7 @@ export function clearLayoutUndo(): void {
 
 export function randomizeLayout(deps: LayoutTransactionDeps): LayoutTransactionResult {
   const s = useWorkspaceStore.getState();
-  if (s.dockEditing.primary || s.dockEditing.secondary) {
+  if (s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone) {
     return { ok: false, reason: 'editing', message: 'Save or cancel dock editing first — Randomize never discards a draft.' };
   }
   const { userId, projectId } = scopeOf(s);
@@ -273,7 +274,7 @@ export function undoLayout(deps: LayoutTransactionDeps): LayoutTransactionResult
     pending = null;
     return { ok: false, reason: 'stale', message: 'The layout changed since — Undo is no longer available.' };
   }
-  if (s.dockEditing.primary || s.dockEditing.secondary) {
+  if (s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone) {
     return { ok: false, reason: 'editing', message: 'Save or cancel dock editing first.' };
   }
   const patch = composeLayoutCommit(s, { groupStateByScope: tx.before.groupStateByScope, layoutByKey: tx.before.layoutByKey, clearManual: [], dropEmpty: tx.before.created });

@@ -20,11 +20,19 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { encode } from 'next-auth/jwt';
 
-const appRoot = await mkdtemp(join(tmpdir(), 'nrs-member-session-'));
+// A throwaway data home: its `app/` is the stores' appRoot, and the session secret the `:3101`
+// decode reads is a REAL `app/config/session-secret.key` in it (the real `sessionSecret`).
+const home = await mkdtemp(join(tmpdir(), 'nrs-member-session-'));
+const appRoot = join(home, 'app');
 const SECRET = 'member-session-test-secret-0123456789';
+const priorHome = process.env.NEURALIS_HOME;
+process.env.NEURALIS_HOME = home;
+await mkdir(join(appRoot, 'config'), { recursive: true });
+await writeFile(join(appRoot, 'config', 'session-secret.key'), `${SECRET}\n`);
 
-vi.mock('../../config/env', () => ({
-  getEnv: () => ({ appRoot, projectsRoot: join(appRoot, 'projects-data'), auth: { secret: SECRET } }),
+vi.mock('../../config/env', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../config/env')>()),
+  getEnv: () => ({ appRoot, projectsRoot: join(appRoot, 'projects-data') }),
 }));
 
 const sessionMock = vi.hoisted(() => ({ user: { id: 'u-active', email: '', name: '' } as { id: string; email: string; name: string } | null }));
@@ -99,7 +107,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await rm(appRoot, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true });
+  if (priorHome === undefined) delete process.env.NEURALIS_HOME;
+  else process.env.NEURALIS_HOME = priorHome;
 });
 
 describe('resolveMember — the ONE chain', () => {
@@ -119,7 +129,16 @@ describe('resolveMember — the ONE chain', () => {
       agentOwnership: {},
       spendLimits: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} },
       llmRateLimitRpm: 30,
+      // Display only, from the record's `name` (the seed names each user after its id).
+      displayName: 'u-active',
     });
+  });
+
+  it('displayName is the ONE helper over the record: trimmed, capped at 80, absent when blank', async () => {
+    const { sessionDisplayName } = await import('../memberSession');
+    expect(sessionDisplayName({ name: '  Ada Lovelace ' })).toBe('Ada Lovelace');
+    expect(sessionDisplayName({ name: 'x'.repeat(200) })).toHaveLength(80);
+    expect(sessionDisplayName({ name: '   ' })).toBeUndefined();
   });
 
   it.each([

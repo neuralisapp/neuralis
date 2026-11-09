@@ -12,6 +12,10 @@
  *   collapses — every login behind a reverse proxy or a Docker gateway arrives
  *   from ONE peer until trusted proxies are declared.
  *
+ * The invite-link redeem (`/api/invite/redeem`) rides the SAME two axes with
+ * the subject `invite:<token hash>` in the email's place: one guessed token
+ * locks after 5 tries, and an address guessing many is slowed like a spray.
+ *
  * An unknown email counts exactly like a known one. The thresholds are code
  * floors, never platform config. Process-local by design (a multi-node deploy
  * gets N× the attempts — note for HA), and `globalThis`-anchored so every

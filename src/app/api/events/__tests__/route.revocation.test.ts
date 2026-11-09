@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import type { RuntimeChannel } from '@neuralis/package-system/contracts';
 
-const packageFeeds = vi.hoisted(() => ({ features: [] as string[], channels: [] as RuntimeChannel[] }));
+const packageFeeds = vi.hoisted(() => ({ features: [] as string[], channels: [] as RuntimeChannel[], heartbeatMs: 25_000 }));
 
 vi.mock('@/server/auth/resolveSessionContext', () => ({
   SessionResolutionError: class extends Error {
@@ -30,16 +30,19 @@ vi.mock('@/server/packages/runtime', () => ({
   getCommunityPackageRuntime: () => ({ getRevision: () => 1, onInvalidation: () => () => {} }),
 }));
 vi.mock('@/server/packages/projectPackages', () => ({ ensureProjectPackagesLoaded: async () => {} }));
-vi.mock('@/server/store/PlatformConfigStore', () => ({ getPlatformConfigStore: () => ({ get: () => 25_000 }) }));
+vi.mock('@/server/store/PlatformConfigStore', () => ({ getPlatformConfigStore: () => ({ get: () => packageFeeds.heartbeatMs }) }));
 
 
 import { GET } from '../route';
 import { revokePrincipal, resetPrincipalRevocationForTests } from '@/server/host/principalRevocation';
+import { listPresence, resetPresenceRegistryForTests } from '@/server/presence/clientRegistry';
 
 afterEach(() => {
+  resetPresenceRegistryForTests();
   resetPrincipalRevocationForTests();
   packageFeeds.features = [];
   packageFeeds.channels = [];
+  packageFeeds.heartbeatMs = 25_000;
 });
 
 async function openHub(): Promise<{ closed: () => boolean }> {
@@ -85,6 +88,19 @@ describe('/api/events — principal revocation closes the connection', () => {
 });
 
 
+describe('/api/events — the connection is a presence client until the same close', () => {
+  const self = { userId: 'u1', projectId: 'p1', agentId: 'a1', grantedFeatures: [] as string[] };
+  const online = (): boolean | undefined => listPresence(self, { scope: 'project', memberIds: new Set(['u1']) })[0]?.online;
+
+  it('online while open; the revocation that closes the hub drops the entry with it', async () => {
+    const hub = await openHub();
+    expect(online()).toBe(true);
+    await revokePrincipal({ userId: 'u1', projectId: 'p1', reason: 'membership_removed' }, noFanOut);
+    await vi.waitFor(() => expect(hub.closed()).toBe(true));
+    expect(online()).toBe(false);
+  });
+});
+
 describe('/api/events — declared package channel entry gates', () => {
   it('gates all four feeds before subscription, passes verified coordinates, and disposes on archive', async () => {
     const names = ['presence', 'workflow', 'conversation', 'filesystem'];
@@ -114,5 +130,36 @@ describe('/api/events — declared package channel entry gates', () => {
     for (const channel of subscriptions) expect(channel.subscribe).toHaveBeenCalledOnce();
     await revokePrincipal({ userId: 'u1', reason: 'sessions_reset' }, noFanOut);
     for (const channel of subscriptions) expect(await channel.subscribe.mock.results[0].value).toHaveBeenCalledOnce();
+  });
+});
+
+describe('/api/events — the keepalive is a frame an EventSource DISPATCHES', () => {
+  // An SSE comment line (`: …`) dispatches no event in a browser, so the
+  // client watchdog (60 s without a frame ⇒ dead) reopened every idle hub and
+  // each reopen re-read every held transcript. The keepalive is a `meta` frame.
+  it('an idle hub sends `{channel:"meta", name:"keepalive"}` data frames on the heartbeat, and no comment line', async () => {
+    packageFeeds.heartbeatMs = 20;
+    const res = await GET(new NextRequest('http://localhost/api/events?projectId=p1'));
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    const pump = (async () => {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) return;
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+    })();
+    await vi.waitFor(() => expect(text.split('"keepalive"').length - 1).toBeGreaterThanOrEqual(2));
+    await revokePrincipal({ userId: 'u1', reason: 'sessions_reset' }, noFanOut);
+    await pump;
+    const blocks = text.split('\n\n').filter(Boolean);
+    const frames = blocks.map((block) => {
+      const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
+      return data ? (JSON.parse(data) as { channel: string; name: string }) : null;
+    });
+    expect(frames.every((frame) => frame !== null)).toBe(true);
+    expect(frames.filter((f) => f?.channel === 'meta' && f.name === 'keepalive').length).toBeGreaterThanOrEqual(2);
+    expect(blocks.every((block) => block.startsWith('event: message\n'))).toBe(true);
   });
 });

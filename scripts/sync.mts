@@ -388,7 +388,7 @@ function swapPackage(s: SyncSession, pkg: SyncablePackage, dryRun: boolean): { o
     if (copy.code !== 0) return { ok: false, detail: `docker cp failed: ${copy.err.trim()}` };
 
     // The container path follows the registry NAME, scope included — a
-    // first-party package under any scope lands where node resolves it.
+    // native package under any scope lands where node resolves it.
     const target = `${CONTAINER_NM}/${pkg.name}`;
     const script = [
       `set -e`,

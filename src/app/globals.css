@@ -2,7 +2,7 @@
 /* This build-time sheet scans the host's own sources only. Every package UI
    attaches at RUNTIME (app.module) and is styled by the ONE union sheet the
    server compiles over the host's and the packages' classes when the
-   first-party package set changes (packageUiModules.ts) — no package scan line
+   native package set changes (packageUiModules.ts) — no package scan line
    here, and a package class change needs no host rebuild. */
 
 @theme {

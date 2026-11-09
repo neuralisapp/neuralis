@@ -46,6 +46,13 @@ export function dockSurface(
   };
 }
 
+/** Fixed phone navigation separators retain a bounded tile even at Clear. */
+export function dockNavigationSurface(level: TransparencyLevel): { bg: string; icon: string } {
+  return level === 'transparent'
+    ? { bg: 'bg-[rgba(var(--w-composer-bg-rgb),0.45)] hover:bg-[var(--control-surface-elevated)]', icon: '' }
+    : dockSurface(level, 'default');
+}
+
 /**
  * The ONE dock capsule material. `classic` draws no capsule surface (the item
  * tiles carry it) and only frosts the backdrop at Dim; `toolbar` draws one
@@ -70,6 +77,7 @@ export function dockCapsuleStyle(
     borderTopWidth: 1, borderRightWidth: 1, borderBottomWidth: 1, borderLeftWidth: 1,
     borderTopLeftRadius: r, borderTopRightRadius: r, borderBottomRightRadius: r, borderBottomLeftRadius: r,
     backdropFilter: blur,
+    ['--dock-dim-alpha' as string]: String(DIM_GLASS.tileAlpha),
   };
   if (join === 'start') {
     if (horizontal) Object.assign(style, { borderTopRightRadius: 0, borderBottomRightRadius: 0, borderRightWidth: 0 });

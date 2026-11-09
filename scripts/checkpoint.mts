@@ -6,11 +6,10 @@
  *   pnpm neuralis:checkpoint list
  *   pnpm neuralis:checkpoint restore <id>
  *
- * A pulled image has no host folder; the same script is baked in and runs in a
- * one-off container, with the app container stopped first:
- *
- *   docker compose stop neuralis
- *   docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore <id>
+ * On an image-only folder `neuralis checkpoint list` runs in a one-shot
+ * container of the folder's image and `neuralis checkpoint restore <id>` as
+ * `docker compose run` of the app service (the command line's image gate), with
+ * the app stopped first (`docker compose stop neuralis`).
  *
  * `restore` is OFFLINE-only: it refuses while the app answers on its port, or
  * while `docker compose ps` in the host folder shows the app service (the one
@@ -29,7 +28,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { join, resolve } from 'node:path';
-import { resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { installKindOf, resolveNeuralisHome } from '@neuralis/package-system/paths';
 import {
   listCheckpoints,
   readDataFormatLedger,
@@ -37,7 +36,7 @@ import {
 } from '@neuralis/package-system/data';
 import { CliExit, type CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
-import { readComposeStack, type ComposeAnswer } from './host-broker/helper.mts';
+import { composeDetail, readComposeStack, type ComposeAnswer } from './host-broker/helper.mts';
 import { bindMountOf, loadHostEnv } from './setup/detect.mts';
 import { askLine } from './setup/ownerCheck.mts';
 
@@ -45,14 +44,20 @@ const USAGE = `Usage:
   ${spell('checkpoint list')}
   ${spell('checkpoint restore <id>')}`;
 
-/** What one HTTP probe learned. `unknown` is anything that is not a clean "nobody there". */
-export type ProbeAnswer = { kind: 'answered' } | { kind: 'absent' } | { kind: 'unknown'; detail: string };
+/** What one HTTP probe learned (`code`: the connection or lookup error that said so). `unknown` is anything that is not a clean "nobody there". */
+export type ProbeAnswer = { kind: 'answered' } | { kind: 'absent'; code?: string } | { kind: 'unknown'; detail: string };
 
 export type { ComposeAnswer, ComposeStack, DockerExec, ExecResult } from './host-broker/helper.mts';
 
 export type OfflineProbes = {
-  /** True inside a container (`/.dockerenv`): compose is not reachable from there. */
+  /** True inside a container (`/.dockerenv`). */
   inContainer: boolean;
+  /**
+   * Inside a container: it is a service of the generated compose (its
+   * `NEURALIS_DOCKER=true`, the `compose run` form too), so it sits on the
+   * install's network. Default: this process's environment.
+   */
+  composeService?: boolean;
   http(url: string): Promise<ProbeAnswer>;
   composeRunning(cwd: string): Promise<ComposeAnswer>;
 };
@@ -60,30 +65,46 @@ export type OfflineProbes = {
 export type OfflineVerdict = { offline: true } | { offline: false; reason: string };
 
 /**
- * The offline decision. Host plane: the app port on loopback + compose. In a
- * one-off container: loopback (this container) + the `neuralis` service name,
- * which resolves to the app container while it runs (a `compose run` container
- * does not take the service alias).
+ * The offline decision, by where this process runs:
+ *
+ * - on the machine: the app port on loopback + compose.
+ * - an image-only folder (a one-shot container with the folder bound and the
+ *   socket): compose ALONE decides — this container's loopback is its own and
+ *   it is on no compose network, so no HTTP answer means anything; anything
+ *   but "the stack is readable and its app is not running" refuses.
+ * - the image's own tree in a container: loopback + the `neuralis` service
+ *   name, which resolves to the app container while it runs (a `compose run`
+ *   container does not take the service alias). A container that is no
+ *   service of the install is on no compose network either: there a
+ *   `ENOTFOUND` for the name proves nothing and refuses.
  */
 export async function checkOffline(
   opts: { appPort: number; neuralisDir: string },
   probes: OfflineProbes,
 ): Promise<OfflineVerdict> {
+  const cannotProve = (detail: string): OfflineVerdict => ({ offline: false, reason: `could not prove the app is stopped (${detail})` });
+  const running = (app: string): OfflineVerdict => ({ offline: false, reason: `\`docker compose ps\` shows the ${app} service running` });
+  if (probes.inContainer && installKindOf(opts.neuralisDir) === 'image') {
+    const compose = await probes.composeRunning(opts.neuralisDir);
+    if (compose.kind === 'services') return compose.running.includes(compose.app) ? running(compose.app) : { offline: true };
+    return cannotProve(compose.kind === 'no-docker' ? 'no Docker CLI in this container' : composeDetail(compose));
+  }
+  const service = 'http://neuralis:3100/api/health';
   const urls = [`http://127.0.0.1:${opts.appPort}/api/health`];
-  if (probes.inContainer) urls.push('http://neuralis:3100/api/health');
+  if (probes.inContainer) urls.push(service);
+  const onComposeNetwork = probes.composeService ?? process.env.NEURALIS_DOCKER === 'true';
   for (const url of urls) {
     const answer = await probes.http(url);
     if (answer.kind === 'answered') return { offline: false, reason: `the app answers on ${url}` };
-    if (answer.kind === 'unknown') {
-      return { offline: false, reason: `could not prove the app is stopped (${url}: ${answer.detail})` };
+    if (answer.kind === 'unknown') return cannotProve(`${url}: ${answer.detail}`);
+    if (url === service && answer.code === 'ENOTFOUND' && !onComposeNetwork) {
+      return cannotProve(`${url}: ENOTFOUND — this container is on no compose network of the install; run the command from the install folder as \`neuralis <command>\``);
     }
   }
   if (!probes.inContainer) {
     const compose = await probes.composeRunning(opts.neuralisDir);
-    if (compose.kind === 'services' && compose.running.includes(compose.app)) {
-      return { offline: false, reason: `\`docker compose ps\` shows the ${compose.app} service running` };
-    }
-    if (compose.kind === 'unlabelled') return { offline: false, reason: `could not prove the app is stopped (${compose.detail})` };
+    if (compose.kind === 'services' && compose.running.includes(compose.app)) return running(compose.app);
+    if (compose.kind === 'unlabelled') return cannotProve(compose.detail);
     // `no-docker` is a native install; `failed` is a folder with no compose
     // stack (no compose file, daemon down) — nothing there can be running.
   }
@@ -122,7 +143,7 @@ export async function httpProbe(url: string, deps: { lookup?: Lookup; lookupTime
   const { hostname } = new URL(url);
   if (isIP(hostname) === 0) {
     const failed = await lookupWithin(hostname, deps.lookup ?? ((name) => dnsLookup(name)), deps.lookupTimeoutMs ?? NAME_LOOKUP_TIMEOUT_MS);
-    if (failed?.code && ABSENT_CODES.has(failed.code)) return { kind: 'absent' };
+    if (failed?.code && ABSENT_CODES.has(failed.code)) return { kind: 'absent', code: failed.code };
     if (failed) return { kind: 'unknown', detail: `${hostname}: ${failed.code}` };
   }
   try {
@@ -131,7 +152,7 @@ export async function httpProbe(url: string, deps: { lookup?: Lookup; lookupTime
   } catch (err) {
     const cause = (err as { cause?: { code?: unknown } }).cause;
     const code = typeof cause?.code === 'string' ? cause.code : undefined;
-    if (code && ABSENT_CODES.has(code)) return { kind: 'absent' };
+    if (code && ABSENT_CODES.has(code)) return { kind: 'absent', code };
     return { kind: 'unknown', detail: code ?? (err instanceof Error ? err.name : String(err)) };
   }
 }

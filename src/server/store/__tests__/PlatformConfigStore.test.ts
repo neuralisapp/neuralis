@@ -257,7 +257,7 @@ describe('getAllSettings', () => {
   });
 });
 
-describe('full first-party declarations register cleanly', () => {
+describe('full native declarations register cleanly', () => {
   // The Inc-1 byte-equivalence pin (44-row fixture vs the deleted
   // CONFIG_SCHEMA) is RETIRED — Inc 2 mutated the schema deliberately
   // (brainEmbedConcurrency deleted, min/max rows added), which is exactly the

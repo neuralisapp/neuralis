@@ -82,9 +82,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     // ALL packages, justified as "a feature may be referenced by a contribution
     // in another package" — true, but `summarizeConsumers` emits each consumer's
     // NAME, so a foreign drop declaring any contribution with
-    // `requires.features:['files.read']` (a first-party feature that survives
+    // `requires.features:['files.read']` (a native feature that survives
     // the group filter) had its contribution name rendered here. Filtering both
-    // halves keeps the legitimate cross-FIRST-PARTY references — an agent-core
+    // halves keeps the legitimate cross-NATIVE references — an agent-core
     // tool consuming brain-core's `files.read`, both visible — and drops only
     // foreign-project consumers. Route-level consumers are intentionally absent
     // — see featureConsumersIndex scope note + the test-time audit.

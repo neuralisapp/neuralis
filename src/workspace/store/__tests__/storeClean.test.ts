@@ -249,7 +249,7 @@ describe('projectStateById (the switch store)', () => {
   it('persist partialize carries the switch store', () => {
     const partialize = useWorkspaceStore.persist.getOptions().partialize!;
     const persisted = partialize(s());
-    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
+    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'phoneDockPrefsByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
   });
 });
 

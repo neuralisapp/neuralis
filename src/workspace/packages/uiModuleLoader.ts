@@ -1,5 +1,5 @@
 /**
- * uiModuleLoader — attaches first-party package UIs at RUNTIME, the one lane a
+ * uiModuleLoader — attaches native package UIs at RUNTIME, the one lane a
  * package's workspace UI reaches the host through.
  *
  * The runtime route hands the workspace a `ui` view next to the snapshot (the
@@ -73,6 +73,8 @@ type LoaderState = {
   refused: Map<string, string>;
   /** Package id → why its attach failed on THIS page, when the reason is a named one (`no-install-export`). */
   attachFailed: Map<string, string>;
+  /** The packages the latest `ui` view lists a module for; `null` until the first view arrives. */
+  viewModules: Set<string> | null;
   holdTimer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -93,6 +95,7 @@ function loaderState(): LoaderState {
       holdTimer: null,
       refused: new Map(),
       attachFailed: new Map(),
+      viewModules: null,
     };
     g[STATE_KEY] = s;
   }
@@ -138,9 +141,18 @@ export function uiModuleRefusalReason(packageId: string): string | null {
   return s.refused.get(packageId) ?? s.attachFailed.get(packageId) ?? null;
 }
 
-/** Whether `packageId`'s module is being fetched right now (its surfaces render a loading placeholder). */
-export function isUiModulePending(packageId: string): boolean {
-  return loaderState().pending.has(packageId);
+/**
+ * Whether `packageId`'s `direct` surfaces wait for its module — they render
+ * "Loading…", never "cannot be rendered": no `ui` view has reached this page
+ * yet (the host has not answered), its import runs, or the latest view lists it
+ * and its `import()` rejected (the next view imports it again). False once it
+ * attached, once the host refused it or it failed for a named reason, and when
+ * the latest view lists no module for it.
+ */
+export function isUiModuleAwaited(packageId: string): boolean {
+  const s = loaderState();
+  if (s.viewModules === null || s.pending.has(packageId)) return true;
+  return s.viewModules.has(packageId) && !s.attempted.has(packageId);
 }
 
 /**
@@ -396,6 +408,9 @@ function startModules(view: PackageUiAttachments, importer: ModuleImporter): Pro
     ensureStylesheet(view.sheet.url, 'union-sheet');
     s.sheetUrl = view.sheet.url;
   }
+  const firstView = s.viewModules === null;
+  s.viewModules = new Set(view.modules.map((d) => d.packageId));
+  if (firstView) emit();
 
   const candidates: UiModuleDescriptor[] = [];
   for (const descriptor of view.modules) {
@@ -440,13 +455,23 @@ function startModules(view: PackageUiAttachments, importer: ModuleImporter): Pro
     settles.set(
       id,
       (async () => {
+        // Whether `import()` itself rejected: no install function of the module
+        // ran, so the next view may import it again. A fetch that failed (the
+        // host restarting) then attaches; a module that threw while it
+        // evaluated stays failed — the browser never evaluates one URL twice.
+        let importRejected = false;
+        const tracked: ModuleImporter = (url) => importer(url).catch((error: unknown) => {
+          importRejected = true;
+          throw error;
+        });
         try {
           await Promise.all(providers);
-          await installModule(descriptor, importer);
+          await installModule(descriptor, tracked);
         } catch (error) {
           console.error(`[package-ui] ${id} failed to attach`, error);
           const reason = (error as { reason?: unknown } | null)?.reason;
           if (typeof reason === 'string') s.attachFailed.set(id, reason);
+          if (importRejected) s.attempted.delete(id);
         } finally {
           s.pending.delete(id);
           emit();
@@ -459,7 +484,8 @@ function startModules(view: PackageUiAttachments, importer: ModuleImporter): Pro
 
 /**
  * Attach every module of `view` not attached yet; resolves when this view's
- * modules have settled. Each package is started at most once per page, so a
+ * modules have settled. Each package is started once per page — again only
+ * after its `import()` rejected, which installed nothing — so a
  * snapshot arriving mid-load starts only what is new and never waits behind a
  * module that is still loading. The plan sees only this call's candidates: a
  * new consumer of a provider attempted by an earlier call is not ordered after

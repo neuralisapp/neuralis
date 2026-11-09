@@ -1,5 +1,5 @@
 /**
- * Offline upgrade `source-device-v1`: the host plane moves onto paired devices.
+ * Offline upgrade `source-device-v1`: the server's host access moves onto paired devices.
  *
  * Until this build ONE host broker served the server's own machine, reached
  * through a compose bind. Now every machine is a paired device, the server's
@@ -63,7 +63,7 @@ const OPERATOR_LITERAL = 'operator';
 const DEVICE_NAME = 'Neuralis server';
 
 const REMEDY =
-  `run the upgrade on the server, where its broker secret lives (an image-only folder: add \`-v "$HOME/.neuralis/host-broker:/.neuralis/host-broker:ro" -v "$HOME/.neuralis/device:/.neuralis/device"\` to the \`docker compose run\`); ` +
+  `run the upgrade on the server, where its broker secret lives (\`neuralis upgrade --apply\` — in an image-only folder it binds the data home's \`host-broker\` and \`device\` folders into its run of the app service); ` +
   `name the operator device's owner with ${DEVICE_OWNER_ENV}=<userId> when the host sources do not name exactly one user; ` +
   'or remove the host source in the running app first';
 
@@ -96,7 +96,7 @@ async function realUser(appRoot: string, userId: string): Promise<Json | null> {
   }
 }
 
-/** `<home>/device/device.json` — the identity `neuralis device` reads (`devicePaths(...).identity`). */
+/** `<home>/device/device.json` — the one-host identity `neuralis device install` moves into its host's folder. */
 export function deviceIdentityFile(home: string): string {
   return join(home, 'device', 'device.json');
 }

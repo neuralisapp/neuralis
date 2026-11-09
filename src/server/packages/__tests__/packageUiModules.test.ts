@@ -49,7 +49,7 @@ function definition(id: string, module?: { entry: string; css?: string; provides
     id,
     name: id,
     version: '1.0.0',
-    access: { trust: 'first-party' },
+    access: { trust: 'native' },
     ...(module ? { app: { module } } : {}),
   } as unknown as PackageDefinition;
 }
@@ -207,7 +207,7 @@ describe('buildUiAttachments — module table', () => {
 });
 
 describe('buildUiAttachments — union sheet', () => {
-  it('compiles ONE sheet over every first-party package, with a hash independent of package order', async () => {
+  it('compiles ONE sheet over every native package, with a hash independent of package order', async () => {
     const a = join(root, 'sheetA');
     const c = join(root, 'sheetC');
     await writePackage(a, { appSource: 'export const A = () => <div className="p-2 md:p-4" />;' });

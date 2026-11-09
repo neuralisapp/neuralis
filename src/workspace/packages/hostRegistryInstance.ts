@@ -1,6 +1,6 @@
 /**
  * The single client-side `PackageHostRegistry` instance for the workspace.
- * Each first-party package registers its widget renderers and slot fills
+ * Each native package registers its widget renderers and slot fills
  * here through its runtime module (`uiModuleLoader.ts`);
  * `WidgetRendererStrategy` resolves through it. Registrations can land after
  * the first render, so a component that renders a slot subscribes
@@ -20,7 +20,7 @@ export function getHostRegistry(): PackageHostRegistry {
 }
 
 /**
- * Host SLOTS — extension points the HOST names and a first-party package
+ * Host SLOTS — extension points the HOST names and a native package
  * fills, keyed in this same registry instead of by a manifest
  * `component.import`. A slot is not a product name; an empty slot fails soft.
  *
@@ -45,7 +45,7 @@ export function getHostRegistry(): PackageHostRegistry {
  *   surface (the widget type and its entry state are the package's); empty ⇒
  *   no row.
  *
- * The first-party floor is the LOADER (only first-party modules ever install);
+ * The native floor is the LOADER (only native modules ever install);
  * `hostSlotOwnerViolation` keeps a module from filling a provider slot under
  * another package's key.
  */

@@ -122,7 +122,7 @@ export async function GET(
           return null;
         }
         if (!hasFeature(session, 'channels.connect')) return null;
-        return { ...session, callerId: 'neuralis', callerTrust: 'first-party' };
+        return { ...session, callerId: 'neuralis', callerTrust: 'native' };
       },
     });
     if (result.family !== 'channel' || result.subject !== channel || !result.tokens?.accessToken) {

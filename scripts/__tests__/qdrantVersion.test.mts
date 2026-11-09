@@ -15,6 +15,7 @@ import {
   composeQdrantVersion,
   dockerInstallProbe,
   qdrantBinaryAsset,
+  qdrantBinaryName,
   qdrantImageRef,
   qdrantUpgradeChain,
   readQdrantState,
@@ -47,15 +48,19 @@ function probe(p: { storage: boolean | null; running?: string | null; installed?
 }
 
 describe('the pinned release table', () => {
-  it('holds one release per minor from 1.13 to the target, each with an image digest and both binaries', () => {
+  it('holds one release per minor from 1.13 to the target, each with an image digest and every binary (Linux, macOS, Windows)', () => {
     const minors = QDRANT_RELEASES.map((r) => Number(r.version.split('.')[1]));
     expect(minors).toEqual([13, 14, 15, 16, 17, 18, 19]);
     expect(QDRANT_RELEASES.at(-1)?.version).toBe(QDRANT_TARGET_VERSION);
+    const targets = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-apple-darwin', 'x86_64-pc-windows-msvc'] as const;
     for (const release of QDRANT_RELEASES) {
       expect(release.imageDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
-      expect(release.binarySha256['x86_64-unknown-linux-musl']).toMatch(/^[0-9a-f]{64}$/);
-      expect(release.binarySha256['aarch64-unknown-linux-musl']).toMatch(/^[0-9a-f]{64}$/);
+      expect(Object.keys(release.binarySha256).sort()).toEqual([...targets].sort());
+      for (const target of targets) expect(release.binarySha256[target], `${release.version} ${target}`).toMatch(/^[0-9a-f]{64}$/);
     }
+    // Every pin is its own archive: no hash is shared between two targets or two releases.
+    const all = QDRANT_RELEASES.flatMap((r) => Object.values(r.binarySha256));
+    expect(new Set(all).size).toBe(all.length);
   });
 
   it('renders a digest-pinned image reference and refuses an unpinned version', () => {
@@ -76,8 +81,25 @@ describe('the pinned release table', () => {
     expect(arm?.filename).toBe('qdrant-aarch64-unknown-linux-musl.tar.gz');
     expect(arm?.url).not.toContain('aarch64-unknown-linux-gnu');
     expect(arm?.url).not.toContain('latest');
-    expect(qdrantBinaryAsset('1.19.1', 'darwin', 'arm64')).toBeNull();
     expect(qdrantBinaryAsset('1.19.0', 'linux', 'x64')).toBeNull();
+  });
+
+  it('names the asset per OS: macOS .tar.gz for both architectures, Windows x64 .zip (qdrant.exe), and no Windows arm64 or 32-bit asset', () => {
+    expect(qdrantBinaryAsset('1.19.1', 'darwin', 'arm64')).toEqual({
+      url: 'https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-aarch64-apple-darwin.tar.gz',
+      filename: 'qdrant-aarch64-apple-darwin.tar.gz',
+      sha256: 'e060209dfefc9d977ddcec48521349f505f8fd1ce21f2a3db444140870522fe4',
+    });
+    expect(qdrantBinaryAsset('1.19.1', 'darwin', 'x64')?.filename).toBe('qdrant-x86_64-apple-darwin.tar.gz');
+    expect(qdrantBinaryAsset('1.13.6', 'win32', 'x64')).toEqual({
+      url: 'https://github.com/qdrant/qdrant/releases/download/v1.13.6/qdrant-x86_64-pc-windows-msvc.zip',
+      filename: 'qdrant-x86_64-pc-windows-msvc.zip',
+      sha256: 'fac4743c7c976268850f603cb07a120e5cb857a441f523b1507d5f2714a273e1',
+    });
+    expect(qdrantBinaryAsset('1.19.1', 'win32', 'arm64')).toBeNull();
+    expect(qdrantBinaryAsset('1.19.1', 'win32', 'ia32')).toBeNull();
+    expect(qdrantBinaryAsset('1.19.1', 'freebsd', 'x64')).toBeNull();
+    expect([qdrantBinaryName('win32'), qdrantBinaryName('darwin'), qdrantBinaryName('linux')]).toEqual(['qdrant.exe', 'qdrant', 'qdrant']);
   });
 });
 

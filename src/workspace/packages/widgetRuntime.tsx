@@ -2,7 +2,7 @@
  * Widget Runtime — Package snapshot → widget registry hydration.
  *
  * Registers widget contributions from the backend snapshot
- * into the existing widget registry (widgets/registry.tsx). A first-party
+ * into the existing widget registry (widgets/registry.tsx). A native
  * package's widget components reach the shared `PackageHostRegistry` through
  * its runtime module (`uiModuleLoader`). A runtime registration lands AFTER the
  * snapshot was applied, so the registry and the loader both re-hydrate the last

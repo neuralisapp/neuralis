@@ -85,7 +85,7 @@ function item(overrides: Partial<DockItem> = {}): DockItem {
     icon: Glyph,
     onClick: () => undefined,
     prefKey: CAL,
-    group: 'trust:first-party',
+    group: 'trust:native',
     badgeKey: CAL,
     ...overrides,
   };

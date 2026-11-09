@@ -80,19 +80,20 @@ function StageModeRows({ autoPhone, onAutoPhone }: { autoPhone: boolean; onAutoP
   const stageMode = useWorkspaceStore((s) => (runtimeKey ? effectiveStageMode(s, runtimeKey) : 'tiled'));
   const manual = useWorkspaceStore((s) => Boolean(runtimeKey && s.manualModeByRuntimeKey[runtimeKey]));
   const setStageMode = useWorkspaceStore((s) => s.setStageMode);
+  const editing = useWorkspaceStore((s) => Boolean(s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone));
   return (
     <>
       <Row label="Mode">
-        <Segmented label="Stage mode" value={stageMode} options={STAGE_MODES} disabled={!agentId} onChange={(mode) => { if (agentId) setStageMode({ agentId, mode }); }} />
+        <Segmented label="Stage mode" value={stageMode} options={STAGE_MODES} disabled={!agentId || editing} onChange={(mode) => { if (agentId) setStageMode({ agentId, mode }); }} />
         {manual && autoPhone ? (
-          <button type="button" className="h-7 px-2 rounded-md text-xs text-white/55 hover:text-white hover:bg-white/8" title="Follow the device again: Phone on a small screen, the saved mode elsewhere" onClick={() => useWorkspaceStore.getState().clearManualStageMode()}>
+          <button type="button" disabled={editing} className="h-7 px-2 rounded-md text-xs text-white/55 hover:text-white hover:bg-white/8" title="Follow the device again: Phone on a small screen, the saved mode elsewhere" onClick={() => useWorkspaceStore.getState().clearManualStageMode()}>
             Auto
           </button>
         ) : null}
       </Row>
       <Row label="Phone">
         <label className="flex items-center gap-2 text-xs text-white/70">
-          <input type="checkbox" checked={autoPhone} onChange={(event) => { onAutoPhone(event.target.checked); if (event.target.checked) useWorkspaceStore.getState().clearManualStageMode(); }} />
+          <input type="checkbox" disabled={editing} checked={autoPhone} onChange={(event) => { onAutoPhone(event.target.checked); if (event.target.checked) useWorkspaceStore.getState().clearManualStageMode(); }} />
           Switch to Phone automatically on a small screen
         </label>
       </Row>
@@ -106,38 +107,39 @@ function StageModeRows({ autoPhone, onAutoPhone }: { autoPhone: boolean; onAutoP
  * The same view choice as the project menu, through the same store actions.
  * In a Group the Group row is always there — even with one Group — with its
  * "Edit" entry: the agent dock's edit draft, which holds the Groups' names and
- * members (Save/Cancel at the dock's end).
+ * members (Save/Cancel in the shared panel).
  */
-function ViewRows() {
+function ViewRows({ phone = false, onEdit }: { phone?: boolean; onEdit?: () => void }) {
   const { presentation, groupId, available } = usePresentation();
   const groups = useProjectGroups();
-  const editingGroups = useWorkspaceStore((s) => s.dockEditing.secondary);
+  const editingGroups = useWorkspaceStore((s) => Boolean(s.dockEditing.secondary || s.dockEditing.phone));
+  const anyEditing = useWorkspaceStore((s) => Boolean(s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone));
   if (!available) return null;
   const store = useWorkspaceStore.getState;
   return (
     <>
       <Row label="View">
-        <Segmented label="Workspace view" value={presentation} options={[{ value: 'agent', label: 'Per agent' }, { value: 'group', label: 'Group' }]} onChange={(value) => store().setPresentation(value)} />
+        <Segmented disabled={anyEditing} label="Workspace view" value={presentation} options={[{ value: 'agent', label: 'Per agent' }, { value: 'group', label: 'Group' }]} onChange={(value) => store().setPresentation(value)} />
       </Row>
       {presentation === 'group' ? (
         <Row label="Group">
-          <Segmented label="Group" value={groupId} options={groups.map((g) => ({ value: g.id, label: g.name }))} onChange={(id) => store().selectGroup(id)} />
-          <EditGroupsButton editing={editingGroups} />
+          <Segmented disabled={anyEditing} label="Group" value={groupId} options={groups.map((g) => ({ value: g.id, label: g.name }))} onChange={(id) => store().selectGroup(id)} />
+          <EditGroupsButton editing={editingGroups} phone={phone} onEdit={onEdit} />
         </Row>
       ) : null}
     </>
   );
 }
 
-/** "Edit" for the Groups: opens the agent dock's edit draft (names, members, new, delete). */
-export function EditGroupsButton({ editing, className }: { editing: boolean; className?: string }) {
+/** Edit Groups through the existing dock draft (names, members, new, delete). */
+export function EditGroupsButton({ editing, className, phone = false, onEdit }: { editing: boolean; className?: string; phone?: boolean; onEdit?: () => void }) {
   return (
     <button
       type="button"
       aria-pressed={editing}
       disabled={editing}
-      onClick={() => useWorkspaceStore.getState().setDockEditing('secondary', true)}
-      title={editing ? 'Editing the Groups at the agent dock — Save or Cancel there' : 'Rename Groups and choose their agents (at the agent dock)'}
+      onClick={() => { useWorkspaceStore.getState().setDockEditing(phone ? 'phone' : 'secondary', true); onEdit?.(); }}
+      title={editing ? 'Save or Cancel the Group draft at the dock' : 'Rename Groups and choose their agents'}
       className={cn('h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition', editing ? 'bg-white/15 text-white' : 'bg-white/5 text-white/60 hover:bg-white/15 hover:text-white/80', className)}
     >
       <Pencil className="w-3 h-3" />
@@ -159,7 +161,7 @@ export const DISCARD_CONFIRM_MS = 4000;
  * inline before discarding both drafts — never a silent discard. The confirm
  * disarms itself after {@link DISCARD_CONFIRM_MS} or when a dock leaves edit.
  */
-export function EditDocksToggle() {
+export function EditDocksToggle({ onEdit }: { onEdit?: () => void } = {}) {
   const bothEditing = useWorkspaceStore((s) => s.dockEditing.primary && s.dockEditing.secondary);
   const setDockEditing = useWorkspaceStore((s) => s.setDockEditing);
   const projectId = useWorkspaceStore((s) => s.session.projectId);
@@ -198,7 +200,7 @@ export function EditDocksToggle() {
   return (
     <button
       type="button"
-      onClick={() => (bothEditing ? setConfirming(true) : setDockEditing('both', true))}
+      onClick={() => { if (bothEditing) setConfirming(true); else { setDockEditing('both', true); onEdit?.(); } }}
       disabled={!projectId}
       aria-pressed={bothEditing}
       className={cn(
@@ -347,7 +349,7 @@ function DockMapCell({ label, children }: { label: string; children: ReactNode }
 
 // ─── Main Panel ────────────────────────────────────────────────────────────
 
-export function LayoutSettingsPanel() {
+export function LayoutSettingsPanel({ phone = false, onEdit }: { phone?: boolean; onEdit?: () => void }) {
   const [config, setConfig] = useState<DockLayoutConfig>(DEFAULT_DOCK_LAYOUT);
 
   useEffect(() => {
@@ -410,7 +412,7 @@ export function LayoutSettingsPanel() {
       </div>
 
       <Section title="Workspace">
-        <ViewRows />
+        <ViewRows phone={phone} onEdit={onEdit} />
         <StageModeRows autoPhone={config.autoPhone} onAutoPhone={(autoPhone) => update({ ...config, autoPhone })} />
         <Row label="Chat">
           <Segmented label="Chat side" value={config.chatPosition} options={[{ value: 'start', label: 'Left' }, { value: 'end', label: 'Right' }]} onChange={(chatPosition) => update({ ...config, chatPosition })} />
@@ -438,7 +440,7 @@ export function LayoutSettingsPanel() {
               <Segmented label="Dock background" value={config.dockBackground} options={[{ value: 'classic', label: 'Icon tiles' }, { value: 'toolbar', label: 'Toolbar' }]} onChange={(dockBackground) => update({ ...config, dockBackground })} />
             </DockMapCell>
             <DockMapCell label="Items">
-              <EditDocksToggle />
+              {phone ? <button type="button" className="h-8 px-3 rounded-lg bg-white/10 text-xs" onClick={() => { useWorkspaceStore.getState().setDockEditing('phone', true); onEdit?.(); }}>Edit phone dock</button> : <EditDocksToggle onEdit={onEdit} />}
             </DockMapCell>
           </div>
         </div>

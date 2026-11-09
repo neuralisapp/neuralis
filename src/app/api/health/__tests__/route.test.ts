@@ -13,6 +13,8 @@ vi.mock('@/server/host/bootstrap', () => ({
   peekRuntime: () => mocks.booted ? { health: mocks.health } : null,
 }));
 import { GET } from '../route';
+import { currentInstanceId } from '@/server/host/homeLock';
+const ID = currentInstanceId();
 const base: BootstrapStatus = { phase: 'starting', error: null, errorCode: null, startedAt: Date.now() - 5_000, readyAt: null };
 beforeEach(() => {
   mocks.booted = true;
@@ -50,7 +52,7 @@ describe('GET /api/health', () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase }); mocks.health.mockClear();
     const response = await GET();
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ status: 'initializing', phase });
+    expect(await response.json()).toEqual({ status: 'initializing', phase, instanceId: ID });
     expect(mocks.health).not.toHaveBeenCalled();
   });
   it.each(['upgrade_required', 'data_format_newer', 'bootstrap_failed'] as const)(
@@ -60,21 +62,27 @@ describe('GET /api/health', () => {
       mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'error', error, errorCode });
       const response = await GET();
       expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ status: 'error', error: 'bootstrap_failed', code: errorCode });
+      expect(await response.json()).toEqual({ status: 'error', error: 'bootstrap_failed', code: errorCode, instanceId: ID });
     },
   );
-  it.each(['secret_missing', 'setup_incomplete'] as const)('an unconfigured instance (%s) answers 503 setup_required before the runtime is asked', async (reason) => {
+  it.each(['secret_missing', 'secret_moved', 'setup_incomplete'] as const)('an unconfigured instance (%s) answers 503 setup_required before the runtime is asked', async (reason) => {
     mocks.getSetupState.mockResolvedValue({ configured: false, reason });
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt: Date.now() });
     const response = await GET();
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ status: 'setup_required', code: reason });
+    expect(await response.json()).toEqual({ status: 'setup_required', code: reason, instanceId: ID });
     expect(mocks.getBootstrapStatus).not.toHaveBeenCalled();
     expect(mocks.health).not.toHaveBeenCalled();
   });
   it('a health hook failure gives a classified failure', async () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready' });
     mocks.health.mockRejectedValueOnce(new Error('/private/token secret'));
-    expect(await (await GET()).json()).toEqual({ status: 'degraded', health: 'failed' });
+    expect(await (await GET()).json()).toEqual({ status: 'degraded', health: 'failed', instanceId: ID });
+  });
+  it('every answer carries the one per-process instance id (the data-home lock\'s liveness question), and only that', async () => {
+    mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt: Date.now() });
+    const ready = await (await GET()).json() as { instanceId: string };
+    expect(ready.instanceId).toBe(ID);
+    expect(ID).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

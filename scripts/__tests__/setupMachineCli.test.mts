@@ -65,7 +65,7 @@ async function advancedWizard(f: ReturnType<typeof fixture>, docker: boolean, pr
     ['Configure more providers?', 'n'], ['How do you want to connect OpenAI?', '5'],
     [docker ? 'How to run Qdrant?' : 'Qdrant is not running. Options:', '3'],
     ['Where is Ollama (your local LLM runtime) running?', '4'], ['Add a custom LLM endpoint?', 'n'],
-    ...(docker ? [['Pre-pull the Neuralis desktop image now (background)?', prefetch ? 'y' : 'n'] as [string, string]] : []),
+    ...(docker ? [['Turn on the virtual desktop (machine-core)?', 'y'], ['Pre-pull the Neuralis desktop image now (background)?', prefetch ? 'y' : 'n']] as [string, string][] : []),
     ['Project name', 'Desktop fixture'], [`Public origin [http://localhost:${ports.app}]:`, ''],
     ['Publish the ChatGPT sign-in callback?', '1'], ['Trusted proxies:', ''], ['Overwrite?', 'y'],
   ];
@@ -88,7 +88,7 @@ async function wizard(f: ReturnType<typeof fixture>, docker: boolean, owner: [st
 }
 const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '');
 const UNASKED = ['Anthropic (Claude) API key', 'Google Gemini API key', 'Configure more providers?', 'How do you want to connect OpenAI?', 'How to run Qdrant?', 'Where is Ollama', 'Add a custom LLM endpoint?',
-  'Which provider?', 'Pre-pull the Neuralis desktop image now', 'Project name', 'Publish the ChatGPT sign-in callback?', '── Reverse proxy', 'Start Neuralis now?'];
+  'Which provider?', 'Turn on the virtual desktop', 'Pre-pull the Neuralis desktop image now', 'Project name', 'Publish the ChatGPT sign-in callback?', '── Reverse proxy', 'Start Neuralis now?'];
 function commands(f: ReturnType<typeof fixture>): string[][] {
   return existsSync(f.transcript) ? readFileSync(f.transcript, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as string[]) : [];
 }
@@ -123,7 +123,8 @@ describe('bundled desktop setup through the real CLI', () => {
     const output = plain(await run(f, [], [...OWNER, ['Pick a deployment mode', '2'], ['Public origin', ''], ['Overwrite?', 'y']]));
     const next = output.slice(output.lastIndexOf('Next steps:'), output.indexOf('Then open:'));
     expect(next.indexOf('docker compose up -d qdrant')).toBeGreaterThan(-1);
-    expect(next.indexOf('docker compose up -d qdrant')).toBeLessThan(next.indexOf('npm run start'));
+    expect(next.indexOf('docker compose up -d qdrant')).toBeLessThan(next.search(/neuralis[: ]start/));
+    expect(next).not.toContain('npm run start'); // it binds 3100 whatever .env says
   }, 30_000);
   it('--help prints the usage and starts nothing', async () => {
     const f = fixture(true);
@@ -136,7 +137,9 @@ describe('bundled desktop setup through the real CLI', () => {
   it.each([true, false])('--advanced asks today\'s full set; Docker prefetch=%s keeps env, compose and platform on the exact derivative', async (prefetch) => {
     const f = fixture(true); const output = await advancedWizard(f, true, prefetch);
     const env = parseEnvContent(readFileSync(join(f.output, '.env'), 'utf8'));
-    expect(env.NEURALIS_MACHINE_IMAGE).toBe(image); expect(env.NEURALIS_MACHINE_DESKTOP_VARIANT).toBe('ubuntu-xfce');
+    expect(env.NEURALIS_MACHINE_IMAGE).toBe(image);
+    // The variant and the idle timeout are platform settings: platform.json is their one place, never a .env seed.
+    expect(env).not.toHaveProperty('NEURALIS_MACHINE_DESKTOP_VARIANT'); expect(env).not.toHaveProperty('NEURALIS_MACHINE_IDLE_MINUTES');
     expect(readFileSync(join(f.output, 'docker-compose.yml'), 'utf8')).toContain(`NEURALIS_MACHINE_IMAGE=${image}`);
     const config = JSON.parse(readFileSync(join(f.root, 'data/app/config/platform.json'), 'utf8')) as Record<string, unknown>;
     expect(config.machineImage).toBe(image); expect(config.machineDesktopVariant).toBe('ubuntu-xfce');
@@ -166,6 +169,25 @@ describe('bundled desktop setup through the real CLI', () => {
     expect(output).not.toContain('Pick a deployment mode');
     expect(readFileSync(join(f.output, '.env'), 'utf8')).toMatch(/^QDRANT_MODE=skip$/m);
   }, 30_000);
+  it('a FRESH native checkout settles its app port: a held 3100 moves the .env to a free one; a re-run keeps the recorded port (paired control)', async () => {
+    const f = fixture(false);
+    // 3100 held for the run — by this test when free, else by whoever holds it already.
+    const hold = createServer();
+    await new Promise<void>((ready) => { hold.once('error', () => ready()); hold.listen(3100, '0.0.0.0', () => ready()); });
+    try {
+      writeFileSync(join(f.output, '.env'), `NEURALIS_QDRANT_PORT=${(await freePorts()).app}\n`);
+      await run(f, [], [[NO_DOCKER, '3'], ...OWNER, ['Public origin', ''], ['Overwrite?', 'y']]);
+      const first = parseEnvContent(readFileSync(join(f.output, '.env'), 'utf8'));
+      expect(Number(first.NEURALIS_APP_PORT)).not.toBe(3100);
+      expect(first.NEXTAUTH_URL).toContain(`:${first.NEURALIS_APP_PORT}`);
+      const recorded = (await freePorts()).app;
+      writeFileSync(join(f.output, '.env'), readFileSync(join(f.output, '.env'), 'utf8').replace(/^NEURALIS_APP_PORT=.*$/m, `NEURALIS_APP_PORT=${recorded}`));
+      await run(f, [], [[NO_DOCKER, '3'], ['What would you like to do?', '1'], ['Project to maintain', ''], ['Public origin', ''], ['Overwrite?', 'y'], ['Overwrite?', 'y']]);
+      expect(Number(parseEnvContent(readFileSync(join(f.output, '.env'), 'utf8')).NEURALIS_APP_PORT)).toBe(recorded);
+    } finally {
+      await new Promise((closed) => hold.close(closed));
+    }
+  }, 40_000);
   it('without Docker, [3] runs in-memory with no download and no Qdrant question; the runtime warning stays; a re-run keeps the users and asks no owner', async () => {
     const f = fixture(false); const { output } = await wizard(f, false, OWNER, '3');
     expect(plain(output)).not.toContain('Downloading Qdrant');
@@ -175,10 +197,13 @@ describe('bundled desktop setup through the real CLI', () => {
     expect(rerun).not.toContain('Email:');
     expect(rerun).not.toContain('Password');
     expect(rerun).toContain('Owner: Owner <owner@example.test>');
-    expect(output).toContain('docker-missing'); expect(output).not.toContain('Pre-pull the Neuralis desktop image now');
+    expect(plain(output)).toContain('Docker not available — the virtual desktop stays off'); expect(output).not.toContain('Pre-pull the Neuralis desktop image now');
+    // The core-package list, and the one left off without Docker, in the home's platform config.
+    expect(plain(output)).toContain('@neuralis/admin · @neuralis/agent-core · @neuralis/brain-core — always on');
+    expect(JSON.parse(readFileSync(join(f.root, 'data', 'app', 'config', 'platform.json'), 'utf8'))).toMatchObject({ disabledBuiltinPackages: ['@neuralis/machine-core'] });
     expect(commands(f).filter((args) => args[0] === 'pull')).toEqual([]);
   }, 30_000);
-  it('compose-only preserves arbitrary custom image/variant and the separate admin config', async () => {
+  it('compose-only preserves an arbitrary custom image, leaves the variant to platform.json and .env, and keeps the admin config', async () => {
     const f = fixture(true);
     const configDir = join(f.root, 'data/app/config'); mkdirSync(configDir, { recursive: true });
     const admin = '{"machineImage":"private.example/admin-desktop:v7","machineDesktopVariant":"admin-special"}';
@@ -187,7 +212,9 @@ describe('bundled desktop setup through the real CLI', () => {
     await run(f, ['--compose-only']);
     const compose = readFileSync(join(f.output, 'docker-compose.yml'), 'utf8');
     expect(compose).toContain('NEURALIS_MACHINE_IMAGE=private.example/custom-desktop:v9');
-    expect(compose).toContain('NEURALIS_MACHINE_DESKTOP_VARIANT=custom-special');
+    // A hand-set variant line still reaches the container through `env_file: .env`; the compose file carries no second copy.
+    expect(compose).not.toContain('NEURALIS_MACHINE_DESKTOP_VARIANT');
+    expect(compose).toContain('      - path: .env');
     expect(readFileSync(join(configDir, 'platform.json'), 'utf8')).toBe(admin);
   });
 });

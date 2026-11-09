@@ -4,7 +4,7 @@
  * eventHub — ONE multiplexed EventSource for the whole workspace.
  *
  * Replaces the separate client EventSources (runtime, presence, workflow,
- * conversation, filesystem, project, devices, notifications) with a single connection to the host
+ * conversation, filesystem, project, devices, notifications, members) with a single connection to the host
  * `GET /api/events` hub. On
  * HTTP/1.1 the browser caps ~6 connections per origin; the workspace used to
  * hold one always-on connection per channel PLUS one workflow connection per
@@ -23,6 +23,17 @@
  * `?agentIds=` query so the server authorizes exactly the visible agents
  * (per-agent authz happens server-side). A set change reopens the connection
  * (debounced); presence/workflow/runtime/project/devices carry no agent scope.
+ *
+ * The server REPLAYS current state on connect (presence per slot, the runtime
+ * revision) to the listeners that exist THEN — the hub keeps no replay of its
+ * own. So a channel whose FIRST listener attaches to an already-open connection
+ * (a package provider mounting after the shell opened the hub) would never see
+ * it: a tab opened mid-turn showed no "is responding" lock. That 0→1 attach
+ * reopens the connection through the same debounced reopen an agent-set change
+ * uses — one reconnect per burst of late channels, none while still connecting
+ * (the replay has not been sent yet), none for a channel already listened to,
+ * and none for a channel this connection already replayed to (a sole listener
+ * that remounts keeps its state in its module, not in the component).
  */
 
 import { createReconnectDetector } from '@neuralis/package-system/client';
@@ -32,8 +43,10 @@ import { createReconnectDetector } from '@neuralis/package-system/client';
  * service (`{ projectId, unread: { total, byDock } }`, the recipient's own
  * connections only). It is deliberately absent from the kernel
  * `subscribeRealtime` union — no package subscribes to it; the shell does.
+ * `members` is host-only the same way: "who is online changed in this
+ * project" (`{ projectId }` only), read by the dock's People view.
  */
-export type HubChannel = 'runtime' | 'presence' | 'workflow' | 'filesystem' | 'conversation' | 'project' | 'devices' | 'notifications' | 'meta';
+export type HubChannel = 'runtime' | 'presence' | 'workflow' | 'filesystem' | 'conversation' | 'project' | 'devices' | 'notifications' | 'members' | 'meta';
 
 type ChannelListener = (name: string, payload: unknown) => void;
 type ChangeListener = () => void;
@@ -44,7 +57,8 @@ interface HubFrame {
   payload: unknown;
 }
 
-// Server keepalive is 25s; treat >60s without any event as a dead socket.
+// Server keepalive is a `meta` frame every 25s (an SSE comment would dispatch
+// nothing here); treat >60s without any frame as a dead socket.
 const STALE_MS = 60_000;
 const WATCHDOG_MS = 15_000;
 const RECONNECT_BASE_MS = 1_000;
@@ -71,9 +85,14 @@ const channelListeners: Record<HubChannel, Set<ChannelListener>> = {
   project: new Set(),
   devices: new Set(),
   notifications: new Set(),
+  members: new Set(),
   meta: new Set(),
 };
 const changeListeners = new Set<ChangeListener>();
+// The channels that had a listener when the CURRENT connection opened — the ones
+// the server's opening replay reached. A channel outside it attaching later
+// missed that replay.
+const servedChannels = new Set<HubChannel>();
 
 // agentId → refcount (filesystem subscribers). The union of keys drives `?agentIds=`.
 const agentRefs = new Map<string, number>();
@@ -132,6 +151,10 @@ function openSource(projectId: string): void {
   es.onopen = () => {
     reconnectDelay = RECONNECT_BASE_MS;
     lastMessageAt = Date.now();
+    servedChannels.clear();
+    for (const [channel, set] of Object.entries(channelListeners) as Array<[HubChannel, Set<ChannelListener>]>) {
+      if (set.size > 0) servedChannels.add(channel);
+    }
     setConnected(true);
   };
 
@@ -228,7 +251,10 @@ export interface HubSubscription {
  * existing signatures, so widgets don't change.
  */
 export function subscribeHub(sub: HubSubscription): () => void {
+  const lateFirstListener = connected && channelListeners[sub.channel].size === 0
+    && !servedChannels.has(sub.channel) && sub.projectId !== null && sub.projectId === activeProjectId;
   channelListeners[sub.channel].add(sub.onEvent);
+  if (lateFirstListener) scheduleAgentSetReopen();
   if (sub.onConnChange) changeListeners.add(sub.onConnChange);
   if (sub.agentId) addAgentRef(sub.agentId);
 
@@ -258,10 +284,19 @@ export function subscribeHub(sub: HubSubscription): () => void {
  * comes BACK after a drop, because the hub has no replay and a frame sent while
  * it was down is gone. Never on the first connect: the caller's initial load
  * covers that.
+ *
+ * `onConnected` is the workspace's ONE recovery arm: it runs on EVERY connect,
+ * the first included. `/api/events` answers only once the host's runtime is
+ * ready, so a connect is the host's own "I answer again" signal — the moment a
+ * boot load that failed (the host restarting, or still booting when the page
+ * loaded) is run again. A failed initial load is exactly what the first
+ * connect must see, which is why this is not the reconnect detector above.
+ * No timer, no poll: one call per connect.
  */
 export function subscribeProjectRecordChanges(params: {
   projectId: string;
   onChange: () => void;
+  onConnected?: () => void;
   debounceMs?: number;
 }): () => void {
   const debounceMs = params.debounceMs ?? 250;
@@ -277,7 +312,10 @@ export function subscribeProjectRecordChanges(params: {
         params.onChange();
       }, debounceMs);
     },
-    onConnChange: reconnect.onConnChange,
+    onConnChange: () => {
+      reconnect.onConnChange();
+      if (connected) params.onConnected?.();
+    },
   });
   reconnect.arm();
   return () => {
@@ -298,4 +336,5 @@ export function _resetEventHub(): void {
   agentRefs.clear();
   for (const set of Object.values(channelListeners)) set.clear();
   changeListeners.clear();
+  servedChannels.clear();
 }

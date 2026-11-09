@@ -20,6 +20,7 @@ vi.mock('@/server/packages/PackageRuntimeManager', () => ({
   getPackageRuntimeManager: () => ({
     getProjectPackageIds: () => mocks.projectPackageIds,
     getPackageOwnerScope: (_p: string, id: string) => mocks.ownerScope.get(id),
+    getPackageOwnerOrigin: () => undefined,
     getPackageManifestId: (_p: string, id: string) => id,
   }),
 }));
@@ -131,7 +132,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
       requires: { providesFeatures: [{ id: 'files.read', title: 'Read files' }] },
     },
     // A BUILTIN consuming another builtin's feature — the legitimate
-    // cross-first-party reference that must SURVIVE the filter.
+    // cross-native reference that must SURVIVE the filter.
     {
       id: 'agent-core',
       name: 'Agent Core',
@@ -169,13 +170,13 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
     const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
     const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
-    // `files.read` is first-party and survives the group filter — which is
+    // `files.read` is native and survives the group filter — which is
     // exactly why its consumers list was the leak channel.
     expect(driveRead.consumers.byKind.tool ?? []).not.toContain(FOREIGN_TOOL);
     expect(JSON.stringify(body)).not.toContain(FOREIGN_TOOL);
   });
 
-  it('KEEPS the cross-first-party consumer (the still-works control)', async () => {
+  it('KEEPS the cross-native consumer (the still-works control)', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
     const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
     const driveRead = brain.entries.find((e: any) => e.id === 'files.read');

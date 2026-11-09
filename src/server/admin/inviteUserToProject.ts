@@ -21,15 +21,14 @@
  * `role_too_strong` into one generic 403 (unified posture, no role oracle).
  */
 
-import bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { getProjectById, updateProject } from '../store/ProjectStore';
 import { createUser, deleteUser, getUserById } from '../store/UserStore';
-import type { ProjectMember } from '../store/projectTypes';
+import type { ProjectMember, ProjectRecord } from '../store/projectTypes';
 import { canAssignRole, rolePriority } from '@neuralis/package-system/access';
 import { nowISO } from '../../lib/utils';
 import { writeAuditLog } from '../store/AuditStore';
-import { validatePasswordComplexity } from '../auth/passwordPolicy';
+import { hashPassword, validatePasswordComplexity } from '../auth/passwordPolicy';
 
 export type InviteUserInput = {
   email: string;
@@ -64,6 +63,56 @@ export type InviteUserResult =
     }
   | { ok: false; error: InviteUserError };
 
+/**
+ * The ONE invite floor, over a project record as given (a snapshot, or the
+ * record inside the store's write chain): the caller is a member, their role
+ * resolves and carries `canInvite`, and — with a `targetRole` — that role
+ * exists and is no stronger than the caller's (`canAssignRole`). `null` = allowed.
+ * The invite-link verbs and the redeem's live re-check of the INVITER call it too.
+ */
+export function checkInviteFloor(
+  project: Pick<ProjectRecord, 'members' | 'roles'>,
+  callerUserId: string,
+  targetRole: string | null,
+): InviteUserError | null {
+  const member = project.members[callerUserId];
+  if (!member) return { code: 'caller_not_member' };
+  const roleDef = project.roles[member.role];
+  if (!roleDef) return { code: 'caller_role_unresolved' };
+  // The invite-shaped governance flag — the same floor `requireAdmin` carries.
+  if (!roleDef.canInvite) return { code: 'not_invite_capable' };
+  if (targetRole === null) return null;
+  const targetRoleDef = project.roles[targetRole];
+  if (!targetRoleDef) return { code: 'role_unknown', role: targetRole };
+  // An admin may not invite someone with a role stronger than their own.
+  const roleCheck = canAssignRole({
+    callerPriority: rolePriority(member.role, roleDef.priority),
+    targetPriority: rolePriority(targetRole, targetRoleDef.priority),
+  });
+  return roleCheck.allowed ? null : { code: 'role_too_strong', reason: roleCheck.reason };
+}
+
+/**
+ * The member row an invite writes, computed from the role AS IT IS on the
+ * record handed in — `tier` mirrors the role's ordinal priority so it never
+ * diverges from the role definition; `position` stays a free-text label (D-A).
+ */
+export function memberRecordFor(
+  project: Pick<ProjectRecord, 'roles'>,
+  user: { id: string; name: string; email: string },
+  role: string,
+): ProjectMember {
+  return {
+    userId: user.id,
+    name: user.name,
+    email: user.email,
+    role,
+    position: '',
+    tier: rolePriority(role, project.roles[role]?.priority),
+    addedAt: nowISO(),
+  };
+}
+
 export async function inviteUserToProject(
   callerUserId: string,
   projectId: string,
@@ -72,31 +121,16 @@ export async function inviteUserToProject(
   const project = await getProjectById(projectId);
   if (!project) return { ok: false, error: { code: 'project_not_found' } };
 
-  const member = project.members[callerUserId];
-  if (!member) return { ok: false, error: { code: 'caller_not_member' } };
-  const roleDef = project.roles[member.role];
-  if (!roleDef) return { ok: false, error: { code: 'caller_role_unresolved' } };
-
-  // The invite-shaped governance flag — the same floor `requireAdmin` carries.
-  if (!roleDef.canInvite) return { ok: false, error: { code: 'not_invite_capable' } };
+  const callerFloor = checkInviteFloor(project, callerUserId, null);
+  if (callerFloor) return { ok: false, error: callerFloor };
 
   const email = input.email?.trim();
   const name = input.name?.trim();
   if (!email || !name) return { ok: false, error: { code: 'missing_fields' } };
 
   const targetRole = input.role ?? 'member';
-  const targetRoleDef = project.roles[targetRole];
-  if (!targetRoleDef) return { ok: false, error: { code: 'role_unknown', role: targetRole } };
-
-  // Role-priority gate: an admin may not invite someone with a role stronger
-  // than their own (e.g. an admin cannot mint an owner).
-  const roleCheck = canAssignRole({
-    callerPriority: rolePriority(member.role, roleDef.priority),
-    targetPriority: rolePriority(targetRole, targetRoleDef.priority),
-  });
-  if (!roleCheck.allowed) {
-    return { ok: false, error: { code: 'role_too_strong', reason: roleCheck.reason } };
-  }
+  const floor = checkInviteFloor(project, callerUserId, targetRole);
+  if (floor) return { ok: false, error: floor };
 
   // Whitespace-only used to slip past complexity AND `mustChangePassword` while
   // the generated temp password was silently discarded; trimming once up front
@@ -110,7 +144,7 @@ export async function inviteUserToProject(
   }
 
   const tempPassword = password ?? randomBytes(9).toString('base64url');
-  const hash = await bcrypt.hash(tempPassword, 12);
+  const hash = await hashPassword(tempPassword);
 
   let user;
   try {
@@ -142,49 +176,12 @@ export async function inviteUserToProject(
   // the common case). These are the fence, and every refusal writes nothing.
   const refusal: { error: InviteUserError | null } = { error: null };
   const written = await updateProject(project.id, (p) => {
-    const freshCaller = p.members[callerUserId];
-    if (!freshCaller) {
-      refusal.error = { code: 'caller_not_member' };
-      return null;
-    }
-    const freshCallerRole = p.roles[freshCaller.role];
-    if (!freshCallerRole) {
-      refusal.error = { code: 'caller_role_unresolved' };
-      return null;
-    }
-    if (!freshCallerRole.canInvite) {
-      refusal.error = { code: 'not_invite_capable' };
-      return null;
-    }
-    const freshTargetRole = p.roles[targetRole];
-    if (!freshTargetRole) {
-      // Without this the write reaches `validateProjectInvariants`, which throws
-      // a generic error AFTER `createUser` already ran; a typed refusal is the
-      // cheap answer.
-      refusal.error = { code: 'role_unknown', role: targetRole };
-      return null;
-    }
-    const freshRoleCheck = canAssignRole({
-      callerPriority: rolePriority(freshCaller.role, freshCallerRole.priority),
-      targetPriority: rolePriority(targetRole, freshTargetRole.priority),
-    });
-    if (!freshRoleCheck.allowed) {
-      refusal.error = { code: 'role_too_strong', reason: freshRoleCheck.reason };
-      return null;
-    }
-
-    // Tier mirrors the role's ordinal priority so it never diverges from the
-    // role definition; `position` stays a free-text label (D-A).
-    const memberRecord: ProjectMember = {
-      userId: user.id,
-      name: user.name,
-      email: user.email,
-      role: targetRole,
-      position: '',
-      tier: rolePriority(targetRole, freshTargetRole.priority),
-      addedAt: nowISO(),
-    };
-    return { members: { ...p.members, [user.id]: memberRecord } };
+    // A role that vanished in between is a typed refusal here: without it the
+    // write reaches `validateProjectInvariants`, which throws a generic error
+    // AFTER `createUser` already ran.
+    refusal.error = checkInviteFloor(p, callerUserId, targetRole);
+    if (refusal.error) return null;
+    return { members: { ...p.members, [user.id]: memberRecordFor(p, user, targetRole) } };
   }).catch(async (err: unknown) => {
     await deleteUser(user.id);
     throw err;

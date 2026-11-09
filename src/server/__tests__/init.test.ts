@@ -1,52 +1,74 @@
 /**
  * The setup-state predicate (`server/init.ts`): configured = the session secret
- * is set AND at least one user record exists. The answer never needs `getEnv()`
- * (which throws without the secret), a positive answer latches, and a negative
- * one is reused for ~2 s before the disk is asked again.
+ * file (`<home>/app/config/session-secret.key`) holds a secret AND at least one
+ * user record exists. The roots are the kernel's, never `getEnv()`; a positive
+ * answer latches, and a negative one is reused for ~2 s before the disk is
+ * asked again. The secret file is REAL, in a throwaway home.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fsMocks = vi.hoisted(() => ({ readdir: vi.fn<(dir: string) => Promise<string[]>>() }));
+const HOME = vi.hoisted(() => `${process.env.TMPDIR ?? '/tmp'}/nr-init-test-home-${process.pid}`);
 vi.mock('fs/promises', () => ({ readdir: fsMocks.readdir }));
 vi.mock('@neuralis/package-system/paths', () => ({
-  resolveNeuralisHome: () => ({ home: '/nr-init-test-home', appRoot: '/nr-init-test-home/app', projectsRoot: '/nr-init-test-home/projects' }),
+  resolveNeuralisHome: () => ({ home: HOME, appRoot: `${HOME}/app`, projectsRoot: `${HOME}/projects` }),
 }));
 
 import { SetupRequiredError, assertSetupComplete, getSetupState, isSetupComplete, isSetupLatched } from '../init';
 
 const SETUP_STATE_SLOT = Symbol.for('@neuralis/host:setupState');
-const savedSecret = process.env.NEXTAUTH_SECRET;
+const secretFile = join(HOME, 'app', 'config', 'session-secret.key');
+const writeSecret = (text: string): void => writeFileSync(secretFile, text);
+const dropSecret = (): void => rmSync(secretFile, { force: true });
 
 beforeEach(() => {
   delete (globalThis as { [SETUP_STATE_SLOT]?: unknown })[SETUP_STATE_SLOT];
-  process.env.NEXTAUTH_SECRET = 'test-secret';
+  mkdirSync(join(HOME, 'app', 'config'), { recursive: true });
+  writeSecret('test-secret\n');
   fsMocks.readdir.mockResolvedValue([]);
 });
 
 afterEach(() => {
   vi.useRealTimers();
   delete (globalThis as { [SETUP_STATE_SLOT]?: unknown })[SETUP_STATE_SLOT];
-  if (savedSecret === undefined) delete process.env.NEXTAUTH_SECRET;
-  else process.env.NEXTAUTH_SECRET = savedSecret;
+});
+
+afterAll(() => rmSync(HOME, { recursive: true, force: true }));
+
+it('the throwaway home is not the live one', () => {
+  expect(HOME.startsWith(tmpdir()) || HOME.startsWith('/tmp/')).toBe(true);
 });
 
 describe('getSetupState', () => {
-  it('a missing secret is secret_missing, answered without touching the disk', async () => {
-    delete process.env.NEXTAUTH_SECRET;
+  it('a missing secret file with no user record is secret_missing (never set up)', async () => {
+    dropSecret();
     expect(await getSetupState()).toEqual({ configured: false, reason: 'secret_missing' });
-    expect(fsMocks.readdir).not.toHaveBeenCalled();
   });
 
-  it('a blank secret counts as missing', async () => {
-    process.env.NEXTAUTH_SECRET = '   ';
-    expect(await getSetupState()).toEqual({ configured: false, reason: 'secret_missing' });
+  it('a missing secret file beside a user record is secret_moved — an earlier release set it up', async () => {
+    dropSecret();
+    fsMocks.readdir.mockResolvedValue(['owner.json']);
+    expect(await getSetupState()).toEqual({ configured: false, reason: 'secret_moved' });
+  });
+
+  it('a blank secret file counts as missing; NEXTAUTH_SECRET in the environment is no source', async () => {
+    writeSecret('   \n');
+    vi.stubEnv('NEXTAUTH_SECRET', 'env-is-not-a-source');
+    try {
+      expect(await getSetupState()).toEqual({ configured: false, reason: 'secret_missing' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('the secret without a user record is setup_incomplete; non-record files do not count', async () => {
     fsMocks.readdir.mockResolvedValue(['notes.txt']);
     expect(await getSetupState()).toEqual({ configured: false, reason: 'setup_incomplete' });
-    expect(fsMocks.readdir).toHaveBeenCalledWith('/nr-init-test-home/app/users');
+    expect(fsMocks.readdir).toHaveBeenCalledWith(`${HOME}/app/users`);
   });
 
   it('an unreadable users directory is setup_incomplete, never a throw', async () => {
@@ -58,7 +80,7 @@ describe('getSetupState', () => {
     fsMocks.readdir.mockResolvedValue(['owner.json']);
     expect(await getSetupState()).toEqual({ configured: true });
     expect(fsMocks.readdir).toHaveBeenCalledTimes(1);
-    expect(fsMocks.readdir).not.toHaveBeenCalledWith('/nr-init-test-home/app/projects');
+    expect(fsMocks.readdir).not.toHaveBeenCalledWith(`${HOME}/app/projects`);
   });
 
   it('a configured answer latches: later record loss does not flip it, and no fs call follows', async () => {
@@ -89,7 +111,7 @@ describe('getSetupState', () => {
 
 describe('isSetupComplete / assertSetupComplete share the predicate', () => {
   it('without the secret: false, and the assert throws SetupRequiredError', async () => {
-    delete process.env.NEXTAUTH_SECRET;
+    dropSecret();
     expect(await isSetupComplete()).toBe(false);
     await expect(assertSetupComplete()).rejects.toBeInstanceOf(SetupRequiredError);
   });

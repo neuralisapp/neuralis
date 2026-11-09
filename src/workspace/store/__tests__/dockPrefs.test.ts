@@ -19,7 +19,7 @@ vi.mock('@/api/projects', () => ({
 }));
 import { listAgents } from '@/api/agents';
 import { listProjects } from '@/api/projects';
-import { useWorkspaceStore } from '../workspaceStore';
+import { groupScopeKey, parsePersistedWorkspace, serializeWorkspace, useWorkspaceStore } from '../workspaceStore';
 import type { DockPrefs, ProjectWorkspaceState } from '../types';
 import {
   applyDockPrefs,
@@ -115,9 +115,9 @@ describe('an edit writes the store ONCE — on Save', () => {
     const writes = vi.fn();
     const stop = useWorkspaceStore.subscribe(writes);
     const items: ArrangeableItem[] = [
-      { id: 'cal', position: 100, prefKey: 'pkg:cal', group: 'trust:first-party' },
-      { id: 'files', position: 101, prefKey: 'pkg:files', group: 'trust:first-party' },
-      { id: 'admin', position: 102, prefKey: 'pkg:admin', group: 'trust:first-party' },
+      { id: 'cal', position: 100, prefKey: 'pkg:cal', group: 'trust:native' },
+      { id: 'files', position: 101, prefKey: 'pkg:files', group: 'trust:native' },
+      { id: 'admin', position: 102, prefKey: 'pkg:admin', group: 'trust:native' },
     ];
     let draft = draftFromItems(items);
     draft = moveDockKey(draft, items, 'pkg:admin', 'pkg:cal', 'before');
@@ -141,7 +141,7 @@ describe('persist', () => {
     seed({ p1: { lastAgentId: 'a', dock: DOCK } }, { projectId: 'p1', agentId: 'a' });
     s().setDockEditing('both', true);
     const persisted = options.partialize?.(s()) as Record<string, unknown>;
-    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
+    expect(Object.keys(persisted).sort()).toEqual(['groupStateByScope', 'phoneDockPrefsByScope', 'projectStateById', 'runtimeByAgentId', 'session']);
     expect((persisted.projectStateById as Record<string, ProjectWorkspaceState>).p1?.dock).toEqual(DOCK);
   });
 
@@ -151,5 +151,42 @@ describe('persist', () => {
     expect(s().dockEditing).toEqual({ primary: true, secondary: true });
     s().setDockEditing('primary', false);
     expect(s().dockEditing).toEqual({ primary: false, secondary: true });
+  });
+});
+
+
+describe('independent scoped phone preferences', () => {
+  it('phone Save isolates two users and two projects; desktop Save, reset and parsing preserve the map', () => {
+    seed({ p1: { lastAgentId: 'a', dock: DOCK } }, { projectId: 'p1', agentId: 'a' });
+    useWorkspaceStore.setState({ liveUserId: 'u1', phoneDockPrefsByScope: {} });
+    const desktop = JSON.stringify(s().projectStateById);
+    s().setDockPrefs({ dockId: 'phone', prefs: PRIMARY });
+    expect(JSON.stringify(s().projectStateById)).toBe(desktop);
+    s().setLiveUserId('u2');
+    s().setDockPrefs({ dockId: 'phone', prefs: SECONDARY });
+    useWorkspaceStore.setState({ session: { projectId: 'p2', agentId: 'a', workspaceView: 'default' } });
+    s().setDockPrefs({ dockId: 'phone', prefs: { order: ['p2'], hidden: [] } });
+    expect(s().phoneDockPrefsByScope).toEqual({ [groupScopeKey('u1', 'p1')]: PRIMARY, [groupScopeKey('u2', 'p1')]: SECONDARY, [groupScopeKey('u2', 'p2')]: { order: ['p2'], hidden: [] } });
+    const phones = JSON.stringify(s().phoneDockPrefsByScope);
+    s().setDockPrefs({ dockId: 'primary', prefs: SECONDARY });
+    expect(JSON.stringify(s().phoneDockPrefsByScope)).toBe(phones);
+    const parsed = parsePersistedWorkspace(JSON.parse(serializeWorkspace(s())).state);
+    expect(JSON.stringify(parsed.phoneDockPrefsByScope)).toBe(phones);
+    s().reset();
+    expect(JSON.stringify(s().phoneDockPrefsByScope)).toBe(phones);
+  });
+
+  it('requires live scope, bounds parsed keys and cancels edits on user/project changes', async () => {
+    seed({}, { projectId: 'p1', agentId: 'a' });
+    useWorkspaceStore.setState({ liveUserId: null, phoneDockPrefsByScope: {} });
+    s().setDockPrefs({ dockId: 'phone', prefs: PRIMARY });
+    expect(s().phoneDockPrefsByScope).toEqual({});
+    s().setLiveUserId('u1'); s().setDockEditing('phone', true);
+    s().setLiveUserId('u2'); expect(s().dockEditing.phone).toBe(false);
+    s().setDockEditing('phone', true); await s().selectProject('p2');
+    expect(s().dockEditing.phone).toBe(false);
+    const parsed = parsePersistedWorkspace({ phoneDockPrefsByScope: { scoped: { order: Array.from({ length: 250 }, (_, i) => `k${i}`), hidden: ['x'.repeat(301)] } } });
+    expect(parsed.phoneDockPrefsByScope?.scoped.order).toHaveLength(DOCK_PREFS_MAX_KEYS);
+    expect(parsed.phoneDockPrefsByScope?.scoped.hidden).toEqual([]);
   });
 });

@@ -156,12 +156,10 @@ export async function POST(req: NextRequest, { params }: Params): Promise<Respon
   if (!entry.ok) return notVisible();
 
   // Authored names may identify multiple installations. The root comes from the
-  // exact visible instance this project loaded — the loader holds the root the
+  // exact canonically visible instance — the loader holds the root the
   // scanner stamped, so a widget open costs no rescan — never from a caller path.
   const runtime = getPackageRuntimeManager();
-  const packageRoot = runtime.getProjectPackageIds(session.projectId).has(surface.packageId)
-    ? runtime.getLoader().getStatus(surface.packageId)?.packageRoot
-    : undefined;
+  const packageRoot = runtime.getLoader().getStatus(surface.packageId)?.packageRoot;
   if (!packageRoot) return notVisible();
 
   const appRoot = resolve(packageRoot, 'app');
@@ -202,12 +200,10 @@ async function mintIcon(session: SessionContext, slug: string, dockId: string): 
   const image = await resolveVisiblePackageDockImage(session, slug, dockId);
   if (!image) return notVisible();
 
-  // The root comes from the exact visible instance this project loaded, as for
+  // The root comes from the exact canonically visible instance, as for
   // a document — never from a caller path.
   const runtime = getPackageRuntimeManager();
-  const packageRoot = runtime.getProjectPackageIds(session.projectId).has(image.packageId)
-    ? runtime.getLoader().getStatus(image.packageId)?.packageRoot
-    : undefined;
+  const packageRoot = runtime.getLoader().getStatus(image.packageId)?.packageRoot;
   if (!packageRoot) return notVisible();
   const sharedRoot = resolve(packageRoot, SHARED_ASSET_DIR);
   const file = resolve(sharedRoot, image.sharedRel);

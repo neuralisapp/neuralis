@@ -72,7 +72,7 @@ export type ProjectRecord = {
   /**
    * R2b (scope-guarding-magpie) — owner/admin base-access feature OVERRIDE per
    * package (packageId → feature id). RESTRICT-ONLY: it can only ATTACH a
-   * required feature to an already-loaded package (e.g. isolate a first-party
+   * required feature to an already-loaded package (e.g. isolate a native
    * package that declared no `requires.accessFeature`), never grant access — so
    * it never weakens a floor or creates a trust tier. The effective gate is the
    * manifest `accessFeature` ∪ this override (each independently required).
@@ -122,7 +122,7 @@ export const DEFAULT_ROLES: Record<string, RoleDefinition> = {
   //
   // D-C — `admin` no longer ships with the `'*'` wildcard. It receives the
   // manifest-declared union instead, exactly like manager/member/viewer: every
-  // first-party feature MINUS the `platform.*` tier (the ids whose decision
+  // native feature MINUS the `platform.*` tier (the ids whose decision
   // crosses the project boundary). The list is never hand-typed — each package
   // declares its own `requires.defaultRoleGrants.admin`, and
   // `packages/package-system/test/adminGrantCoverage.test.ts` fails the build if

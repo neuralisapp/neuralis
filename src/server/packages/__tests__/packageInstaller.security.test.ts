@@ -15,8 +15,6 @@ vi.mock('../../config/env', () => ({
     port: 3100,
     nodeEnv: 'test',
     qdrant: { url: 'http://localhost:6333' },
-    auth: { secret: 'test', nextAuthUrl: 'http://localhost:3100', adminEmail: null },
-    mcp: { httpPort: 3101, baseUrl: 'http://localhost:3101', appUrl: 'http://localhost:3100' },
   }),
   resolveProjectPackagesDir: (projectRoot: string) => join(projectRoot, '_packages'),
 }));
@@ -38,6 +36,13 @@ describe('package install source boundary', () => {
 
   it('rejects sourceRoot inside the platform app zone', () => {
     const sourceRoot = join(roots.appRoot, 'config', 'credentials');
+    mkdirSync(sourceRoot, { recursive: true });
+
+    expect(() => assertInstallSourceAllowed({ sourceRoot }, projectRoot)).toThrow(/app data directory/);
+  });
+
+  it('rejects a sourceRoot whose first segment under the app zone only starts with dots', () => {
+    const sourceRoot = join(roots.appRoot, '..config', 'pkg');
     mkdirSync(sourceRoot, { recursive: true });
 
     expect(() => assertInstallSourceAllowed({ sourceRoot }, projectRoot)).toThrow(/app data directory/);

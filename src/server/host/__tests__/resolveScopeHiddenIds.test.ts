@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { PackageDefinition, SourceScope } from '@neuralis/package-system/contracts';
+import type { PackageDefinition, ScopeOrigin, SourceScope } from '@neuralis/package-system/contracts';
 import { resolveScopeHiddenIds, BUILTIN_PACKAGE_IDS } from '../bootstrap';
 
 const BUILTIN_ID = [...BUILTIN_PACKAGE_IDS][0]!;
@@ -18,6 +18,7 @@ type RegistryEntry = { id: string; requires?: { accessFeature?: string } };
 function makeManager(opts: {
   projectPkgIds: Record<string, string[]>;
   ownerScopes?: Record<string, SourceScope>;
+  ownerOrigins?: Record<string, ScopeOrigin>;
   manifestIds?: Record<string, string>;
   registry?: RegistryEntry[];
   registryThrows?: boolean;
@@ -25,6 +26,7 @@ function makeManager(opts: {
   return {
     getProjectPackageIds: (projectId: string) => new Set(opts.projectPkgIds[projectId] ?? []),
     getPackageOwnerScope: (_projectId: string, id: string) => opts.ownerScopes?.[id],
+    getPackageOwnerOrigin: (_projectId: string, id: string) => opts.ownerOrigins?.[id],
     // namespaced loader id → manifest id (undefined ⇒ the id IS its own manifest id).
     getPackageManifestId: (_projectId: string, id: string) => opts.manifestIds?.[id],
     getRegistry: () => {
@@ -54,6 +56,23 @@ const memberCaller = (projectId: string) => ({
   userId: 'u1',
   role: 'member',
   grantedFeatures: [] as string[],
+});
+
+describe('resolveScopeHiddenIds — Axis 1 scope, on the source\'s plane', () => {
+  it('a member\'s USER-scope DEVICE package is hidden from a files.readOthers or \'*\' holder; its owner and the local-plane control are not', async () => {
+    const mgr = makeManager({
+      projectPkgIds: { p1: ['dev-pkg', 'srv-pkg'] },
+      ownerScopes: { 'dev-pkg': { kind: 'user', userId: 'm1' }, 'srv-pkg': { kind: 'user', userId: 'm1' } },
+      ownerOrigins: { 'dev-pkg': { plane: 'device' }, 'srv-pkg': { plane: 'local' } },
+      registry: [{ id: 'dev-pkg' }, { id: 'srv-pkg' }],
+    });
+    const { deps } = makeDeps(mgr);
+    for (const grantedFeatures of [['files.readOthers'], ['*']]) {
+      const hidden = await resolveScopeHiddenIds(deps, { projectId: 'p1', userId: 'admin1', role: 'admin', grantedFeatures });
+      expect([...hidden], grantedFeatures.join()).toEqual(['dev-pkg']);
+    }
+    expect([...await resolveScopeHiddenIds(deps, { projectId: 'p1', userId: 'm1', role: 'member', grantedFeatures: [] })], 'owner').toEqual([]);
+  });
 });
 
 describe('resolveScopeHiddenIds — Axis 3 cross-project isolation', () => {
@@ -103,7 +122,7 @@ describe('resolveScopeHiddenIds — Axis 2 base-access feature', () => {
       projectPkgIds: { 'proj-a': [] },
       registry: [{ id: BUILTIN_ID }],
     });
-    const { deps } = makeDeps(mgr, { [BUILTIN_ID]: 'first-party.access' });
+    const { deps } = makeDeps(mgr, { [BUILTIN_ID]: 'native.access' });
 
     const hidden = await resolveScopeHiddenIds(deps, memberCaller('proj-a'));
     expect(hidden.has(BUILTIN_ID)).toBe(true); // base-access override applies to builtins

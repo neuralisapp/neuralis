@@ -119,6 +119,14 @@ describe('resolveSessionContext — the bearer arm is the hub\'s alone', () => {
     expect((await refusal(resolveSessionContext(req('Bearer eyJ'), '', { acceptBearer: true }))).status).toBe(403);
   });
 
+  it('displayName: the COOKIE session carries the record\'s name; a bearer session carries none (the client is not the person)', async () => {
+    mocks.getUserById.mockResolvedValue({ id: 'u1', status: 'active', name: 'Ada Lovelace' });
+    mocks.getSessionUser.mockResolvedValueOnce({ id: 'u1' });
+    expect((await resolveSessionContext(req(), 'p1')).displayName).toBe('Ada Lovelace');
+    const viaBearer = await resolveSessionContext(req('Bearer eyJ.jwt.sig'), '', { acceptBearer: true });
+    expect(viaBearer).not.toHaveProperty('displayName');
+  });
+
   it('a cookie session wins: the bearer is not consulted', async () => {
     mocks.getSessionUser.mockResolvedValueOnce({ id: 'u-cookie' });
     mocks.listProjectsForUser.mockResolvedValueOnce([{ id: 'p1' }]);

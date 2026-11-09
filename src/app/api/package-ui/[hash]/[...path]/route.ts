@@ -1,8 +1,8 @@
 /**
  * GET /api/package-ui/{hash}/{path…}
  *
- * The first-party UI MODULE lane: the prebuilt browser module a host-assigned
- * first-party package ships (`app.module`), and the ONE union stylesheet. The
+ * The native UI MODULE lane: the prebuilt browser module a host-assigned
+ * native package ships (`app.module`), and the ONE union stylesheet. The
  * workspace `import()`s these on the main origin, so this is NOT a sandboxed
  * package-app lane — those keep their opaque origin, `no-store` and 2 MiB cap.
  *
@@ -12,7 +12,7 @@
  *    is strictly stronger) — none ⇒ 401;
  * 3. the hash resolves through the server-built table only (`packageUiModules`)
  *    — the caller never names a package or a root; unknown ⇒ 404;
- * 4. the owning package is STILL a host-assigned first-party builtin in the
+ * 4. the owning package is STILL a host-assigned native builtin in the
  *    live registry — otherwise 403;
  * 5. `.js`/`.mjs`/`.css` only — `.map`, `.json`, documents ⇒ 404 before any fs
  *    touch;
@@ -38,7 +38,7 @@ import {
   PACKAGE_UI_MODULE_MIME_BY_EXT,
   UI_SHEET_FILE,
   getUiAttachments,
-  isFirstPartyBuiltin,
+  isNativeBuiltin,
 } from '@/server/packages/packageUiModules';
 
 export const dynamic = 'force-dynamic';
@@ -88,7 +88,7 @@ export async function GET(req: NextRequest, { params }: Params): Promise<Respons
     });
   }
 
-  if (!isFirstPartyBuiltin(getCommunityPackageRegistry().getPackage(entry.packageId))) return status(403);
+  if (!isNativeBuiltin(getCommunityPackageRegistry().getPackage(entry.packageId))) return status(403);
 
   const mime = PACKAGE_UI_MODULE_MIME_BY_EXT[extname(path[path.length - 1] ?? '').toLowerCase()];
   if (!mime) return status(404);

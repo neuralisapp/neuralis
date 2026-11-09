@@ -1,9 +1,29 @@
 {
   "name": "neuralis",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "license": "FSL-1.1-ALv2",
   "homepage": "https://neuralisapp.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neuralisapp/neuralis.git"
+  },
+  "bugs": {
+    "url": "https://github.com/neuralisapp/neuralis/issues"
+  },
+  "keywords": [
+    "neuralis",
+    "self-hosted",
+    "ai-agents",
+    "multi-agent",
+    "ai-workspace",
+    "mcp",
+    "model-context-protocol",
+    "agent-skills",
+    "llm",
+    "docker"
+  ],
   "engines": { "node": ">=26" },
+  "devEngines": { "runtime": { "name": "node", "version": ">=26", "onFail": "error" } },
   "bin": { "neuralis": "bin/neuralis.mjs" },
   "files": [
     "bin",
@@ -35,7 +55,6 @@
     "neuralis:sync": "node --import tsx scripts/cli/registry.mts sync",
     "neuralis:update": "node --import tsx scripts/cli/registry.mts update",
     "neuralis:mount": "node --import tsx scripts/cli/registry.mts mount",
-    "neuralis:host-broker": "node --import tsx scripts/cli/registry.mts host-broker",
     "neuralis:pkg": "node --import tsx scripts/cli/registry.mts pkg",
     "neuralis:user": "node --import tsx scripts/cli/registry.mts user",
     "neuralis:checkpoint": "node --import tsx scripts/cli/registry.mts checkpoint",
@@ -47,30 +66,32 @@
     "release:version": "node --import tsx scripts/release-version.mts",
     "reset:vector": "node --import tsx scripts/cli/registry.mts reset-vector",
     "neuralis:qdrant-upgrade": "node --import tsx scripts/cli/registry.mts qdrant-upgrade",
+    "neuralis:start": "node --import tsx scripts/cli/registry.mts start",
+    "neuralis:tunnel": "node --import tsx scripts/cli/registry.mts tunnel",
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.1",
-    "@neuralis/admin": "0.3.2",
-    "@neuralis/agent-core": "0.3.2",
-    "@neuralis/brain-core": "0.3.2",
-    "@neuralis/machine-core": "0.3.2",
-    "@neuralis/package-system": "0.3.2",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@neuralis/admin": "0.4.0",
+    "@neuralis/agent-core": "0.4.0",
+    "@neuralis/brain-core": "0.4.0",
+    "@neuralis/machine-core": "0.4.0",
+    "@neuralis/package-system": "0.4.0",
     "@tailwindcss/oxide": "4.3.3",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dockerode": "^5.0.1",
-    "express": "^5.2.1",
+    "express": "^5.3.0",
     "lucide-react": "^1.47.0",
-    "next": "16.3.8",
+    "next": "16.4.3",
     "next-auth": "4.24.15",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "react-resizable-panels": "^4.13.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-resizable-panels": "^4.15.3",
     "react-rnd": "^10.5.2",
     "tailwindcss": "4.3.3",
     "tsx": "^4.23.15",
-    "zustand": "5.0.15"
+    "zustand": "5.0.16"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
@@ -84,15 +105,18 @@
     "vitest": "^5.0.1"
   },
   "overrides": {
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "express-rate-limit": "^8.2.2",
     "hono": "^4.13.5",
     "@hono/node-server": "^1.19.15 || ^2.0.5",
-    "ip-address": "^10.3.1",
-    "fast-uri": "^3.1.6",
+    "ip-address": "^10.7.4",
+    "fast-uri": "^3.1.9",
     "@qdrant/js-client-rest": {
-      "undici": "^7.29.1"
+      "undici": "^7.30.1"
+    },
+    "app-builder-lib": {
+      "minimatch": "^11.0.3"
     }
   },
   "allowScripts": {
@@ -103,6 +127,8 @@
     "ssh2": false,
     "cpu-features": false,
     "protobufjs": false,
-    "@google/genai": false
+    "@google/genai": false,
+    "electron": true,
+    "electron-winstaller": false
   }
 }

@@ -93,10 +93,10 @@ describe('createProject — admin-union liveness floor', () => {
 
   it('a HEALTHY union is stamped at the current role-grant version', async () => {
     const project = await createProject('Healthy', 'owner-1');
-    expect(project.roleGrantVersion).toBe(21);
+    expect(project.roleGrantVersion).toBe(22);
     expect(project.roles.admin.grantedFeatures).not.toContain('*');
     expect(project.roles.admin.grantedFeatures).toEqual(expect.arrayContaining([...LIVENESS_IDS]));
-    expect((await lastWritten()).roleGrantVersion).toBe(21);
+    expect((await lastWritten()).roleGrantVersion).toBe(22);
   });
 
   it('R-4 — an EMPTY union REFUSES, and nothing reaches the store', async () => {
@@ -137,7 +137,7 @@ describe('createProject — admin-union liveness floor', () => {
     // CREATE has to work.)
     const healthy = await createProject('AfterDegenerate', 'owner-1');
     expect(healthy.roles.admin.grantedFeatures).not.toContain('*');
-    expect(healthy.roleGrantVersion).toBe(21);
+    expect(healthy.roleGrantVersion).toBe(22);
     expect((await lastWritten()).roles.admin.grantedFeatures).not.toContain('*');
   });
 

@@ -58,11 +58,10 @@ const STORE_SLOT = Symbol.for('@neuralis/host:projectStore');
 /**
  * The role-grant revision every seeded record carries (`roleGrantVersion`) —
  * a per-record marker, raised only by an offline upgrade together with
- * `HOST_DATA_FORMATS.project` (`roleGrantFormatLockstep.test.ts`). 21 = the
- * two-word feature ids (`files.*`, `sources.*`, `exec.local`, `terminal.local`,
- * `machine.control`, …) on every stored role.
+ * `HOST_DATA_FORMATS.project` (`roleGrantFormatLockstep.test.ts`). 22 = every
+ * stored role names its agent level (`agents`).
  */
-export const ROLE_GRANT_VERSION = 21;
+export const ROLE_GRANT_VERSION = 22;
 
 /**
  * A project-record signal, emitted after the write resolved, naming the users it

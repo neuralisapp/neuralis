@@ -1,10 +1,10 @@
 /**
- * GET /api/package-ui/{hash}/{path} — the first-party UI module lane.
+ * GET /api/package-ui/{hash}/{path} — the native UI module lane.
  *
  * Every security negative has its paired positive on the SAME table: a module
  * file is served (200, immutable, ETag = hash) and each row then changes ONE
  * thing — no session, an unknown or malformed hash, a `.map`, a traversal, a
- * symlink out of the tree, a package no longer first-party, a file over the cap.
+ * symlink out of the tree, a package no longer native, a file over the cap.
  * The table is built by the REAL `buildUiAttachments` over a real tmp tree; only
  * the registry, the session and the cache accessor are stubbed.
  */
@@ -40,7 +40,7 @@ vi.mock('@/server/packages/packageUiModules', async (importOriginal) => {
     getUiAttachments: async () => mocks.attachments,
     // The real predicate also requires deps-discovery membership; the fixture
     // id is not a host dep, so trust alone stands in for it here.
-    isFirstPartyBuiltin: (def: PackageDefinition | undefined) => def?.access?.trust === 'first-party',
+    isNativeBuiltin: (def: PackageDefinition | undefined) => def?.access?.trust === 'native',
   };
 });
 
@@ -51,12 +51,12 @@ let outside: string;
 let attachments: UiAttachments;
 let moduleHash: string;
 
-function firstParty(): PackageDefinition {
+function native(): PackageDefinition {
   return {
     id: PKG,
     name: 'ui',
     version: '1.0.0',
-    access: { trust: 'first-party' },
+    access: { trust: 'native' },
     app: { module: { entry: 'dist/app/host.js' } },
   } as unknown as PackageDefinition;
 }
@@ -75,7 +75,7 @@ beforeAll(async () => {
   await symlink(join(outside, 'secret.js'), join(root, 'dist', 'app', 'escape.js'));
 
   attachments = await buildUiAttachments({
-    definitions: [firstParty()],
+    definitions: [native()],
     resolveRoot: () => root,
     hostReactMajor: 19,
     compileSheet: async () => null,
@@ -91,7 +91,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   mocks.user = { id: 'u1', email: 'u@x', name: 'U' };
-  mocks.definition = firstParty();
+  mocks.definition = native();
   mocks.attachments = attachments;
 });
 
@@ -140,8 +140,8 @@ describe('GET /api/package-ui/{hash}/{path}', () => {
     expect((await get(moduleHash, ['escape.js'])).status).toBe(403);
   });
 
-  it('refuses a package that is no longer first-party — 403', async () => {
-    mocks.definition = { ...firstParty(), access: { trust: 'trusted' } };
+  it('refuses a package that is no longer native — 403', async () => {
+    mocks.definition = { ...native(), access: { trust: 'trusted' } };
     expect((await get(moduleHash, ['host.js'])).status).toBe(403);
   });
 

@@ -20,6 +20,11 @@ export type AuditAction =
   | 'login.rate_limited'
   | 'user.create'
   | 'user.invite'
+  // Invite LINKS (`server/admin/inviteLinks.ts`): who minted or revoked a link
+  // (and through which agent), and who redeemed one — never the token.
+  | 'user.invite.issue'
+  | 'user.invite.redeem'
+  | 'user.invite.revoke'
   | 'user.disable'
   | 'user.enable'
   | 'user.delete'
@@ -41,8 +46,16 @@ export type AuditAction =
   // made through the admin package's `agents-assign` route.
   | 'agent.assign'
   | 'agent.unassign'
+  // ONE vocabulary per act on both install lanes: a project `_packages/` drop
+  // and a package installed into the host while it runs both write
+  // `package.install` / `package.uninstall` (the runtime lane's details carry
+  // its `requestId`). The runtime lane adds the person-approved request flow.
   | 'package.install'
   | 'package.uninstall'
+  | 'package.update'
+  | 'package.request'
+  | 'package.request_dismissed'
+  | 'package.restart'
   | 'package.build'
   | 'package.publish'
   | 'package.trust.change'
@@ -62,6 +75,9 @@ export type AuditAction =
   // came from the server's filesystem, so it needs its own audit line.
   | 'credential.import'
   | 'config.write'
+  // A project source's stored config changed through the admin package route
+  // (field names only; agent attach/detach named by agent + user ids).
+  | 'source.config.write'
   // W4G — per-stream session-ticket lifecycle.
   | 'session_ticket_authority.ready'
   | 'skill.session_ticket_minted'

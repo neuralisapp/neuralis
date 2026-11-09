@@ -13,6 +13,9 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import type { PackageDefinition, SessionContext } from '@neuralis/package-system/contracts';
+import { PackageRegistry } from '@neuralis/package-system';
+import { PackageLoader } from '@neuralis/agent-core';
 import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 
@@ -23,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   resolveVisiblePackageSurface: vi.fn<() => Promise<unknown>>(),
   resolveVisiblePackageDockImage: vi.fn<() => Promise<unknown>>(),
   ensureProjectPackagesLoaded: vi.fn(async () => undefined),
+  projectIds: new Set<string>(),
+  builtinIds: new Set<string>(),
+  ownerScope: undefined as unknown,
   loadedRoots: new Map<string, string | undefined>(),
   listPackages: vi.fn<() => unknown[]>(() => []),
 }));
@@ -35,7 +41,10 @@ vi.mock('@/server/auth/session', () => ({ getSessionUser: mocks.getSessionUser }
 vi.mock('@/server/auth/resolveVerifiedAgentScope', () => ({
   resolveVerifiedAgentScope: mocks.resolveVerifiedAgentScope,
 }));
-vi.mock('@/server/packages/packageVisibility', () => ({
+vi.mock('@/server/host/bootstrap', () => ({ BUILTIN_PACKAGE_IDS: mocks.builtinIds }));
+vi.mock('@/server/store/ProjectStore', () => ({ getProjectById: async () => ({ id: 'proj-1' }) }));
+vi.mock('@/server/packages/packageVisibility', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/packages/packageVisibility')>()),
   resolveVisiblePackageSurface: mocks.resolveVisiblePackageSurface,
   resolveVisiblePackageDockImage: mocks.resolveVisiblePackageDockImage,
   getDefinitionGeneration: () => 'gen-1',
@@ -48,7 +57,10 @@ vi.mock('@/server/packages/runtime', () => ({
 }));
 vi.mock('@/server/packages/PackageRuntimeManager', () => ({
   getPackageRuntimeManager: () => ({
-    getProjectPackageIds: () => new Set(mocks.loadedRoots.keys()),
+    getProjectPackageIds: () => mocks.projectIds,
+    getPackageOwnerScope: () => mocks.ownerScope,
+    getPackageOwnerOrigin: () => undefined,
+    getPackageManifestId: () => undefined,
     getLoader: () => ({
       getStatus: (id: string) => (mocks.loadedRoots.has(id) ? { packageId: id, packageRoot: mocks.loadedRoots.get(id) } : undefined),
     }),
@@ -158,6 +170,7 @@ beforeEach(() => {
   mocks.resolveVerifiedAgentScope.mockResolvedValue(undefined);
   mocks.resolveVisiblePackageDockImage.mockResolvedValue(makeImage());
   mocks.loadedRoots = new Map([[PACKAGE_ID, packageRoot]]);
+  mocks.projectIds = new Set([PACKAGE_ID]); mocks.builtinIds.clear(); mocks.ownerScope = undefined;
   mocks.listPackages.mockReturnValue([{ id: PACKAGE_ID }]);
 });
 
@@ -283,5 +296,58 @@ describe('the public lane refuses icon scopes by purpose', () => {
     );
     expect(res.status).toBe(404);
     expect(mocks.listPackages).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('real canonical visibility at the loaded-root boundary', () => {
+  async function useRealVisibility(): Promise<void> {
+    const real = await vi.importActual<typeof import('@/server/packages/packageVisibility')>('@/server/packages/packageVisibility');
+    mocks.resolveVisiblePackageDockImage.mockImplementation(async () => real.resolveVisiblePackageDockImage(await mocks.resolveSessionContext() as SessionContext, PACKAGE_ID, 'example.dock'));
+    mocks.listPackages.mockReturnValue([{ id: PACKAGE_ID, name: PACKAGE_ID, version: '1.0.0', app: { surfaces: [{ kind: 'dock', id: 'example.dock', image: 'app/shared/icon.png', requires: { features: ['core.chat'] }, action: { type: 'open-widget', widget: 'w' } }] } }]);
+  }
+
+  it('actual builtin registration retains its exact artwork root without project membership', async () => {
+    const definition: PackageDefinition = { id: PACKAGE_ID, name: PACKAGE_ID, version: '1.0.0', source: { kind: 'neuralis' } };
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: PACKAGE_ID, version: '1.0.0', neuralis: definition }));
+    const registry = new PackageRegistry();
+    const logger = { level: 'info' as const, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => logger };
+    const loader = new PackageLoader({ projectRoot: packageRoot, projectsRoot: join(packageRoot, 'projects'), appRoot: join(packageRoot, 'data'), hostId: 'neuralis', logger }, registry);
+    await loader.load(definition, packageRoot);
+    expect(loader.getStatus(PACKAGE_ID)?.packageRoot).toBe(packageRoot);
+    expect(registry.listPackages().some((entry) => entry.id === PACKAGE_ID)).toBe(true);
+    mocks.projectIds.clear();
+    expect(mocks.projectIds.size).toBe(0);
+    await loader.stopAll();
+  });
+
+  it('builtin with empty project IDs mints and serves exact PNG; feature loss cannot mint or retain it', async () => {
+    await useRealVisibility(); mocks.builtinIds.add(PACKAGE_ID); mocks.projectIds.clear();
+    const { handle, url } = await mintIcon();
+    const response = await getUrl(handle, url);
+    expect(response.status).toBe(200); expect(Buffer.from(await response.arrayBuffer())).toEqual(PNG);
+    mocks.resolveSessionContext.mockResolvedValue({ ...SESSION, grantedFeatures: [] });
+    expect((await mintPost(mintReq({ purpose: 'icon', surfaceKind: 'dock', surfaceId: 'example.dock' }), params)).status).toBe(404);
+    expect((await getUrl(handle, url)).status).toBe(410);
+  });
+
+  it('canonical builtin visibility never borrows a same-authored-name installation root', async () => {
+    await useRealVisibility(); mocks.builtinIds.add(PACKAGE_ID); mocks.projectIds.clear();
+    await mintIcon();
+    mocks.loadedRoots.delete(PACKAGE_ID);
+    mocks.loadedRoots.set('packages://example-package?project=other&scope=project', packageRoot);
+    const response = await mintPost(mintReq({ purpose: 'icon', surfaceKind: 'dock', surfaceId: 'example.dock' }), params);
+    expect(response.status).toBe(404); expect(await response.json()).toEqual({ error: 'Surface not available' });
+  });
+
+  it.each([undefined, { kind: 'user', userId: 'foreign' }, { kind: 'agent', userId: 'user-1', agentId: 'foreign' }])('loaded root cannot bypass nonproject or foreign owner scope: %j', async (owner) => {
+    await useRealVisibility();
+    await mintIcon(); // Same loaded root and caller are allowed before losing membership/scope.
+    delete (globalThis as Record<symbol, unknown>)[AUTHORITY_KEY];
+    mocks.ownerScope = owner;
+    if (!owner) mocks.projectIds.clear();
+    const response = await mintPost(mintReq({ purpose: 'icon', surfaceKind: 'dock', surfaceId: 'example.dock' }), params);
+    expect(response.status).toBe(404); expect(await response.json()).toEqual({ error: 'Surface not available' });
+    expect(getPackageAssetScopeAuthority().size()).toBe(0);
   });
 });

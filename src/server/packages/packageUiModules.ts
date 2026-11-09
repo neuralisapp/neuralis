@@ -1,13 +1,13 @@
 /**
- * packageUiModules — the server half of the first-party UI MODULE lane.
+ * packageUiModules — the server half of the native UI MODULE lane.
  *
- * A host-assigned first-party package may ship ONE prebuilt browser module
+ * A host-assigned native package may ship ONE prebuilt browser module
  * (`package.json#neuralis.app.module`, built by `neuralis-build ui` into
  * `dist/app/`). The workspace `import()`s it on the MAIN origin — that is what
- * first-party means — so the lane is NOT one of the two sandboxed package-app
+ * native means — so the lane is NOT one of the two sandboxed package-app
  * lanes (those keep their opaque origin, `no-store` and 2 MiB cap unchanged).
  *
- * What the server owns here, built ONCE per first-party package set (never per
+ * What the server owns here, built ONCE per native package set (never per
  * request):
  * - the MODULE TABLE: content hash of a package's `dist/app/` tree → that tree.
  *   The URL the client imports is derived HERE from the hash and the manifest;
@@ -24,7 +24,7 @@
  * the sheet once PER GRAPH.
  *
  * Named residual (invariant 10 precision): any signed-in member can GET any
- * first-party module by its hash. The six platform modules are public code;
+ * native module by its hash. The six platform modules are public code;
  * a private package's hash is not guessable (sha256 over its built tree).
  */
 
@@ -64,7 +64,7 @@ export const PACKAGE_UI_ROUTE_PREFIX = '/api/package-ui';
 export const PACKAGE_UI_MODULE_DIR = 'dist/app';
 
 /**
- * Per-file cap of the module lane — first-party CODE, so its own constant; the
+ * Per-file cap of the module lane — native CODE, so its own constant; the
  * untrusted-asset 2 MiB cap (`PACKAGE_APP_ASSET_MAX_BYTES`) is a different
  * floor and stays unchanged. Checked on the open descriptor before any read.
  */
@@ -100,7 +100,7 @@ export type UiAttachments = {
 };
 
 export type UiAttachmentDeps = {
-  /** First-party builtin definitions (host-assigned trust), in any order. */
+  /** Native builtin definitions (host-assigned trust), in any order. */
   readonly definitions: readonly PackageDefinition[];
   readonly resolveRoot: (packageId: string) => string;
   readonly hostReactMajor: number;
@@ -112,9 +112,9 @@ export type UiAttachmentDeps = {
   readonly hostSources: readonly UnionSheetSource[];
 };
 
-/** Whether `definition` may use the module lane: host-assigned first-party AND a deps builtin. */
-export function isFirstPartyBuiltin(definition: PackageDefinition | undefined): definition is PackageDefinition {
-  return Boolean(definition && definition.access?.trust === 'first-party' && BUILTIN_PACKAGE_IDS.has(definition.id));
+/** Whether `definition` may use the module lane: host-assigned native AND a deps builtin. */
+export function isNativeBuiltin(definition: PackageDefinition | undefined): definition is PackageDefinition {
+  return Boolean(definition && definition.access?.trust === 'native' && BUILTIN_PACKAGE_IDS.has(definition.id));
 }
 
 async function listServedFiles(dir: string): Promise<string[]> {
@@ -212,7 +212,7 @@ async function buildModule(
 const TEST_FILES: readonly string[] = ['**/__tests__/**', '**/*.test.ts', '**/*.test.tsx'];
 
 /**
- * The union sheet's sources for one first-party package: its `app/` source
+ * The union sheet's sources for one native package: its `app/` source
  * tree when it ships one, else its built module tree. Tests never count.
  */
 export function packageSheetSources(root: string, hasModule: boolean): UnionSheetSource[] {
@@ -252,7 +252,7 @@ export function hostSheetSources(hostRoot: string, serverCwd: string): UnionShee
   return existsSync(chunks) ? [{ base: chunks, pattern: '**/*.js' }] : [];
 }
 
-/** Build the table, the descriptors and the sheet for ONE first-party package set. */
+/** Build the table, the descriptors and the sheet for ONE native package set. */
 export async function buildUiAttachments(deps: UiAttachmentDeps): Promise<UiAttachments> {
   const started = performance.now();
   const table = new Map<string, TableEntry>();
@@ -316,7 +316,7 @@ export async function buildUiAttachments(deps: UiAttachmentDeps): Promise<UiAtta
 }
 
 // ---------------------------------------------------------------------------
-// The live accessor — one build per first-party definition set
+// The live accessor — one build per native definition set
 // ---------------------------------------------------------------------------
 
 function hostRequire(): NodeJS.Require {
@@ -371,15 +371,15 @@ function sameDefinitions(a: readonly PackageDefinition[], b: readonly PackageDef
 }
 
 /**
- * The attachments for the CURRENT first-party set. Rebuilt only when a
- * first-party definition object changes (load / reload / uninstall) — a
+ * The attachments for the CURRENT native set. Rebuilt only when a
+ * native definition object changes (load / reload / uninstall) — a
  * project package loading, which moves the runtime revision, rebuilds nothing.
  * Concurrent callers share one build.
  */
 export async function getUiAttachments(): Promise<UiAttachments> {
   const definitions = getCommunityPackageRegistry()
     .listPackages()
-    .filter(isFirstPartyBuiltin)
+    .filter(isNativeBuiltin)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const slot = cacheSlot();
   if (slot.current && sameDefinitions(slot.current.key, definitions)) return slot.current.promise;

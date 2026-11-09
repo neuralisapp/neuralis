@@ -26,6 +26,13 @@
 // (`<folder>/node_modules/neuralis`), so without the hook every verb that
 // reaches `src/` fails with `Cannot find module '@/…'`. The alias becomes a
 // RELATIVE specifier, so tsx still picks the `.ts` file or the `index.ts`.
+//
+// On the desktop app's own host bundle (the `.neuralis-native` marker) the
+// resident supervisor — `up`, with its `down` and `status` — runs precompiled
+// instead: `scripts/cli/up.mjs`, the registry and `up` bundled by the assembly
+// (`scripts/build/bundle-up.mjs`), so the process that holds the data home for
+// as long as the app runs loads no tsx and starts no esbuild service. Every
+// other verb, and every other install, takes the TypeScript path below.
 import { existsSync } from 'node:fs';
 import nodeModule from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
@@ -43,6 +50,21 @@ if (!(major >= NODE_MAJOR_FLOOR)) {
 
 const require = nodeModule.createRequire(import.meta.url);
 const hostRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+if (['up', 'down', 'status'].includes(process.argv[2] ?? '')) {
+  const { installKindOf } = await import('@neuralis/package-system/paths');
+  if (installKindOf(hostRoot) === 'native') {
+    // A desktop tree assembled without the bundle is a broken install: named, never run another way.
+    const upBundle = join(hostRoot, 'scripts', 'cli', 'up.mjs');
+    if (!existsSync(upBundle)) {
+      console.error(`✗ This desktop host bundle has no precompiled supervisor (${upBundle}): reinstall or update the Neuralis desktop app.`);
+      console.error(`  Help: ${INSTALL_HELP} · report a failed install: ${REPORT_ISSUE}`);
+      process.exit(1);
+    }
+    const { main } = await import(pathToFileURL(upBundle).href);
+    process.exit(await main(process.argv.slice(2)));
+  }
+}
 const hostRootUrl = pathToFileURL(hostRoot + sep).href;
 const hostSrc = join(hostRoot, 'src');
 

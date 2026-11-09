@@ -12,11 +12,9 @@ import { themeScopeStyle } from '../theme/ThemeContext';
 import { DARK_THEME } from '../theme/themes';
 
 /**
- * The ONE control-surface material — the Apps/Layout panel and the Phone dock
- * sheet: the Dark palette, fully opaque, no backdrop filter. It follows neither
- * the widget/dock theme nor the Opaque/Dim/Clear choice, so it never lets the
- * widgets under it show through. Its root re-declares the Dark palette tokens
- * (`themeScopeStyle`), so an enclosing Light scope's ink never reaches it.
+ * Opaque Dark material for dock controls and their editing popups. The launcher
+ * scopes these same Dark tokens but composes the existing Dim surface/blur pair
+ * over this base; that panel-only choice does not change other controls.
  */
 export const CONTROL_SURFACE_THEME_ID = DARK_THEME.id;
 export const CONTROL_SURFACE: CSSProperties = Object.freeze({

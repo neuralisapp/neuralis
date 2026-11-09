@@ -10,6 +10,7 @@
  * runtime-id / filesystem-path non-leak floor on every error body.
  */
 
+import type { SessionContext } from '@neuralis/package-system/contracts';
 import { NextRequest } from 'next/server';
 import { beforeEach, afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, symlink, writeFile, rm } from 'node:fs/promises';
@@ -24,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   ensureProjectPackagesLoaded: vi.fn(async () => undefined),
   /** Runtime instance ids each project loaded, and each instance's loaded root. */
   projectPackageIds: new Map<string, Set<string>>(),
+  builtinIds: new Set<string>(),
+  listPackages: vi.fn<() => unknown[]>(() => []),
   loadedRoots: new Map<string, string | undefined>(),
 }));
 
@@ -40,7 +43,11 @@ vi.mock('@/server/auth/resolveVerifiedAgentScope', () => ({
   resolveVerifiedAgentScope: mocks.resolveVerifiedAgentScope,
 }));
 
-vi.mock('@/server/packages/packageVisibility', () => ({
+vi.mock('@/server/host/bootstrap', () => ({ BUILTIN_PACKAGE_IDS: mocks.builtinIds }));
+vi.mock('@/server/store/ProjectStore', () => ({ getProjectById: async () => ({ id: 'proj-1' }) }));
+vi.mock('@/server/packages/runtime', () => ({ getCommunityPackageRegistry: () => ({ listPackages: mocks.listPackages }) }));
+vi.mock('@/server/packages/packageVisibility', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/packages/packageVisibility')>()),
   resolveVisiblePackageSurface: mocks.resolveVisiblePackageSurface,
 }));
 
@@ -57,6 +64,9 @@ vi.mock('@/server/packages/PackageRuntimeManager', () => ({
       for (const record of records) mocks.loadedRoots.set(record.packageId, record.packageRoot);
       return { errors: [] };
     },
+    getPackageOwnerScope: () => undefined,
+    getPackageOwnerOrigin: () => undefined,
+    getPackageManifestId: () => undefined,
     getProjectPackageIds: (projectId: string) => mocks.projectPackageIds.get(projectId) ?? new Set(),
     getLoader: () => ({
       getStatus: (id: string) => (mocks.loadedRoots.has(id) ? { packageId: id, packageRoot: mocks.loadedRoots.get(id) } : undefined),
@@ -186,6 +196,7 @@ beforeEach(() => {
   mocks.resolveVisiblePackageSurface.mockResolvedValue(makeSurface());
   mocks.projectPackageIds = new Map([[SESSION.projectId, new Set([INSTANCE_ID])]]);
   mocks.loadedRoots = new Map([[INSTANCE_ID, packageRoot]]);
+  mocks.builtinIds.clear();
 });
 
 describe('POST /api/packages/:slug/app-scope (mint)', () => {
@@ -200,6 +211,9 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
 
   it('refuses an instance this project did not load, even when the loader holds it', async () => {
     mocks.projectPackageIds = new Map([['proj-2', new Set([INSTANCE_ID])]]);
+    const real = await vi.importActual<typeof import('@/server/packages/packageVisibility')>('@/server/packages/packageVisibility');
+    mocks.listPackages.mockReturnValue([{ id: INSTANCE_ID }]);
+    mocks.resolveVisiblePackageSurface.mockImplementation(async () => real.resolveVisiblePackageSurface(SESSION as SessionContext, INSTANCE_ID, 'widget', 'example_workspace'));
     const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
       params: Promise.resolve({ slug: INSTANCE_ID }),
     });
@@ -222,6 +236,19 @@ describe('POST /api/packages/:slug/app-scope (mint)', () => {
     const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), {
       params: Promise.resolve({ slug: INSTANCE_ID }),
     });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Surface not available' });
+  });
+
+  it('canonical builtin document visibility with empty project IDs uses its exact loaded root', async () => {
+    const real = await vi.importActual<typeof import('@/server/packages/packageVisibility')>('@/server/packages/packageVisibility');
+    mocks.builtinIds.add(INSTANCE_ID); mocks.projectPackageIds.clear();
+    mocks.listPackages.mockReturnValue([{ id: INSTANCE_ID, name: MANIFEST_ID, version: '1.0.0', app: { surfaces: [{ kind: 'widget', id: 'example_workspace.widget', type: 'example_workspace', requires: { features: ['core.chat'] }, component: { renderer: 'iframe', url: './app/surfaces/widget/example_workspace/index.html' } }] } }]);
+    mocks.resolveVisiblePackageSurface.mockImplementation(async () => real.resolveVisiblePackageSurface(await mocks.resolveSessionContext() as SessionContext, INSTANCE_ID, 'widget', 'example_workspace'));
+    const { handle } = await mintHandle();
+    expect(getPackageAssetScopeAuthority().get(handle)?.surfaceRoot).toBe(join(packageRoot, 'app', 'surfaces', 'widget', 'example_workspace'));
+    mocks.resolveSessionContext.mockResolvedValue({ ...SESSION, grantedFeatures: [] });
+    const response = await mintPost(mintReq({ surfaceKind: 'widget', surfaceId: 'example_workspace' }), { params: Promise.resolve({ slug: INSTANCE_ID }) });
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: 'Surface not available' });
   });

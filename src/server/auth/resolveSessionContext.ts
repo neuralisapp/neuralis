@@ -52,6 +52,7 @@ import {
   type SessionContext,
 } from '@neuralis/package-system/contracts';
 import { resolveProjectRoleContext, type ProjectRoleContext } from './projectRoleContext';
+import { sessionDisplayName } from './memberSession';
 import { resolveVerifiedAgentScope } from './resolveVerifiedAgentScope';
 import { packageApiChallenge, tryResolvePackageOAuth } from './packageOAuthAuth';
 import { FileStoreReadError } from '@neuralis/package-system/data';
@@ -77,7 +78,7 @@ export class SessionResolutionError extends Error {
 }
 
 /** The verified OAuth grant a bearer-authenticated request carried (the `acceptBearer` arm). */
-export type ResolvedBearerGrant = { clientId: string; scope: string; expiresAt?: number };
+export type ResolvedBearerGrant = { clientId: string; scope: string; grantId?: string; expiresAt?: number };
 
 export type ResolveSessionOptions = {
   refuseMustChangePassword?: boolean;
@@ -107,6 +108,7 @@ async function resolveBearerPrincipal(
     grant: {
       clientId: resolved.clientId,
       scope: resolved.scope,
+      ...(resolved.grantId !== undefined ? { grantId: resolved.grantId } : {}),
       ...(resolved.expiresAt !== undefined ? { expiresAt: resolved.expiresAt } : {}),
     },
   };
@@ -211,6 +213,9 @@ export async function resolveSessionContext(
     agentAccess: roleCtx.agentAccess,
     agentOwnership: roleCtx.agentOwnership,
   };
+  // The cookie arm only: a bearer is a client acting for the person, not the person.
+  const displayName = bearer ? undefined : sessionDisplayName(userRecord);
+  if (displayName) session.displayName = displayName;
   if (bearer) {
     options.onBearer?.(bearer.grant);
     return bearer.session.agentId ? { ...session, agentId: bearer.session.agentId } : session;

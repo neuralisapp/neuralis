@@ -70,13 +70,12 @@ right. Hence the path-scoped rule in `src/server/config/securityHeaders.ts`:
   undisturbed, while any NAVIGATED document served here opens in an opaque
   origin with no script. It carries the CSP key alone — nosniff,
   `X-Frame-Options` and `Referrer-Policy` keep arriving from the global rule.
-- **machine-core's KasmVNC proxy gets the global policy back**, in BOTH
-  package-id spellings (`machine-core` and `@neuralis/machine-core` — the
-  catch-all resolves both, since `splitPackagePath` rejoins a scoped id from two
-  URL segments). It is the one package route that legitimately serves a
-  navigable HTML document; under `sandbox` the shell would load into an opaque
-  origin and never connect, i.e. a silently dead desktop. Those two rules must
-  stay AFTER the sandbox rule — reordering them re-arms exactly that failure.
+- **No package route gets a script-bearing policy back** — machine-core's stream
+  lane included, in both package-id spellings: its HTML is the container's, so
+  it opens in the opaque origin like every other package document. ⛔ Never
+  restore `GLOBAL_CSP` (or any script-bearing CSP) on a lane that serves
+  container-authored HTML; the desktop document lives on the companion server's
+  own address only.
 
 **The header rule is the SECOND layer, never the first.** The route that serves
 caller-influenced bytes owns the primary decision: brain-core's `raw` classifies
@@ -86,7 +85,7 @@ be described as sufficient alone: this one is host config a deployment could
 reorder, and the package cannot see the wire.
 
 **And the rule is untrusted-GUEST containment, not just authoring hygiene — so
-it is not deletable on the grounds that no first-party route needs it.**
+it is not deletable on the grounds that no native route needs it.**
 `PackageWasmRunner` returns the WASM guest's own `PackageRouteResponse`, headers
 included, and this route forwards a non-JSON content-type verbatim; an untrusted
 `_packages/` drop can therefore emit `content-type: text/html`. The `sandbox`
@@ -127,6 +126,20 @@ gates as the cookie, refuses a session ticket, answers a refused token `401`
 with the OAuth challenge, and closes when the token expires; the client renews
 and reconnects. `?channels=a,b` narrows any connection to those channels — an
 intersection, never a channel its gates refuse.
+
+Every hub connection is also a CLIENT in the host's in-memory presence registry
+(`server/presence/clientRegistry.ts`) from open to teardown — a browser or the
+desktop window (the kind read off the user agent as a label, never stored), a
+bearer connection under its token's grant — and the token verifier touches it
+for every bearer request on `:3100` and `:3101` (`hostPorts.clientActivity`,
+throttled). The entries drop on the same revocation signal that closes the
+hub, and nothing is persisted. The host-only `members` channel carries
+`{ projectId }` when a member's first client comes online or the last one
+closes (`presenceSignalCooldownMs`), and `GET /api/presence` (cookie,
+`X-Project-Id`, `?userId=`) answers who is online in the project through the
+kernel's ONE presence predicate (`access/presence.ts`): a non-member's id
+answers the same `{ users: [] }` an unknown id does. The admin `presence` route
+reads the same projection through `hostPorts.presence`.
 
 ## Package Management Routes
 
@@ -302,7 +315,7 @@ subresource. A surface that DECLARES bundle mode
 relative `iframe` entry that is an HTML document) has those subresources served
 on the session-free `_pub` lane instead, reached through the injected `<base>`.
 Self-containment is therefore an AUTHORING rule (the shipped
-`check-package.sh` preflight), NOT a wire rejection. The only runtime
+`check-package.mjs` preflight), NOT a wire rejection. The only runtime
 enforcement added for it is a memory bound: `PACKAGE_APP_ASSET_MAX_BYTES`
 (2 MiB, `src/server/packages/packageAppAssetCsp.ts`) is checked on the
 already-computed `stat` size BEFORE the read and answers the route's uniform
@@ -318,22 +331,22 @@ catch-all, so a package route literally named `app-scope` would be shadowed —
 accepted; do not name a package route `app-scope`. The `/api/package-app/`
 top-level segment conflicts with nothing.
 
-## First-Party UI Module Lane (`/api/package-ui/`)
+## Native UI Module Lane (`/api/package-ui/`)
 
 `GET /api/package-ui/{hash}/{path…}` (`src/app/api/package-ui/[hash]/[...path]/route.ts`, the table
 in `src/server/packages/packageUiModules.ts`) is **not** a package-app lane: it serves the prebuilt
-browser module a host-assigned first-party builtin declares in `app.module` (its `dist/app/` tree)
+browser module a host-assigned native builtin declares in `app.module` (its `dist/app/` tree)
 and the ONE union stylesheet, which the workspace `import()`s on the HOST origin — nothing it serves
 runs sandboxed, and it must never serve a document type. Floors, in order: a lowercase sha256-hex
 hash or 404 · an ACTIVE cookie session or 401 · the hash resolves through the server-built table
 only (the caller never names a package or a root) or 404 · the owner is STILL a host-assigned
-first-party builtin in the live registry or 403 · `.js`/`.mjs`/`.css` only (`.map`, `.json`,
+native builtin in the live registry or 403 · `.js`/`.mjs`/`.css` only (`.map`, `.json`,
 documents ⇒ 404 before any fs touch) · the same two-half containment as the asset lanes
 (`packageAppAssetFile.ts`) with its OWN 8 MiB per-file cap. Responses: `Cache-Control: private,
 max-age=31536000, immutable`, `ETag` = the hash (304 on `If-None-Match`), nosniff, CORP
 same-origin — a new build is a new URL, and a module once imported cannot be revoked from the page,
 so `no-store` would buy only a re-download per load. Named residual: any signed-in member may fetch
-any first-party module by its hash; a private package's hash is not guessable and never listed.
+any native module by its hash; a private package's hash is not guessable and never listed.
 
 ## Route Contract
 

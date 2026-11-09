@@ -11,9 +11,13 @@
  *    turn is worthless if its registration sits behind a config branch or a
  *    bootstrap that can reject. See `server/host/shutdown.ts` for the two holes
  *    this ordering closes.
+ * 1a. Claims the data home's lock (`server/host/homeLock.ts`) — a second host
+ *    on the same `~/.neuralis` (the Docker stack and the desktop app) ends here,
+ *    before anything reads or writes the tree.
  * 1b. Reads the setup state (`server/init.ts`). Without the session secret
- *    nothing below can succeed before a restart, so ONE log line names the fix
- *    and the hook returns (the request proxy answers every request 503
+ *    file nothing below can succeed before a restart, so ONE log line names the fix
+ *    (setup on a home with no owner, `upgrade --apply` on one an earlier release set
+ *    up — `secret_moved`) and the hook returns (the request proxy answers every request 503
  *    `setup_required`). With the secret but no owner account yet, the boot
  *    continues — `:3101` opens and authenticates nobody, since no user exists —
  *    and one info line says so.
@@ -61,6 +65,8 @@ export async function register(): Promise<void> {
   // MCP_HTTP_PORT branch below. Nothing here may depend on a booted core.
   const { installShutdownHandlers, addShutdownStep } = await import('./server/host/shutdown');
   installShutdownHandlers();
+  // 1a. ONE host per data home (`server/host/homeLock.ts`): a live holder ends this process (exit 11).
+  await (await import('./server/host/homeLock')).claimHomeLock(addShutdownStep);
 
   // 1b. Setup state — before anything that reads the session secret.
   const [{ getSetupState }, { getLogger }] = await Promise.all([
@@ -70,8 +76,12 @@ export async function register(): Promise<void> {
   const setup = await getSetupState();
   if (!setup.configured) {
     const setupLogger = getLogger().child('setup');
+    if (setup.reason === 'secret_moved') {
+      setupLogger.error('This data home was created by an earlier version and has no session secret file yet (app/config/session-secret.key): stop the app and run `neuralis upgrade --apply` in its install folder (`update --apply` runs it itself), then start again. Every request answers 503 until then.');
+      return;
+    }
     if (setup.reason === 'secret_missing') {
-      setupLogger.error('Neuralis is not set up: NEXTAUTH_SECRET is not set. Run setup (https://docs.neuralisapp.com/getting-started/installation), then start the stack it writes. Every request answers 503 setup_required until then.');
+      setupLogger.error('Neuralis is not set up: the data home has no session secret (app/config/session-secret.key). Run setup (https://docs.neuralisapp.com/getting-started/installation), then start the stack it writes. Every request answers 503 setup_required until then.');
       return;
     }
     setupLogger.info('Neuralis has no owner account yet: run setup. Every request answers 503 setup_required until it has.');

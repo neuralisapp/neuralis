@@ -99,7 +99,7 @@ describe('pkg add --version / --tarball', () => {
     expect(res.out).toContain('the image build installs FROZEN and refuses a dependency the lock does not carry');
   });
 
-  it('with a private registry configured, a scoped package its .npmrc has no line for is refused — never a public fetch at first-party trust', () => {
+  it('with a private registry configured, a scoped package its .npmrc has no line for is refused — never a public fetch at native trust', () => {
     resetHost();
     const npmrc = join(sandbox, 'build.npmrc');
     writeFileSync(npmrc, '@other:registry=http://registry.example/\n//registry.example/:_authToken=x\n');

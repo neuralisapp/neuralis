@@ -13,13 +13,12 @@
  * 2. **Open redirect.** The `callbackUrl` query parameter is attacker-supplied;
  *    once it becomes a navigation target it must be constrained.
  *
- * The constraint deliberately admits SAME-HOSTNAME-CROSS-PORT, and that is
- * load-bearing, not laxity: the MCP OAuth authorize route (`agent-core`
- * mcp/server/oauthRoutes.ts) sends an unauthenticated client to
- * `/auth?callbackUrl=http://<host>:3101/oauth/authorize?…`, and the host's own
- * NextAuth redirect callback (server/auth/authOptions.ts) admits exactly the
- * same shape. An origin-strict guard here would silently kill every external
- * MCP client's onboarding.
+ * The constraint admits SAME-HOSTNAME-CROSS-PORT, matching the host's own
+ * NextAuth redirect callback (server/auth/authOptions.ts). The MCP OAuth
+ * sign-in no longer depends on it: its consent renders on the app origin and
+ * sends an unauthenticated browser to `/auth?callbackUrl=/oauth/authorize?…`,
+ * a RELATIVE target. ⛔ Never widen this to another hostname — a tunnel's or
+ * proxy's separate MCP name included: the session cookie is host-only.
  *
  * Rejecting `\` alone is not enough, and that gap was a real open redirect:
  * the WHATWG URL parser normalises backslashes to forward slashes AND strips
@@ -57,20 +56,16 @@ export function resolveCallbackTarget(raw: string | null | undefined, currentHos
     return { kind: 'relative', url: value };
   }
 
-  // Absolute: admitted only on the hostname the browser is already on, which
-  // keeps the MCP cross-port continuation working without trusting the origin
-  // the SERVER thinks it has.
+  // Absolute: admitted only on the hostname the browser is already on, without
+  // trusting the origin the SERVER thinks it has.
   try {
     const parsed = new URL(value);
     // Credentials in a navigation target are an address-bar spoofing surface
     // and no legitimate producer emits them.
     if (parsed.username || parsed.password) return { kind: 'relative', url: DEFAULT_CALLBACK_URL };
     // Same hostname, and never a downgrade off a secure page. The relaxation
-    // this guard deliberately makes is cross-PORT (the MCP OAuth continuation
-    // lives on another port of the same host); cross-PROTOCOL was never part
-    // of it, and stripping TLS mid-login is exactly what an attacker wants.
-    // On a plain-http deployment both sides are `http:`, so the MCP
-    // continuation is unaffected.
+    // this guard makes is cross-PORT only; cross-PROTOCOL was never part of
+    // it, and stripping TLS mid-login is exactly what an attacker wants.
     const secureHere = typeof window !== 'undefined' && window.location.protocol === 'https:';
     if (secureHere && parsed.protocol !== 'https:') return { kind: 'relative', url: DEFAULT_CALLBACK_URL };
     if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname === currentHostname) {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 /** One minimal tarball per publishable package; `extra` adds files to the named package. */
-function tarballSet(extra: Record<string, Record<string, string>> = {}, omit: string[] = []): string {
+function tarballSet(extra: Record<string, Record<string, string>> = {}, omit: string[] = [], modes: Record<string, Record<string, number>> = {}): string {
   const out = mkdtempSync(join(tmpdir(), 'audit-tarballs-'));
   scratchDirs.push(out);
   for (const rel of PUBLISHABLE) {
@@ -43,6 +43,8 @@ function tarballSet(extra: Record<string, Record<string, string>> = {}, omit: st
     for (const [file, content] of Object.entries(files)) {
       mkdirSync(dirname(join(stage, 'package', file)), { recursive: true });
       writeFileSync(join(stage, 'package', file), content);
+      const mode = modes[name]?.[file];
+      if (mode !== undefined) chmodSync(join(stage, 'package', file), mode);
     }
     execFileSync('tar', ['-czf', join(out, `${name.replace('@', '').replace('/', '-')}.tgz`), '-C', stage, 'package']);
   }
@@ -100,7 +102,7 @@ describe('audit-publish-tarballs --tarballs', () => {
     expect(r.stderr).toContain('dist/git.js: contains the private identifier "private-owner/monorepo"');
   });
 
-  it('refuses a private first-party package name by its hash with no flag at all, and every marker consumer gets it', async () => {
+  it('refuses a private native package name by its hash with no flag at all, and every marker consumer gets it', async () => {
     // The real name is never spelled in a shipped file: the fixture name's hash is injected the same way.
     const { privateMarkers, PRIVATE_PACKAGE_NAME_SHA256 } = (await import(script)) as {
       privateMarkers(input: { roots: string[]; texts?: string[]; nameHashes?: string[] }): Array<{ what: string; pattern: { test(text: string): boolean } }>;
@@ -132,6 +134,21 @@ describe('audit-publish-tarballs --tarballs', () => {
     expect(r.stderr).toContain('dependencies.@neuralis/brain-core is "workspace:*"');
     expect(r.stderr).toContain('forbidden path in tarball — .env');
     expect(r.stderr).toContain('@neuralis/machine-core: no tarball');
+  });
+
+  it('refuses a native helper the CLI manifest marks executable when the tarball lost its exec bit (pnpm pack keeps it only on `bin`)', () => {
+    const helper = 'native/nrs-sandboxer/linux-x64/nrs-sandboxer';
+    const files = {
+      'native/manifest.json': JSON.stringify({ version: 1, nodePty: '1.1.0', files: { 'nrs-sandboxer/linux-x64/nrs-sandboxer': { sha256: null, source: 'ci:x', executable: true }, 'node-pty/LICENSE': { sha256: null, source: 'npm:x' } } }),
+      [helper]: '\x7fELF',
+      'native/node-pty/LICENSE': 'MIT',
+    };
+    const lost = audit(['--tarballs', tarballSet({ '@neuralis/cli': files }, [], { '@neuralis/cli': { [helper]: 0o644 } })]);
+    expect(lost.status).toBe(1);
+    expect(lost.stderr).toContain(`@neuralis/cli: ${helper} is not executable in the tarball`);
+    expect(lost.stderr).not.toContain('node-pty/LICENSE');
+    // PAIRED CONTROL: the same tarball with the bit (what npm pack writes) is clean.
+    expect(audit(['--tarballs', tarballSet({ '@neuralis/cli': files }, [], { '@neuralis/cli': { [helper]: 0o755 } })]).status).toBe(0);
   });
 
   it('exits 2 on a flag without a value', () => {

@@ -85,7 +85,7 @@ describe('revokePrincipal — the close', () => {
       surfaceKind: 'widget',
       surfaceId: 'w',
       renderer: 'iframe',
-      trust: 'first-party',
+      trust: 'native',
       fingerprint: 'f',
       generation: 'g',
       surfaceRoot: '/tmp/x',

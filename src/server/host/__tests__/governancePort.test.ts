@@ -4,15 +4,17 @@
  * Every member of that port is a gated CALLER ACT: it takes a scalar caller
  * identity and re-derives its own floor from the LIVE project record. That
  * property is what makes the port safe to hand to the admin package through
- * its first-party `ctx.hostPorts`.
+ * its native `ctx.hostPorts`.
  *
  * `pruneAgentOwnership` lives in the same module as `assignAgentToUser` and
  * writes the same map, so it is one careless line away from being added here —
  * and it has NO caller floor by construction (it is the consequence of a gate
  * that already passed, with no caller identity left to check). On the port it
  * would be an unguarded `agentOwnership` write reachable by anything that can
- * reach the port. The pin is the key COUNT plus the names, so a fifth member of
- * any kind has to be argued for rather than slipped in.
+ * reach the port. The pin is the key COUNT plus the names, so an eighth member
+ * of any kind has to be argued for rather than slipped in. The three invite-LINK
+ * verbs are caller acts of the same shape: each re-derives `canInvite` + the
+ * role priority from the live record (`server/admin/inviteLinks.ts`).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -34,10 +36,18 @@ function governancePortBody(): string {
 }
 
 describe('hostPorts.governance port shape', () => {
-  it('carries EXACTLY four members, and they are the four gated caller acts', () => {
+  it('carries EXACTLY seven members, and they are the seven gated caller acts', () => {
     const body = governancePortBody();
-    const keys = [...body.matchAll(/^\s{6}(\w+):/gm)].map((m) => m[1]).sort();
-    expect(keys).toEqual(['assignAgent', 'createProject', 'inviteUser', 'patchRoles']);
+    const keys = [...body.matchAll(/^\s{6}(\w+)(?::|,)/gm)].map((m) => m[1]).sort();
+    expect(keys).toEqual([
+      'assignAgent',
+      'createProject',
+      'inviteUser',
+      'issueInviteLink',
+      'listInviteLinks',
+      'patchRoles',
+      'revokeInviteLink',
+    ]);
   });
 
   it('reaches the admin package through hostPorts only — no globalThis slot', () => {

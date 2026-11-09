@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { migrateProjectRecord } from '../ProjectStore';
 import { HOST_DATA_FORMATS } from '../dataFormats';
 
-const PINNED = { roleGrantVersion: 21, projectFormatVersion: 4 } as const;
+const PINNED = { roleGrantVersion: 22, projectFormatVersion: 5 } as const;
 
 function currentRoleGrantVersion(): number {
   const seeded = migrateProjectRecord({

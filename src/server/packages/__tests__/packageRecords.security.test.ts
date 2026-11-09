@@ -14,7 +14,7 @@ import {
 } from '../packageRecords';
 
 describe('project package record security', () => {
-  it('rejects reserved first-party package ids for project packages', () => {
+  it('rejects reserved native package ids for project packages', () => {
     expect(() => assertProjectPackageIdAllowed('@neuralis/agent-core')).toThrow(/reserved/);
     expect(() => assertProjectPackageIdAllowed('@neuralis/custom')).toThrow(/reserved/);
   });
@@ -36,7 +36,7 @@ describe('project package record security', () => {
     const definition = sanitizeProjectPackageDefinition({
       id: 'user-package',
       name: 'User Package',
-      access: { trust: 'first-party' },
+      access: { trust: 'native' },
     } as any);
 
     expect(definition.access?.trust).toBe('untrusted');
@@ -52,7 +52,7 @@ describe('project package record security', () => {
       definition: {
         id: 'user-package',
         name: 'User Package',
-        access: { trust: 'first-party' },
+        access: { trust: 'native' },
       } as any,
     };
 
@@ -97,13 +97,13 @@ describe('toResolvedRecord — scope-namespacing (tenant-namespaced-packages)', 
 
  it('same authored name in different source roots has independent instance identity; authored URI is refused', () => {
    const record: ProjectPackageRecord = { slug: 'folder', packageId: 'shared-name', definition: { id: 'shared-name', name: 'Shared' }, packageRoot: '/tmp/source/folder', discoveredAt: 1, trust: 'untrusted' };
-   const a = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' });
-   const b = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'right://' });
+   const a = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://', plane: 'local' });
+   const b = toResolvedRecord(record, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'right://', plane: 'local' });
    expect(a.manifestId).toBe(b.manifestId);
    expect(a.packageId).toBe('left://folder?project=p&scope=project');
    expect(a.packageId).not.toBe(b.packageId);
-   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' }).packageId).toBe('left://?project=p&scope=project');
-   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source/dir/folder' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://' }).packageId).toBe('left://dir/folder?project=p&scope=project');
+   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://', plane: 'local' }).packageId).toBe('left://?project=p&scope=project');
+   expect(toResolvedRecord({ ...record, packageRoot: '/tmp/source/dir/folder' }, 'p', { kind: 'project' }, { directory: '/tmp/source', uriRoot: 'left://', plane: 'local' }).packageId).toBe('left://dir/folder?project=p&scope=project');
    expect(() => toResolvedRecord({ ...record, packageId: a.packageId, definition: { id: a.packageId, name: 'Shared' } }, 'p', { kind: 'project' })).toThrow('Invalid authored package manifest');
  });
 

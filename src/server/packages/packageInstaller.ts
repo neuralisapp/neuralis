@@ -6,8 +6,9 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { PackageDefinition, PackageSourceKind } from '@neuralis/package-system/contracts';
+import { isPathInside } from '@neuralis/package-system/paths';
 import {
   discoverPackageSource,
   type DiscoveredPackageSource,
@@ -50,11 +51,6 @@ export function inspectInstallablePackage(input: InstallPackageInput): Discovere
   return discoverPackageSource(input);
 }
 
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
-}
-
 function realOrResolved(path: string): string {
   const resolved = resolve(path);
   return existsSync(resolved) ? realpathSync(resolved) : resolved;
@@ -71,10 +67,10 @@ export function assertInstallSourceAllowed(input: InstallPackageInput, projectRo
 
   for (const candidate of candidates) {
     const resolved = realOrResolved(candidate);
-    if (isInside(appRoot, resolved)) {
+    if (isPathInside(appRoot, resolved)) {
       throw new Error('Package install source cannot be inside the Neuralis app data directory');
     }
-    if (isInside(targetPackagesDir, resolved)) {
+    if (isPathInside(targetPackagesDir, resolved)) {
       throw new Error('Package install source cannot be inside the target project package directory');
     }
   }
@@ -127,7 +123,7 @@ export async function installPackageToProject(
 
       // A project drop declaring `mcp` (or `node`) is skipped here because
       // there is nothing to BUILD, not because it is exempt from anything.
-      // Both are first-party-only code runtimes and a `_packages/` drop is
+      // Both are native-only code runtimes and a `_packages/` drop is
       // pinned to `untrusted` by `ProjectPackageScanner`, so the loader will
       // demote it (`untrusted-mcp` / `untrusted-node`) and run no code. Say so
       // at install time: the operator otherwise sees a package install cleanly
@@ -135,7 +131,7 @@ export async function installPackageToProject(
       if (runtimeType === 'mcp' || runtimeType === 'node') {
         console.warn(
           `[packageInstaller] ${slug} declares runtime.type "${runtimeType}", which requires ` +
-          `first-party trust — a project drop loads its declarative contributions only. ` +
+          `native trust — a project drop loads its declarative contributions only. ` +
           `Declare "wasm" to run code.`,
         );
       }

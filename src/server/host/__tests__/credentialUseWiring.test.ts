@@ -11,7 +11,7 @@
  *   2. the runtime boot credential resolver, shared by provider config readers;
  *   3. `mcpTokenStore.readScoped` (sidecar env/token reads never traverse
  *      the resolver);
- *   4. the exclusion set derives from BUILTIN packages only (first-party by
+ *   4. the exclusion set derives from BUILTIN packages only (native by
  *      source — an untrusted manifest's `category:'llm'` must never exempt).
  */
 
@@ -93,7 +93,7 @@ describe('package diagnostics host port', () => {
 
   function fixture(phase: BootstrapPhase) {
     const definitions: PackageDefinition[] = [{
-      id: '@fixture/runtime', name: 'Runtime', access: { trust: 'first-party' },
+      id: '@fixture/runtime', name: 'Runtime', access: { trust: 'native' },
     }];
     const report: RuntimeHealthReport = { status: 'ok', packages: [], refused: [] };
     const listLoaded = vi.fn(() => definitions);

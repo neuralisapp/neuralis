@@ -49,7 +49,8 @@ import { getEnv } from '../config/env';
  * (v2), then the device upgrade, whose role-grant raise gives `device.own` to
  * every stored builtin role the manifests grant it (v3, role-grant revision
  * 20), then the two-word feature ids on every stored role, custom roles and
- * package overrides included (v4, role-grant revision 21 —
+ * package overrides included (v4, role-grant revision 21), then an agent
+ * level on every stored role that names none (v5, role-grant revision 22 —
  * `roleGrantFormatLockstep.test.ts`). Each step stamps the revision IT
  * produces, never the live one.
  */
@@ -57,18 +58,20 @@ export const PROJECT_UPGRADE_STEPS = {
   identity: { to: 2, id: 'package-identity-v2' },
   device: { to: 3, id: 'source-device-v1' },
   features: { to: 4, id: 'two-word-features-v1' },
+  agents: { to: 5, id: 'written-role-agents-v1' },
 } as const;
 
 /** Kind name → declaration. The version is the on-disk format this build reads and writes. */
 export const HOST_DATA_FORMATS = {
   project: {
     kind: 'neuralis/project',
-    version: 4,
+    version: 5,
     files: ['app/projects'],
-    upgrade: [PROJECT_UPGRADE_STEPS.identity, PROJECT_UPGRADE_STEPS.device, PROJECT_UPGRADE_STEPS.features],
+    upgrade: [PROJECT_UPGRADE_STEPS.identity, PROJECT_UPGRADE_STEPS.device, PROJECT_UPGRADE_STEPS.features, PROJECT_UPGRADE_STEPS.agents],
   },
   projectPurged: { kind: 'neuralis/project-purged', version: 1, files: ['app/projects-purged'] },
   user: { kind: 'neuralis/user', version: 1, files: ['app/users'] },
+  invite: { kind: 'neuralis/invite', version: 1, files: ['app/invites'] },
   // v2: every blob opens under the key file + salt file alone (no NEXTAUTH_SECRET or static-salt
   // fallback); raised by the `credential-key-v2` upgrade, whose dry run names any blob that does not.
   credential: {
@@ -83,6 +86,15 @@ export const HOST_DATA_FORMATS = {
       'app/config/credential-master.key',
       'app/config/credential-salt.bin',
     ],
+  },
+  // The session secret file (`config/sessionSecretFile.ts`). v1 is its first format, raised OFFLINE
+  // (`session-secret-v1` writes it from the `.env` an older install kept it in): an existing ledger
+  // without this kind refuses to boot until that step ran, a fresh install claims v1 directly.
+  sessionSecret: {
+    kind: 'neuralis/session-secret',
+    version: 1,
+    upgrade: { mode: 'offline', id: 'session-secret-v1' },
+    files: ['app/config/session-secret.key'],
   },
   credentialUsage: { kind: 'neuralis/credential-usage', version: 1, files: ['app/credentials/usage'] },
   credentialUseRules: {
@@ -106,11 +118,10 @@ export type HostDataFormat = (typeof HOST_DATA_FORMATS)[keyof typeof HOST_DATA_F
 
 declareDataFormats(Object.values(HOST_DATA_FORMATS));
 
-/** The operator command that puts a checkpoint back (host plane, app stopped). */
+/** The operator command that puts a checkpoint back (on the machine, app stopped). */
 export const CHECKPOINT_RESTORE_COMMAND = 'npx neuralis checkpoint restore';
-/** The same, inside the image (a pulled image has no host folder). */
-export const CHECKPOINT_RESTORE_DOCKER_COMMAND =
-  'docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore';
+/** The same for an image-only folder: the `neuralis` command runs it in the image. */
+export const CHECKPOINT_RESTORE_DOCKER_COMMAND = 'neuralis checkpoint restore';
 
 type ClaimSlot = { boot?: Promise<DataFormatClaimReport> };
 const CLAIM_SLOT = Symbol.for('@neuralis/host:dataFormatClaim');
@@ -139,7 +150,7 @@ export function describeDataFormatRefusal(error: unknown): unknown {
   const restore = error.checkpoint
     ? ` Newest checkpoint: ${error.checkpoint}. With the app stopped, restore it with ` +
       `\`${CHECKPOINT_RESTORE_COMMAND} ${error.checkpoint}\` ` +
-      `(Docker: \`${CHECKPOINT_RESTORE_DOCKER_COMMAND} ${error.checkpoint}\`), then start this build.`
+      `(an image-only folder: \`${CHECKPOINT_RESTORE_DOCKER_COMMAND} ${error.checkpoint}\`), then start this build.`
     : ' No checkpoint exists; run the build that wrote this data.';
   return new Error(`Stored data is newer than this build: ${kinds}. Nothing was changed.${restore}`, {
     cause: error,

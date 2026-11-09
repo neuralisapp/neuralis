@@ -15,7 +15,7 @@
  * of the host whose own manifest carries a `neuralis` block is builtin-class.
  * Keying on a `packages/` directory instead would be wrong for everyone but
  * this monorepo — on every published channel those packages arrive from a
- * registry, and what an operator actually has is their OWN first-party package
+ * registry, and what an operator actually has is their OWN native package
  * registered with `neuralis:pkg add`.
  *
  * A local-source spec (`file:`/`link:`) is classified on the SPEC, not on what
@@ -23,7 +23,7 @@
  * --tarball` writes `file:/abs/x.tgz`, which is not a directory, so a
  * resolves-to-a-directory rule would drop it into `registryOnly` and hand it to
  * `update`, which would then replace a locally-vetted artifact with a registry
- * package installed at first-party trust — without the operator ever naming it.
+ * package installed at native trust — without the operator ever naming it.
  * So the partition has TWO classes — local source (`localSource`, a tarball
  * included: registry-shaped, but never updated) and registry — and a local
  * tarball is in neither tool's target set: sync cannot rebuild it, update must

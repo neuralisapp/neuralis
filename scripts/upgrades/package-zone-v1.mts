@@ -4,8 +4,9 @@
  * (`data/runtime/<scheme>/<leaf>/`, a plain npm package `data/runtime/_npm/<id>/`),
  * without its identity marker. The algorithm is agent-core's; this file wires
  * the host's facts into it — the installed host packages, the identity
- * upgrade's ledger state, the brain source-config version, and the host-owned
- * platform config whose `packageLogLevelOverrides` keys name zones.
+ * upgrade's ledger state, and the host-owned platform config whose
+ * `packageLogLevelOverrides` keys name zones. It re-keys source configs without
+ * stamping their format: this step does not raise `brain-core/source-config`.
  *
  * The FILE NAME is load-bearing: `scripts/upgrade.mts` runs modules in name
  * order, and `package-identity-v2.mts` < `package-zone-v1.mts`, so on an install
@@ -28,7 +29,6 @@ import {
   type OfflineUpgradeContext,
   type OfflineUpgradeModule,
 } from '@neuralis/package-system/data';
-import { SOURCE_CONFIG_FORMAT } from '@neuralis/brain-core';
 import {
   PACKAGE_DATA_ZONE_KINDS,
   createPackageDataZoneUpgrade,
@@ -69,7 +69,6 @@ async function deps(ctx: OfflineUpgradeContext): Promise<PackageDataZoneUpgradeD
       return pendingOfflineKinds(ledger, existed, declarations.values()).some(({ kind, from }) =>
         offlineUpgradeSteps(declarations.get(kind)!).some((step) => step.id === identity && step.to > from));
     },
-    sourceConfigVersion: SOURCE_CONFIG_FORMAT.version,
     extraCheckpointFiles: typeof overrides === 'string' && overrides.length > 0 ? [PLATFORM_CONFIG] : [],
     async rewriteLogLevelOverrides(prefixes) {
       const config = await platformConfig(ctx);

@@ -6,13 +6,13 @@
  * half-done) refuses to start and names this command.
  *
  *   neuralis upgrade            dry run: what would change — writes nothing
+ *   neuralis upgrade --check    exit 12 when anything is pending, 0 when not — reads only the ledger
  *   neuralis upgrade --apply    checkpoint, then upgrade (app STOPPED)
  *
- * A pulled image has no host folder; the same script is baked in:
- *
- *   docker compose stop neuralis
- *   docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply
- *   docker compose up -d -V
+ * A pulled image has no host folder; the same script is baked in, and
+ * `neuralis upgrade --apply` on an image-only folder runs it through
+ * `docker compose run --rm --no-deps` of the app service (the verb row's
+ * `onImage`, `cli/registry.mts`).
  *
  * Both modes refuse while the app runs (`checkOffline`, the boundary a
  * checkpoint restore uses; a native install's proof is the same health probe),
@@ -33,7 +33,7 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { installKindOf, resolveNeuralisHome } from '@neuralis/package-system/paths';
 import {
   DATA_FORMAT_LEDGER_RELATIVE_PATH,
   createCheckpoint,
@@ -157,7 +157,16 @@ export type UpgradeOptions = {
   log: (line: string) => void;
   /** Checkpoints kept after a completed apply (`dataCheckpointKeep`); absent ⇒ none pruned. */
   keepCheckpoints?: number;
+  /** How this install's app is stopped and started — the desktop app's own host, or a Docker stack. */
+  appRuns: 'native' | 'docker';
 };
+
+/** The stop and start an operator types for `appRuns`, in the upgrade's own words. */
+export function appStopStart(appRuns: UpgradeOptions['appRuns']): { stop: string; start: string } {
+  return appRuns === 'native'
+    ? { stop: `quit the desktop app, or \`${spell('down')}\``, start: `\`${spell('up')}\`, or open the desktop app` }
+    : { stop: '`docker compose stop neuralis` in the host folder, or stop the process', start: '`docker compose up -d -V`' };
+}
 
 /**
  * The `dataCheckpointKeep` retention from `platform.json`, inside the bounds
@@ -184,6 +193,22 @@ async function readPlatformJson(appRoot: string): Promise<Record<string, unknown
 
 export type UpgradeOutcome = { pending: string[]; applied: boolean; checkpoint?: string };
 
+/** `upgrade --check`'s answer when something is pending — the `neuralis up` contract's `UPGRADE_REQUIRED`. */
+export const EXIT_UPGRADE_REQUIRED = 12;
+
+/**
+ * What an apply would raise, from the ledger and the loaded modules alone: no
+ * offline gate, no module dry run (a dry run may read the vector store, which
+ * is not running before a start), nothing written. Each line names a module and
+ * the kinds it raises; the blockers are the apply's own dry run to list.
+ */
+export async function pendingUpgrades(modulesDir: string, appRoot: string): Promise<string[]> {
+  const modules = await loadUpgradeModules(modulesDir);
+  const ledgerExisted = existsSync(join(appRoot, DATA_FORMAT_LEDGER_RELATIVE_PATH));
+  const { selection } = selectPendingUpgrades(modules, await readDataFormatLedger(appRoot), ledgerExisted);
+  return selection.map(({ module, pending, resuming }) => `${module.id}: ${pending.map((k) => `${k.kind} → v${k.to}`).join(', ')}${resuming ? ' (resuming)' : ''}`);
+}
+
 /** The apply's checkpoint line — the one place it is worded, and read back by `update --apply`. */
 export function checkpointTakenLine(id: string): string {
   return `Checkpoint ${id} taken (\`${spell(`checkpoint restore ${id}`)}\` goes back to it).`;
@@ -194,17 +219,24 @@ export function checkpointFromUpgradeOutput(output: string): string | null {
   return /Checkpoint (\S+) taken \(/.exec(output)?.[1] ?? null;
 }
 
+/** The line an apply prints when no data format was raised — a caller parsing the output reads it through `upgradeRaisedNothing`. */
+const NOTHING_TO_UPGRADE = 'Nothing to upgrade: every offline data format is current.';
+
+export function upgradeRaisedNothing(output: string): boolean {
+  return output.includes(NOTHING_TO_UPGRADE);
+}
+
 export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> {
   const verdict = await opts.offline();
   if (!verdict.offline) {
-    throw new Error(`Refusing to upgrade: ${verdict.reason}. Stop the app first (\`docker compose stop neuralis\` in the host folder, or stop the process), then run this again.`);
+    throw new Error(`Refusing to upgrade: ${verdict.reason}. Stop the app first (${appStopStart(opts.appRuns).stop}), then run this again.`);
   }
   const modules = await loadUpgradeModules(opts.modulesDir);
   const ledgerExisted = existsSync(join(opts.roots.appRoot, DATA_FORMAT_LEDGER_RELATIVE_PATH));
   const { selection, marks } = selectPendingUpgrades(modules, await readDataFormatLedger(opts.roots.appRoot), ledgerExisted);
   const pending = marks.map((mark) => mark.kind);
   if (selection.length === 0) {
-    opts.log('Nothing to upgrade: every offline data format is current.');
+    opts.log(NOTHING_TO_UPGRADE);
     return { pending, applied: false };
   }
   const ctx: OfflineUpgradeContext = { ...opts.roots, log: opts.log };
@@ -246,17 +278,28 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> 
     const pruned = await pruneCheckpoints(opts.roots.home, opts.keepCheckpoints);
     if (pruned.length > 0) opts.log(`Pruned ${pruned.length} older checkpoint(s) (dataCheckpointKeep ${opts.keepCheckpoints}).`);
   }
-  opts.log('Upgrade complete. Start this build (`docker compose up -d -V`).');
+  opts.log(`Upgrade complete. Start this build (${appStopStart(opts.appRuns).start}).`);
   return { pending, applied: true, ...(checkpoint ? { checkpoint } : {}) };
 }
 
 export async function run(argv: string[], ctx: CliContext): Promise<number> {
   const args = new Set(argv);
-  const unknown = [...args].filter((arg) => arg !== '--apply' && arg !== '--dry-run');
-  if (unknown.length > 0 || (args.has('--apply') && args.has('--dry-run'))) throw new CliExit(1, 'Usage: neuralis upgrade [--dry-run | --apply]');
+  const unknown = [...args].filter((arg) => arg !== '--apply' && arg !== '--dry-run' && arg !== '--check');
+  if (unknown.length > 0 || ['--apply', '--dry-run', '--check'].filter((mode) => args.has(mode)).length > 1) throw new CliExit(1, 'Usage: neuralis upgrade [--dry-run | --check | --apply]');
   const installDir = ctx.installDir;
   await loadHostEnv(installDir);
   const roots = resolveNeuralisHome();
+  if (args.has('--check')) {
+    const pending = await pendingUpgrades(UPGRADES_DIR, roots.appRoot);
+    if (pending.length === 0) {
+      console.log(`  ${NOTHING_TO_UPGRADE}`);
+      return 0;
+    }
+    console.log('  Pending (an apply would raise these):');
+    for (const line of pending) console.log(`    ${line}`);
+    console.log(`  With the app stopped: \`${spell('upgrade --apply')}\` (\`${spell('upgrade')}\` lists what blocks it first).`);
+    return EXIT_UPGRADE_REQUIRED;
+  }
   const inContainer = existsSync('/.dockerenv');
   if (args.has('--apply') && !checkpointsArePersistent(roots.home, inContainer)) {
     throw new CliExit(1, `${join(roots.home, 'checkpoints')} is not a bind of the host's — a checkpoint taken here would vanish with this container`, [
@@ -274,6 +317,7 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
     ),
     log: (line) => console.log(`  ${line}`),
     keepCheckpoints: checkpointKeep(await readPlatformJson(roots.appRoot)),
+    appRuns: installKindOf(installDir) === 'native' ? 'native' : 'docker',
   });
   return 0;
 }

@@ -21,7 +21,7 @@
  * THE TRUST ACT. Presence in `neuralis/package.json#dependencies` is the
  * builtin-class authorization boundary: every dep whose own package.json
  * carries a `neuralis` block is discovered at boot and loaded IN-PROCESS with
- * host-assigned `first-party` trust — the same trust as the platform's own
+ * host-assigned `native` trust — the same trust as the platform's own
  * packages. Only run this for packages you (the deploying admin) vet, exactly
  * as you vet any npm dependency.
  *
@@ -34,13 +34,12 @@
  * nothing.
  */
 
-import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { resolveNeuralisHome, sanitizePackageId } from '@neuralis/package-system/paths';
-import { providedFeatureIds } from '@neuralis/package-system/contracts';
 import {
   LOCAL_SOURCE_SLOTS,
   PRIVATE_SCOPES_FILE,
@@ -65,6 +64,7 @@ import { packageBindHostPath } from './mount/packageBind.mts';
 import { loadHostEnv } from './setup/detect.mts';
 import { operatorDependencies } from './setup/compose.mts';
 import { HOST_CONFIG_SETTINGS } from '../src/server/config/hostConfigSettings.ts';
+import { defaultGrantedFeatures, recordBuiltinAddition, recordBuiltinRemoval } from '../src/server/packages/builtinGrantChangesRecord.ts';
 
 // ── ANSI Colors ───────────────────────────────────────────────────
 
@@ -189,7 +189,7 @@ function printTrustNotice(name: string, spec: string, folder: boolean): void {
   console.log('');
   console.log(`${c.yellow}${c.bold}── TRUST NOTICE ─────────────────────────────────────────────${c.reset}`);
   console.log(`${c.yellow}Added ${c.bold}"${name}": "${spec}"${c.reset}${c.yellow} to ${trustList(folder)}.${c.reset}`);
-  console.log(`${c.yellow}This grants the package FIRST-PARTY IN-PROCESS trust at the next${c.reset}`);
+  console.log(`${c.yellow}This grants the package NATIVE IN-PROCESS trust at the next${c.reset}`);
   console.log(`${c.yellow}boot — the same trust as the platform's own packages.${c.reset}`);
   if (folder) {
     console.log(`${c.yellow}  • Remove this entry deliberately — this file is the install's trust list.${c.reset}`);
@@ -237,7 +237,7 @@ async function registryProblems(host: string, name: string): Promise<string[]> {
   if (!new RegExp(`^\\s*${scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:registry\\s*=`, 'm').test(text)) {
     problems.push(
       `${npmrc} has no "${scope}:registry=" line — with a private registry configured, ${name} would install at ` +
-        `first-party trust from the PUBLIC registry; add "${scope}:registry=<url>" and its token line first`,
+        `native trust from the PUBLIC registry; add "${scope}:registry=<url>" and its token line first`,
     );
   }
   return problems;
@@ -311,7 +311,7 @@ async function addPackage(
     // before this record existed grants its defaults to existing projects too.
     const existing = await readDependencyManifest(host, name, deps[name]);
     if (existing === null || (existing.neuralis && existing.neuralis.referenceOnly !== true)) {
-      await recordAddition(name);
+      await recordBuiltinAddition(grantChangesAppRoot(), name);
       console.log(`${ok} Its default role grants reach every existing project once at the next boot ${c.dim}(a grant an owner revoked by hand comes back — revoke it again in Admin → Roles)${c.reset}.`);
     }
     return;
@@ -391,7 +391,7 @@ async function addPackage(
   // unread registry manifest (`--version`) is recorded and settled at the boot.
   // A reference-only block is never loaded, so it never becomes a builtin.
   if (!manifest || (manifest.neuralis && manifest.neuralis.referenceOnly !== true)) {
-    await recordAddition(name);
+    await recordBuiltinAddition(grantChangesAppRoot(), name);
     console.log(`${ok} Its default role grants reach every existing project once at the next boot that carries it ${c.dim}(new projects get them at creation)${c.reset}.`);
   }
   const folder = operatorDependencies(JSON.parse(updated)) !== null;
@@ -419,66 +419,14 @@ async function addPackage(
   }
 }
 
-type GrantChanges = {
-  removals: Array<{ packageId: string; features: string[]; removedAt: string }>;
-  additions: Array<{ packageId: string; addedAt: string }>;
-};
-
 /**
  * Where `add` / `remove` record a builtin's grant change for the next boot —
  * the host's `reconcileBuiltinGrantChanges` applies an addition's default
  * grants to every existing project once, and revokes a removal's features no
- * loaded package still provides.
+ * loaded package still provides (`builtinGrantChangesRecord.ts`, the record's
+ * one writer, shared with the runtime install transaction).
  */
-function grantChangesPath(): string {
-  return join(resolveNeuralisHome().home, 'app', 'config', 'builtin-removals.json');
-}
-
-/** Read-modify-write the record; written through a rename, deleted when empty. */
-async function updateGrantChanges(change: (records: GrantChanges) => GrantChanges): Promise<void> {
-  const file = grantChangesPath();
-  let records: GrantChanges = { removals: [], additions: [] };
-  try {
-    const raw = JSON.parse(await readFile(file, 'utf-8')) as Partial<GrantChanges>;
-    records = {
-      removals: Array.isArray(raw.removals) ? raw.removals : [],
-      additions: Array.isArray(raw.additions) ? raw.additions : [],
-    };
-  } catch {
-    /* no record yet */
-  }
-  const next = change(records);
-  if (next.removals.length === 0 && next.additions.length === 0) {
-    await rm(file, { force: true });
-    return;
-  }
-  const text = `${JSON.stringify(next, null, 2)}\n`;
-  await mkdir(join(file, '..'), { recursive: true });
-  await writeFile(`${file}.tmp`, text, 'utf-8');
-  await rename(`${file}.tmp`, file);
-}
-
-/** An added package: drop its pending removal, (re)record the addition. */
-async function recordAddition(name: string): Promise<void> {
-  await updateGrantChanges(({ removals, additions }) => ({
-    removals: removals.filter((r) => r.packageId !== name),
-    additions: [...additions.filter((a) => a.packageId !== name), { packageId: name, addedAt: new Date().toISOString() }],
-  }));
-}
-
-/**
- * A removed package: drop its pending addition, and record its default-granted
- * features (none → no removal record) — an earlier record for it is replaced.
- */
-async function recordRemoval(name: string, features: string[]): Promise<void> {
-  await updateGrantChanges(({ removals, additions }) => ({
-    removals: [
-      ...removals.filter((r) => r.packageId !== name),
-      ...(features.length > 0 ? [{ packageId: name, features, removedAt: new Date().toISOString() }] : []),
-    ],
-    additions: additions.filter((a) => a.packageId !== name),
-  }));
-}
+const grantChangesAppRoot = (): string => resolveNeuralisHome().appRoot;
 
 /** What the package leaves behind as user data, with how to delete each. */
 function printLeftovers(name: string, manifest: DepManifest | null): void {
@@ -539,12 +487,8 @@ async function removePackage(ctx: CliContext, name: string): Promise<void> {
 
   // Only what the package's own manifest GRANTS by default is revoked — the
   // grants the platform wrote for it; a package with none leaves no record.
-  const requires = manifest?.neuralis?.requires;
-  const provided = new Set(providedFeatureIds(requires?.providesFeatures as Parameters<typeof providedFeatureIds>[0]));
-  const features = [...new Set(Object.values(requires?.defaultRoleGrants ?? {}).flat())].filter(
-    (f): f is string => typeof f === 'string' && provided.has(f),
-  );
-  await recordRemoval(name, features);
+  const features = defaultGrantedFeatures(manifest?.neuralis?.requires as Parameters<typeof defaultGrantedFeatures>[0]);
+  await recordBuiltinRemoval(grantChangesAppRoot(), name, features);
   if (manifest?.neuralis && features.length > 0) {
     console.log(
       `${ok} Its default role grants go at the next boot: ${features.join(', ')}` +

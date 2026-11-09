@@ -103,7 +103,7 @@ describe('newer data stops the boot and names the way back', () => {
     await expect(refusal).rejects.toThrow(`neuralis/project v7 (this build reads v${HOST_DATA_FORMATS.project.version})`);
     await expect(refusal).rejects.toThrow(new RegExp(`Newest checkpoint: ${cp.id}`));
     await expect(refusal).rejects.toThrow(`npx neuralis checkpoint restore ${cp.id}`);
-    await expect(refusal).rejects.toThrow('docker compose run --rm --no-deps neuralis node bin/neuralis.mjs checkpoint restore');
+    await expect(refusal).rejects.toThrow('(an image-only folder: `neuralis checkpoint restore ');
     expect(readFileSync(ledgerPath, 'utf-8')).toBe(before);
 
     // A failed claim is not memoized: once the data is put back, the next boot claims. (A fresh
@@ -117,12 +117,22 @@ describe('newer data stops the boot and names the way back', () => {
   it('the boot claim never raises: a kind behind its code version refuses naming the upgrade command, with no checkpoint', async () => {
     mkdirSync(join(appRoot, 'credentials', 'global'), { recursive: true });
     writeFileSync(join(appRoot, 'credentials', 'global', 'llm.x.enc.json'), '{}');
-    writeFileSync(ledgerPath, JSON.stringify({ 'neuralis/project': { version: 1, raisedAt: 'x' }, 'neuralis/credential': { version: 2, raisedAt: 'x' }, 'neuralis/platform-config': { version: 2, raisedAt: 'x' } }));
+    writeFileSync(ledgerPath, JSON.stringify({ 'neuralis/project': { version: 1, raisedAt: 'x' }, 'neuralis/credential': { version: 2, raisedAt: 'x' }, 'neuralis/platform-config': { version: 2, raisedAt: 'x' }, 'neuralis/session-secret': { version: 1, raisedAt: 'x' } }));
     const before = readFileSync(ledgerPath, 'utf-8');
 
     await expect(claimHostDataFormats()).rejects.toMatchObject({ reason: 'upgrade_required', kinds: ['neuralis/project'] });
     expect(readFileSync(ledgerPath, 'utf-8')).toBe(before);
     expect(existsSync(join(home, 'checkpoints'))).toBe(false);
+  });
+
+  it('a ledger that has never seen the session secret kind refuses until `session-secret-v1` ran; one that has, claims (the paired control)', async () => {
+    const current = { 'neuralis/project': { version: HOST_DATA_FORMATS.project.version, raisedAt: 'x' }, 'neuralis/credential': { version: 2, raisedAt: 'x' }, 'neuralis/platform-config': { version: 2, raisedAt: 'x' } };
+    writeFileSync(ledgerPath, JSON.stringify(current));
+    await expect(claimHostDataFormats()).rejects.toMatchObject({ reason: 'upgrade_required', kinds: ['neuralis/session-secret'] });
+    writeFileSync(ledgerPath, JSON.stringify({ ...current, 'neuralis/session-secret': { version: 1, raisedAt: 'x' } }));
+    resetDataFormatsForTesting();
+    declareDataFormats(Object.values(HOST_DATA_FORMATS));
+    await expect(claimHostDataFormats()).resolves.toBeDefined();
   });
 });
 

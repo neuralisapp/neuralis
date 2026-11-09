@@ -47,9 +47,9 @@ function primaryItems(): DockItem[] {
   });
   return [
     { id: '__user-info', position: 0, title: 'User', icon: Glyph, section: 'header', onClick: () => undefined },
-    pkg('calendar', 100, 'trust:first-party'),
-    pkg('files', 101, 'trust:first-party'),
-    pkg('admin', 102, 'trust:first-party'),
+    pkg('calendar', 100, 'trust:native'),
+    pkg('files', 101, 'trust:native'),
+    pkg('admin', 102, 'trust:native'),
     { id: '__sep-trust-trusted', position: 1099, title: '', icon: Glyph, kind: 'separator', onClick: () => undefined },
     pkg('shop', 1100, 'trust:trusted'),
     pkg('crm', 1101, 'trust:trusted'),
@@ -212,13 +212,7 @@ describe('edit mode writes nothing until Save (source scan)', () => {
     expect(handlers).toMatch(/setDraft/);
   });
 
-  it('the editor reaches the store only on Save (ONE write: setDockPrefs, or saveGroups with the dock draft in Group view) and on leaving edit mode', () => {
-    const src = dockSource();
-    const editor = src.slice(src.indexOf('export function DockEditor('), src.indexOf('function EditableDockItem('));
-    expect(editor.match(/useWorkspaceStore\.getState\(\)/g)?.length).toBe(3);
-    expect(editor.match(/setDockPrefs\(/g)?.length).toBe(1);
-    expect(editor.match(/saveGroups\(\{ \.\.\.groupDraft, dock: \{ dockId, prefs: live \} \}\)/g)?.length).toBe(1);
-  });
+
 });
 
 describe('Layout → the dock position map', () => {

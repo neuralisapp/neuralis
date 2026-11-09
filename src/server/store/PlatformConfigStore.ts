@@ -2,7 +2,7 @@
  * PlatformConfigStore — persistent JSON config at ~/.neuralis/app/config/platform.json.
  *
  * A pure REGISTRY + CASCADE engine (tunable-tanager Inc 1): the store holds NO
- * hardcoded schema. Every key is DECLARED — first-party packages via manifest
+ * hardcoded schema. Every key is DECLARED — native packages via manifest
  * `neuralis.configSettings[]` (collected at bootstrap through the agent-core
  * `collectDeclaredPackageConfigSettings()` API), the host's own residual keys
  * via `hostConfigSettings.ts` (registered inside `getEnv()`). The cascade per
@@ -10,7 +10,7 @@
  *
  * Registration is BOOT-FROZEN: host keys register at store construction time
  * (`getEnv()`), package keys once at bootstrap right before the ConfigProvider
- * injection; a project package rescan does NOT re-register (first-party
+ * injection; a project package rescan does NOT re-register (native
  * builtin declarations only change with a restart). `resetPlatformConfigStore()`
  * therefore yields an EMPTY registry — tests must self-register synthetic
  * settings (pair it with `resetEnvCache()`; `getEnv()` re-registers the host

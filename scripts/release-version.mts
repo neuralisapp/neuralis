@@ -13,13 +13,16 @@
  *
  * Exit codes: 0 coherent / written · 1 drift (or a failed install) · 2 usage.
  *
- * THE SITES: the `version` field of the eight workspace manifests, the five
+ * THE SITES: the `version` field of the eight workspace manifests and the
+ * desktop app's (its installers' update feed compares it), the Codex plugin
+ * manifest the CLI ships, the five
  * exact `@neuralis/*` pins in the host manifest, the companion-image defaults
  * (`neuralisapp/mcp-sidecar` and `neuralisapp/webtop-ubuntu-xfce` tagged with
  * the release's own version, so a pinned host never pulls a companion that
  * moved under it — the shipped `.env.example` included), the docs site's
  * `docker pull neuralisapp/neuralis:<version>` install command, and the
- * `NEURALIS_TAG=<version>` line of the documented image-only update. `scripts/rebuild.mts` DERIVES the sidecar tag
+ * `NEURALIS_TAG=<version>` and `NEURALIS_VERSION=<version>` lines of the documented
+ * update. `scripts/rebuild.mts` DERIVES the sidecar tag
  * from the host manifest and must carry no companion tag literal — a site that
  * expects zero occurrences pins that. Every site also states how many
  * occurrences it expects, so a site that vanished is drift, never silence.
@@ -93,6 +96,8 @@ export const SITES: readonly Site[] = [
     pattern: /^ {2}"version": "([^"]+)"/gm,
     expected: 1,
   })),
+  // No npm package, but its installers and their update feed (`latest*.yml`) carry this version.
+  { file: 'apps/desktop/package.json', kind: 'version', label: 'version', pattern: /^ {2}"version": "([^"]+)"/gm, expected: 1 },
   ...HOST_PINS.map((name): Site => ({
     file: 'neuralis/package.json',
     kind: 'pin',
@@ -106,23 +111,23 @@ export const SITES: readonly Site[] = [
   { file: 'neuralis/scripts/setup.mts', kind: 'companion', label: `default ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 2 },
   { file: 'neuralis/.env.example', kind: 'companion', label: `template ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 1 },
   { file: 'web/docs/app/(home)/widgets.tsx', kind: 'image', label: `install command ${HOST_IMAGE}`, pattern: tagPattern(HOST_IMAGE), expected: 1 },
-  // An image-only folder's documented update names its target on its own first
-  // line; the first-install block says `latest` there, which this never matches.
-  ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/enterprise/deployment.mdx'].map((file): Site => ({
-    file,
-    kind: 'image',
-    label: `update command ${HOST_IMAGE}`,
-    pattern: /^NEURALIS_TAG=(\d[0-9A-Za-z._-]*)/gm,
-    expected: 1,
-  })),
-  // The same pages' one-time 0.1.0-folder conversion runs the release's own scaffolder.
-  ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/enterprise/deployment.mdx'].map((file): Site => ({
+  // The operations skill's and the updating page's one-time 0.1.0-folder conversion runs the release's own scaffolder.
+  ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/getting-started/updating.mdx'].map((file): Site => ({
     file,
     kind: 'pin',
     label: 'convert command create-neuralis',
     pattern: /^npx --yes create-neuralis@(\d[0-9A-Za-z._-]*) convert/gm,
     expected: 1,
   })),
+  // The updating page's clone checkout names the target once; an image-only
+  // folder's `neuralis update` names none (it reads the release line).
+  {
+    file: 'web/docs/content/docs/getting-started/updating.mdx',
+    kind: 'image',
+    label: 'update target NEURALIS_VERSION',
+    pattern: /^NEURALIS_VERSION=(\d[0-9A-Za-z._-]*)/gm,
+    expected: 1,
+  },
   { file: 'neuralis/scripts/rebuild.mts', kind: 'companion', label: `derived ${SIDECAR}`, pattern: tagPattern(SIDECAR), expected: 0 },
   // The plugin marketplaces the host tree publishes install `@neuralis/cli` at the release's version.
   ...['neuralis/.claude-plugin/marketplace.json', 'neuralis/.agents/plugins/marketplace.json'].map((file): Site => ({
@@ -132,6 +137,8 @@ export const SITES: readonly Site[] = [
     pattern: /"package": "@neuralis\/cli", "version": "([^"]+)"/g,
     expected: 1,
   })),
+  // The Codex plugin the CLI ships names its own version, so it moves with the marketplace pins above.
+  { file: 'packages/cli/.codex-plugin/plugin.json', kind: 'version', label: 'Codex plugin version', pattern: /^ {2}"version": "([^"]+)"/gm, expected: 1 },
 ];
 
 /** The manifests whose version a release publishes (the private workspace root is not one). */

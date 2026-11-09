@@ -22,10 +22,10 @@
  * `ProjectStore` one; the revocation fan-out subscribed to them closes it.
  */
 
-import bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { canGovernUserRecord, isOwnerStrengthOf, leavesProjectWithoutActiveOwner } from '../projects/access';
 import { isPrincipalActive } from '../auth/memberSession';
+import { hashPassword } from '../auth/passwordPolicy';
 import {
   getUserById,
   sessionEpochOf,
@@ -104,7 +104,7 @@ export async function enableUser(targetId: string, actor: UserLifecycleActor): P
  */
 export async function resetUserPassword(targetId: string, actor: UserLifecycleActor): Promise<string | null> {
   const tempPassword = randomBytes(9).toString('base64url');
-  const passwordHash = await bcrypt.hash(tempPassword, 12);
+  const passwordHash = await hashPassword(tempPassword);
   const seen: { email: string | null } = { email: null };
   await updateUser(targetId, (current) => {
     seen.email = current.email;

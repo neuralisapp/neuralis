@@ -2,13 +2,12 @@
 
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { LayoutGrid } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { Dock, DockCluster, PHONE_LAUNCHER_ROW, PHONE_SAFE_BOTTOM, PhoneDockSheet, type PhoneWindow } from './Dock';
+import { Dock, DockCluster, PHONE_LAUNCHER_ROW, PHONE_SAFE_BOTTOM, PhoneDockBand, type PhoneWindow, type DockItem } from './Dock';
 import { resolveDockIcon } from './dockIcons';
-import { CONTROL_SURFACE, CONTROL_SURFACE_THEME_ID, backgroundImageOpacity } from './widgetSurface';
-import { useAgentsState, useStageShell } from '../store/selectors';
+import { backgroundImageOpacity } from './widgetSurface';
+import { useAgentsState, useStageShell, useCurrentWindowId } from '../store/selectors';
 import { getWidgetDefinition } from '../widgets/registry';
 import type { DockMode } from './dockMode';
 import { DOCK_MODE_KEYS, parseDockMode, dockModeIsPinned, dockModeHasLabels } from './dockMode';
@@ -21,7 +20,9 @@ import { AnimatedUniverseBackground } from './AnimatedUniverseBackground';
 import { AppMenu, phoneOverlayHistory } from './AppMenu';
 import { useWorkspaceStore, phoneDeviceEligible } from '../store/workspaceStore';
 import { useTheme } from '../theme/useTheme';
-import { usePrimaryDockItems, useSecondaryDockItems } from './useDockItems';
+import { usePrimaryDockItems, useScopedSnapshotPending, useSecondaryDockItems } from './useDockItems';
+import { applyDockPrefs, combineDockItems } from './dockOrder';
+import { useDockPrefs } from '../store/selectors';
 
 type Props = { children: ReactNode; snapshotReady?: boolean };
 
@@ -77,20 +78,15 @@ function clusterMargin(align: DockAlign, vertical: boolean): string {
 export function WorkspaceShell({ children, snapshotReady = false }: Props) {
   const { backgroundTheme: theme, backgroundImage } = useTheme();
   const showUniverse = theme.useUniverseBackground !== false;
-  const { agentId, stageMode, openOrder, byId, phoneForegroundId } = useStageShell();
+  const { agentId, stageMode, openOrder, byId } = useStageShell();
   const phone = stageMode === 'phone';
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const closeSheet = useCallback(() => setSheetOpen(false), []);
-  useEffect(() => { if (!phone) setSheetOpen(false); }, [phone]);
-  // Editing a dock on Phone happens in the sheet, so entering edit mode opens it.
-  const editingDocks = useWorkspaceStore((s) => s.dockEditing.primary || s.dockEditing.secondary);
-  useEffect(() => { if (phone && editingDocks) setSheetOpen(true); }, [phone, editingDocks]);
-
+  const currentWindowId = useCurrentWindowId();
   const [appsOpen, setAppsOpen] = useState(false);
-  const [appsOpening, setAppsOpening] = useState(0);
-  const closeApps = useCallback(() => setAppsOpen(false), []);
+  const closeApps = useCallback(() => {
+    setAppsOpen(false);
+  }, []);
   useEffect(() => {
-    const open = () => { setAppsOpening((value) => value + 1); setAppsOpen(true); };
+    const open = () => setAppsOpen(true);
     window.addEventListener('neuralis:apps-open', open);
     return () => window.removeEventListener('neuralis:apps-open', open);
   }, []);
@@ -98,11 +94,11 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
   const historyOwner = useRef<ReturnType<typeof phoneOverlayHistory> | null>(null);
   useEffect(() => {
     if (!phone) return;
-    const owner = phoneOverlayHistory(window, () => { setAppsOpen(false); setSheetOpen(false); }, `${window.performance.timeOrigin}:${historyToken}`);
+    const owner = phoneOverlayHistory(window, closeApps, `${window.performance.timeOrigin}:${historyToken}`);
     historyOwner.current = owner;
     return () => { owner.dispose(); historyOwner.current = null; };
-  }, [phone, historyToken]);
-  useEffect(() => { historyOwner.current?.sync(phone && (appsOpen || sheetOpen)); }, [phone, appsOpen, sheetOpen]);
+  }, [phone, historyToken, closeApps]);
+  useEffect(() => { historyOwner.current?.sync(phone && appsOpen); }, [phone, appsOpen]);
 
   const [layout, setLayout] = useState<DockLayoutConfig>(DEFAULT_DOCK_LAYOUT);
   const [primaryMode, setPrimaryMode] = useState<DockMode>('iconPinned');
@@ -159,20 +155,34 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
 
   const modes: Record<DockId, DockMode> = { primary: primaryMode, secondary: secondaryMode };
   const disabled = !snapshotReady;
+  // The package tiles read the SCOPED snapshot, which lands after the SSR seed.
+  const projectId = useWorkspaceStore((s) => s.session.projectId);
+  const packagesPending = useScopedSnapshotPending(projectId, agentId);
+  // The agent list the host has not answered yet (it is restarting): the agent
+  // dock shows its loading state until the hub connect loads it again.
+  const agentsUnavailable = useWorkspaceStore((s) => s.agents.status === 'unavailable');
 
-  // On Phone the items render as icon tiles in the sheet: no labels, never hidden, popovers open upward.
-  const primaryItems = usePrimaryDockItems(phone ? 'bottom' : dockEdge(layout.primary), !phone && dockModeHasLabels(primaryMode), phone || dockModeIsPinned(primaryMode), disabled);
-  const secondaryItems = useSecondaryDockItems(phone ? 'bottom' : dockEdge(layout.secondary), !phone && dockModeHasLabels(secondaryMode), phone || dockModeIsPinned(secondaryMode), disabled);
+  // Phone starts from raw authorized items, then applies only its own preferences.
+  const primaryItems = usePrimaryDockItems(phone ? 'bottom' : dockEdge(layout.primary), !phone && dockModeHasLabels(primaryMode), phone || dockModeIsPinned(primaryMode), disabled, phone, phone);
+  const secondaryItems = useSecondaryDockItems(phone ? 'bottom' : dockEdge(layout.secondary), !phone && dockModeHasLabels(secondaryMode), phone || dockModeIsPinned(secondaryMode), disabled, phone);
 
+  const phonePrefs = useDockPrefs('phone');
+  const phoneItems = useMemo(() => applyDockPrefs(combineDockItems<DockItem>(primaryItems.map((item) => ({ ...item, phoneSection: 'apps' as const })), secondaryItems.map((item) => ({ ...item, phoneSection: 'agents' as const }))), phonePrefs), [primaryItems, secondaryItems, phonePrefs]);
   const { byId: agentsById } = useAgentsState();
-  const phoneWindows = useMemo<PhoneWindow[]>(() => (phone ? openOrder.flatMap((id) => {
+  const phoneWindows = useMemo<PhoneWindow[]>(() => {
+    const counts = new Map<string, number>(); const seen = new Map<string, number>();
+    const keyOf = (id: string) => JSON.stringify([byId[id]?.type, byId[id]?.agentId]);
+    for (const id of openOrder) { const key = keyOf(id); counts.set(key, (counts.get(key) ?? 0) + 1); }
+    return openOrder.flatMap((id) => {
     const instance = byId[id];
     const definition = instance ? getWidgetDefinition(instance.type) : undefined;
     if (!instance || !definition) return [];
     // A Group window names its bound agent (a per-agent window carries none).
-    const title = instance.agentId ? `${instance.title} · ${agentsById[instance.agentId]?.name || instance.agentId}` : instance.title;
-    return [{ id, title, icon: resolveDockIcon(definition.icon ?? instance.icon), foreground: id === phoneForegroundId, minimized: instance.hidden === true }];
-  }) : []), [phone, openOrder, byId, phoneForegroundId, agentsById]);
+    const key = keyOf(id); const ordinal = (seen.get(key) ?? 0) + 1; seen.set(key, ordinal);
+    const title = `${instance.title}${instance.agentId ? ` · ${agentsById[instance.agentId]?.name || instance.agentId}` : ''}${(counts.get(key) ?? 0) > 1 ? ` ${ordinal}` : ''}`;
+    return [{ id, title, icon: resolveDockIcon(definition.icon ?? instance.icon), foreground: id === currentWindowId && !instance.hidden, minimized: instance.hidden === true }];
+    });
+  }, [openOrder, byId, currentWindowId, agentsById]);
   const showWindow = useCallback((id: string) => {
     if (!agentId) return;
     const store = useWorkspaceStore.getState();
@@ -226,7 +236,7 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
       transparency={layout.defaultDockTransparency}
       background={layout.dockBackground}
       join={join}
-      loading={!snapshotReady && dockId === 'primary'}
+      loading={dockId === 'primary' ? !snapshotReady || packagesPending : agentsUnavailable}
       onPlacement={savePlacement}
       rotateHint={dropped === dockId}
       onPreview={setPreview}
@@ -306,11 +316,7 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
         <div className="absolute inset-0 bg-center bg-cover bg-no-repeat" style={{ backgroundImage: backgroundImage ? `url(${JSON.stringify(backgroundImage)})` : 'none', opacity: backgroundImageOpacity(layout.backgroundTransparency) }} />
         {showUniverse ? <AnimatedUniverseBackground starColor={theme.colors.canvasStar} /> : null}
         <div className="absolute inset-0" style={{ backgroundImage: 'var(--bg-pattern)', backgroundSize: '48px 48px' }} />
-        {appsOpen ? <AppMenu key={appsOpening} onClose={closeApps} /> : null}
-        {phone && sheetOpen && typeof document !== 'undefined' ? createPortal(
-          <PhoneDockSheet windows={phoneWindows} onWindow={showWindow} onMinimize={minimizeWindow} primaryItems={primaryItems} secondaryItems={secondaryItems} onClose={closeSheet} />,
-          document.body,
-        ) : null}
+        {appsOpen ? <AppMenu onClose={closeApps} phone={phone} windows={phoneWindows} onWindow={showWindow} onMinimize={minimizeWindow} /> : null}
         <div className="relative z-10 h-full w-full p-1" style={phone ? { paddingBottom: PHONE_SAFE_BOTTOM } : undefined}>
           <div className="relative h-full w-full grid" style={gridStyle}>
             <main className="relative min-w-0 min-h-0 h-full overflow-hidden p-1" style={{ gridRow: 2, gridColumn: 2 }}>
@@ -325,20 +331,7 @@ export function WorkspaceShell({ children, snapshotReady = false }: Props) {
               )}
             </main>
             {phone ? (
-              <div data-phone-launcher-row="" className="flex items-end justify-center" style={{ gridRow: 3, gridColumn: '1 / 4' }}>
-                <button
-                  type="button"
-                  aria-label="Open docks"
-                  aria-expanded={sheetOpen}
-                  data-theme-id={CONTROL_SURFACE_THEME_ID}
-                  className="flex h-9 items-center gap-2 rounded-full border px-4 text-xs font-medium shadow-lg"
-                  style={CONTROL_SURFACE}
-                  onClick={() => setSheetOpen((open) => !open)}
-                >
-                  <LayoutGrid className="h-4 w-4" />
-                  Docks
-                </button>
-              </div>
+              <div className="min-w-0" style={{ gridRow: 3, gridColumn: '1 / 4' }}><PhoneDockBand items={phoneItems} headers={!appsOpen} transparency={layout.defaultDockTransparency} background={layout.dockBackground} launcher={<button type="button" aria-label="Open Apps" aria-expanded={appsOpen} className="flex h-full w-10 shrink-0 items-center justify-center rounded-lg hover:bg-white/10" onClick={() => appsOpen ? closeApps() : setAppsOpen(true)}><LayoutGrid className="h-8 w-8" /></button>} /></div>
             ) : renderLanes()}
             {!phone && preview ? renderPreview(preview) : null}
           </div>

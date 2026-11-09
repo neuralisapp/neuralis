@@ -77,15 +77,18 @@
       }
     ]
   },
-  "asOf": "2026-10-09",
+  "asOf": "2026-11-02",
   "pages": {
     "getting-started/maturity": {
       "form": "table"
     },
     "package-system/index": {
-      "form": "callout",
+      "form": "table",
       "ids": [
-        "package-system"
+        "package-system",
+        "ecosystem-import",
+        "mcp",
+        "marketplace"
       ]
     },
     "agent-core/index": {
@@ -123,6 +126,7 @@
       "form": "table",
       "ids": [
         "install-channels",
+        "desktop-app",
         "platform-linux",
         "platform-wsl2",
         "platform-macos",
@@ -146,7 +150,7 @@
         "platform-windows"
       ]
     },
-    "enterprise/security-model": {
+    "enterprise/security": {
       "form": "callout",
       "ids": [
         "enterprise-security"
@@ -181,6 +185,33 @@
       "ids": [
         "channels"
       ]
+    },
+    "getting-started/desktop-app": {
+      "form": "callout",
+      "ids": [
+        "desktop-app"
+      ]
+    },
+    "getting-started/platforms": {
+      "form": "table",
+      "ids": [
+        "platform-linux",
+        "platform-wsl2",
+        "platform-macos",
+        "platform-windows"
+      ]
+    },
+    "getting-started/cli": {
+      "form": "callout",
+      "ids": [
+        "cli"
+      ]
+    },
+    "getting-started/devices": {
+      "form": "callout",
+      "ids": [
+        "devices"
+      ]
     }
   },
   "subjects": [
@@ -194,8 +225,8 @@
       "summary": "One manifest contract for installed, sandboxed and markdown-only packages, with schema-first tools, feature-gated routes, path policies, connectors and UI surfaces validated at load.",
       "limits": [
         "Source packages are markdown only; code from a synced source runs only when an owner flags that source as a package source, and then in the WebAssembly sandbox.",
-        "Below first-party trust, package code runs only in the WebAssembly sandbox, which offers no process execution.",
-        "Events, config settings, provided services and prebuilt UI modules are honoured only for first-party packages.",
+        "Below native trust, package code runs only in the WebAssembly sandbox, which offers no process execution.",
+        "Events, config settings, provided services and prebuilt UI modules are honoured only for native packages.",
         "Tool names are global per deployment; there is no per-package tool namespace."
       ]
     },
@@ -269,8 +300,8 @@
       "summary": "The host provides sign-in, projects with membership, roles and spend limits, package bootstrap and routing, the workspace shell and the operator commands, and leaves every product capability to packages.",
       "limits": [
         "Sign-in is email and password; single sign-on (OIDC, SAML) is not available.",
-        "The host access plane runs confined only on a Linux kernel (Linux or WSL2); a macOS or native Windows machine joins only as an unconfined device that serves its owner alone, not yet run live there.",
-        "A package added to the host dependencies runs in-process with full first-party trust; vet it like any dependency.",
+        "The host access plane runs confined on a Linux kernel (Linux or WSL2) and, measured on one Windows 11 machine, inside the Windows sandbox; a macOS machine joins only as an unconfined device that serves its owner alone, not yet run live there.",
+        "A package added to the host dependencies runs in-process with full native trust; vet it like any dependency.",
         "Encrypted credentials depend on the master key file; back it up with the data directory."
       ]
     },
@@ -283,8 +314,49 @@
       "gates": [],
       "summary": "The Neuralis beta is publicly available through npm create neuralis, the neuralisapp/neuralis Docker image and a validated history-free public host snapshot.",
       "limits": [
-        "The beta is published; all-channel non-localhost login and per-channel updates remain unverified. Native ARM runtime acceptance is not recorded.",
+        "The beta is published; the Docker image channel's update (`neuralis update`) is live-verified, while npm and clone updates and all-channel non-localhost login remain unverified. Native ARM runtime acceptance is not recorded.",
         "Native installs on Linux compile the terminal module and need python3, make and a C++ compiler."
+      ]
+    },
+    {
+      "id": "desktop-app",
+      "kind": "topic",
+      "title": "Desktop app",
+      "label": "preview",
+      "score": 60,
+      "gates": [],
+      "summary": "Neuralis runs on your own computer without Docker: one window with a tray, the same host the image runs, its vector store and this computer as your device, with installers for Windows, Linux and macOS.",
+      "limits": [
+        "The installers and the self-update have not been run from a published release on a clean machine yet.",
+        "The Windows and macOS builds are unsigned, and the macOS build is a preview that has not run on an installed Mac.",
+        "Windows is built for x64 only."
+      ]
+    },
+    {
+      "id": "cli",
+      "kind": "topic",
+      "title": "Neuralis CLI",
+      "label": "stable",
+      "score": 90,
+      "gates": [],
+      "summary": "The neuralis command signs a person in from their own machine, calls package routes as that person, bridges MCP clients, exports or launches a plugin with an agent's skills, and pairs the machine as a device.",
+      "limits": [
+        "On macOS the device service and the OS sandbox are built but not yet run on hardware; on Windows the sandbox is measured on one Windows 11 machine; until the sandbox proves itself on a machine, its device serves its owner alone.",
+        "Device commands run on the machine itself and need Node.js 22.22 or newer there."
+      ]
+    },
+    {
+      "id": "devices",
+      "kind": "topic",
+      "title": "Devices",
+      "label": "stable",
+      "score": 85,
+      "gates": [],
+      "summary": "A paired computer lends a host exactly the folders its owner grants, per host: as sources, for git, for packages and for sandboxed commands and terminals, with the owner deciding on the machine whether others may run commands there.",
+      "limits": [
+        "Other members' commands run on a device only under its OS sandbox; that sandbox is proven on Linux and measured on one Windows 11 machine, while on macOS, or wherever it has not proved itself, a device serves its owner alone.",
+        "Against a host you do not trust, the floor is the folder list: give that host no folder it should not reach.",
+        "The device broker runs in its owner's login session; there is no dedicated service account for shared machines."
       ]
     },
     {
@@ -319,29 +391,27 @@
       "kind": "topic",
       "title": "Platform: macOS",
       "label": "experimental",
-      "score": 35,
+      "score": 50,
       "gates": [
         "G-b"
       ],
-      "summary": "On macOS Neuralis is built to run in Docker Desktop or natively, without confined shells; the machine joins the host access plane only as an unconfined, owner-only device.",
+      "summary": "On macOS Neuralis is built to run in Docker Desktop or natively; shells are confined by the macOS sandbox once it proves itself on that Mac.",
       "limits": [
         "Neuralis has not been run on macOS so far.",
-        "Confined shells are refused on macOS; as a device it runs unconfined for its owner alone, not yet run live."
+        "Until the macOS sandbox proves itself on that Mac, the machine serves its owner alone, unconfined."
       ]
     },
     {
       "id": "platform-windows",
       "kind": "topic",
       "title": "Platform: Windows (native)",
-      "label": "experimental",
-      "score": 35,
-      "gates": [
-        "G-b"
-      ],
-      "summary": "Native Windows is not supported end to end; use WSL2.",
+      "label": "preview",
+      "score": 55,
+      "gates": [],
+      "summary": "On Windows the native host and the desktop app run without Docker; agent commands run in PowerShell, confined once the Windows sandbox proves itself on that machine (measured on one Windows 11 machine).",
       "limits": [
-        "Neuralis has not been run on native Windows so far.",
-        "Confined shells are unavailable on native Windows; as a device it runs unconfined for its owner alone, not yet run live."
+        "The Windows shell sandbox is measured on one Windows 11 machine only, and skill scripts still need a bash, which does not run inside it yet.",
+        "Until the Windows sandbox proves itself on that machine, the machine serves its owner alone, unconfined."
       ]
     },
     {
@@ -354,7 +424,7 @@
       "summary": "Every request, from a person, an agent, a skill script, a scheduled run or an external MCP client, passes the same deny-by-default layers: one session identity, project membership, role and feature grants, path policy, package trust and audit.",
       "limits": [
         "Give the host access plane only to a single trusted operator's machine.",
-        "A package added to the host dependencies runs with full first-party trust; vet it like any dependency.",
+        "A package added to the host dependencies runs with full native trust; vet it like any dependency.",
         "Login lockout is kept per process; a multi-node deployment gets proportionally more login attempts.",
         "Encrypted credentials depend on the master key file; back it up with the data directory."
       ]

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listPackages: vi.fn<() => unknown[]>(() => []),
   getProjectPackageIds: vi.fn(() => new Set<string>()),
   getPackageOwnerScope: vi.fn<() => unknown>(() => undefined),
+  getPackageOwnerOrigin: vi.fn<() => unknown>(() => undefined),
   getPackageManifestId: vi.fn<() => string | undefined>(() => undefined),
   getStatus: vi.fn<() => unknown>(() => undefined),
   getProjectById: vi.fn<() => Promise<unknown>>(async () => ({ id: 'proj-1' })),
@@ -27,6 +28,7 @@ vi.mock('../PackageRuntimeManager', () => ({
   getPackageRuntimeManager: () => ({
     getProjectPackageIds: mocks.getProjectPackageIds,
     getPackageOwnerScope: mocks.getPackageOwnerScope,
+    getPackageOwnerOrigin: mocks.getPackageOwnerOrigin,
     getPackageManifestId: mocks.getPackageManifestId,
     getLoader: () => ({ getStatus: mocks.getStatus }),
   }),
@@ -99,6 +101,7 @@ describe('resolveVisiblePackageSurface', () => {
     mocks.listPackages.mockReturnValue([makePackage()]);
     mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
     mocks.getPackageOwnerScope.mockReturnValue(undefined);
+    mocks.getPackageOwnerOrigin.mockReturnValue(undefined);
     mocks.getPackageManifestId.mockReturnValue(undefined);
     mocks.getStatus.mockReturnValue(undefined);
     mocks.getProjectById.mockResolvedValue({ id: 'proj-1' });
@@ -230,6 +233,17 @@ describe('resolveVisiblePackageSurface', () => {
         makeSession({ agentId: 'agent-9' }), 'example-package', 'widget', 'example_workspace',
       );
       expect(result).not.toBeNull();
+    });
+
+    it('a member\'s user-scope DEVICE package serves its owner alone — files.readOthers and \'*\' do not reach it; the same scope on the local plane does', async () => {
+      mocks.getPackageOwnerScope.mockReturnValue({ kind: 'user', userId: 'user-2' });
+      mocks.getPackageOwnerOrigin.mockReturnValue({ plane: 'device' });
+      for (const grantedFeatures of [['files.readOthers'], ['*']]) {
+        expect(await resolveVisiblePackageSurface(makeSession({ grantedFeatures }), 'example-package', 'widget', 'example_workspace'), grantedFeatures.join()).toBeNull();
+      }
+      expect(await resolveVisiblePackageSurface(makeSession({ userId: 'user-2' }), 'example-package', 'widget', 'example_workspace'), 'owner').not.toBeNull();
+      mocks.getPackageOwnerOrigin.mockReturnValue({ plane: 'local' });
+      expect(await resolveVisiblePackageSurface(makeSession({ grantedFeatures: ['files.readOthers'] }), 'example-package', 'widget', 'example_workspace'), 'local plane').not.toBeNull();
     });
   });
 
@@ -472,6 +486,7 @@ describe('resolveVisiblePackageDockImage — the dock picture rides the ONE dock
     mocks.listPackages.mockReturnValue([withDock({})]);
     mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
     mocks.getPackageOwnerScope.mockReturnValue(undefined);
+    mocks.getPackageOwnerOrigin.mockReturnValue(undefined);
     mocks.getStatus.mockReturnValue(undefined);
     mocks.getProjectById.mockResolvedValue({ id: 'proj-1' });
   });

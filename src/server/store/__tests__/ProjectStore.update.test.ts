@@ -165,7 +165,7 @@ describe('updateProject — the PRODUCER form is atomic per record', () => {
     ]);
     const onDisk = await readOnDisk('migrate-race');
     expect(onDisk.description).toBe('written-during-migration');
-    expect(onDisk.roleGrantVersion).toBe(21);
+    expect(onDisk.roleGrantVersion).toBe(22);
   });
 
   it('the OBJECT form still replaces a map wholesale (the client-map path is unchanged)', async () => {

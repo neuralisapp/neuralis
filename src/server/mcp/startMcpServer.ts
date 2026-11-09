@@ -14,11 +14,15 @@
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { publishAppOriginForward } from '@neuralis/package-system/contracts';
 import { getRuntime } from '../host/bootstrap';
 import { resolveSessionUser, toConsentAppearance } from './resolveSessionUser';
-import { mcpHttpPort, resolveMcpBaseUrl } from './mcpBaseUrl';
-import { mountPackageCompanions, type CompanionMountHandle } from './mountPackageCompanions';
+import { companionLoopbackOrigin, mcpHttpPort, resolveCompanionOrigin, resolveMcpBaseUrl } from './mcpBaseUrl';
+import { collectAppOriginPaths, mountPackageCompanions, type CompanionMountHandle } from './mountPackageCompanions';
 import { addShutdownStep } from '../host/shutdown';
+import { bindHost } from '../config/env';
+import { resolveTrustedAppOrigin } from '../oauth/appOrigin';
 import { writeAuditLog, type AuditAction } from '../store/AuditStore';
 import { getProjectById, listProjectsForUser } from '../store/ProjectStore';
 import { getPlatformConfigStore } from '../store/PlatformConfigStore';
@@ -114,6 +118,8 @@ let companionMounts: CompanionMountHandle[] = [];
 export async function startMcpServer(): Promise<void> {
   if (started) return;
   started = true;
+  // Read before anything boots: a bind value that is no IP refuses here, never widens.
+  const host = bindHost();
 
   const core = await getRuntime();
   await core.whenReady();
@@ -145,7 +151,13 @@ export async function startMcpServer(): Promise<void> {
   // The deployment's public facts the OAuth authorization server needs — read
   // HERE, from the host's own env, and handed over as port VALUES.
   const mcpBaseUrl = resolveMcpBaseUrl();
-  const loginRedirectUrl = process.env.APP_URL?.trim() || process.env.NEXTAUTH_URL?.trim() || 'http://localhost:3100';
+  // The ONE trusted app origin — never a third copy of its precedence. It is
+  // also the address a browser's cookie surfaces use (the app-origin forward
+  // below), so a companion compares a browser `Origin` against THIS value.
+  const loginRedirectUrl = resolveTrustedAppOrigin();
+  // The companion server's own browser address (never the app origin): the
+  // desktop stream document opens there.
+  const companionOrigin = resolveCompanionOrigin(process.env, loginRedirectUrl);
   const allowedRedirectHosts = process.env.OAUTH_ALLOWED_REDIRECT_HOSTS?.split(',').map((h) => h.trim()).filter(Boolean);
 
   // The server exists before any companion mounts: a WebSocket companion
@@ -180,6 +192,7 @@ export async function startMcpServer(): Promise<void> {
         });
       },
       mcpBaseUrl,
+      companionOrigin,
       loginRedirectUrl,
       ...(allowedRedirectHosts ? { allowedRedirectHosts } : {}),
       bodyParsers,
@@ -228,8 +241,18 @@ export async function startMcpServer(): Promise<void> {
   });
 
   // --- Start server ---
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[mcp-http] Community MCP server listening on http://0.0.0.0:${PORT}/mcp`);
+  server.listen(PORT, host, () => {
+    // The app-origin forward goes live only once this server accepts: until
+    // then a declared path on the app origin answers Next's own 404.
+    publishAppOriginForward({
+      paths: collectAppOriginPaths(companionMounts, { mcpBaseUrl, appOrigin: loginRedirectUrl }),
+      marker: randomBytes(32).toString('hex'),
+      target: companionLoopbackOrigin(host, PORT),
+    });
+    console.log(`[mcp-http] Community MCP server listening on http://${host}:${PORT}/mcp`);
+    if (companionOrigin === null) {
+      console.warn('[mcp-http] the companion server has no browser address of its own (MCP_BASE_URL is the app address); set NEURALIS_COMPANION_ORIGIN');
+    }
     console.log(`[mcp-http] Health: http://localhost:${PORT}/healthz`);
   });
 
@@ -243,6 +266,7 @@ export async function startMcpServer(): Promise<void> {
   // server before the drain would strand exactly the turn being saved.
   addShutdownStep('mcp-http', async () => {
     console.log('[mcp-http] Shutting down...');
+    publishAppOriginForward(null);
     for (const handle of companionMounts) {
       try { handle.close(); } catch { /* a companion must not block shutdown */ }
     }

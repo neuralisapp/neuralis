@@ -12,8 +12,14 @@ export class SetupRequiredError extends Error {
   }
 }
 
-/** Closed set — it reaches `/api/health` as `code`, so it never carries a path or a value. */
-export type SetupIncompleteReason = 'secret_missing' | 'setup_incomplete';
+/**
+ * Closed set — it reaches `/api/health` as `code`, so it never carries a path or a value.
+ * `secret_moved`: owner records exist but the session secret file does not — a home an
+ * earlier release set up, before its secret moved out of `.env` (`upgrade --apply`).
+ * Both setup writers write the secret file BEFORE the owner record, so a crash between
+ * the two reads as `secret_missing`/`setup_incomplete`, never as `secret_moved`.
+ */
+export type SetupIncompleteReason = 'secret_missing' | 'secret_moved' | 'setup_incomplete';
 
 export type SetupState =
   | { configured: true }
@@ -50,11 +56,11 @@ export function isSetupLatched(): boolean {
 }
 
 /**
- * Whether this instance is set up: the session secret is present (never
- * generated) AND setup has written at least one user record. Projects are not
- * part of it — an owner may purge the last project without the instance
- * turning "unconfigured". The roots come from the kernel resolver, not
- * `getEnv()`, so the answer exists while the secret is missing.
+ * Whether this instance is set up: the data home's session secret file holds
+ * a secret (never generated) AND setup has written at least one user record.
+ * Projects are not part of it — an owner may purge the last project without
+ * the instance turning "unconfigured". The roots come from the kernel
+ * resolver, not `getEnv()`.
  */
 export async function getSetupState(): Promise<SetupState> {
   const state = slot();
@@ -82,10 +88,10 @@ export async function assertSetupComplete(): Promise<void> {
 }
 
 async function readSetupState(): Promise<SetupState> {
-  if (!hasSessionSecret()) return { configured: false, reason: 'secret_missing' };
   const { appRoot } = resolveNeuralisHome();
-  const userFiles = await listJsonFiles(join(appRoot, 'users'));
-  return userFiles.length > 0 ? CONFIGURED : { configured: false, reason: 'setup_incomplete' };
+  const hasUsers = (await listJsonFiles(join(appRoot, 'users'))).length > 0;
+  if (!hasSessionSecret()) return { configured: false, reason: hasUsers ? 'secret_moved' : 'secret_missing' };
+  return hasUsers ? CONFIGURED : { configured: false, reason: 'setup_incomplete' };
 }
 
 async function listJsonFiles(target: string): Promise<string[]> {

@@ -5,42 +5,54 @@
  *   folder     an npm install folder (`package.json` depends on `neuralis`)  `npx neuralis <verb>`
  *   clone      a clone of the public host repository (`.git`, no workspace)   `npx neuralis <verb>` (npx runs the package's own bin)
  *   monorepo   the development checkout (a pnpm workspace around the code)    `pnpm neuralis:<verb>`
- *   container  inside the image (`/.dockerenv`)                               `node bin/neuralis.mjs <verb>`
+ *   container  inside the image, its own `/neuralis` (`docker compose run`)   `neuralis <verb>` (typed on the host)
  *   host-tree  the host package with none of the above (an unpacked tree)     `node bin/neuralis.mjs <verb>`
+ *   image      an image-only folder (the kernel's `installKindOf`), in a      `neuralis <verb>` (the CLI runs the
+ *              container or not                                               image for it)
+ *   native     the desktop app's host bundle (the kernel's `native` kind)     `neuralis <verb>`
  *
  * Text written INTO a generated file (a compose header, an override comment, an
  * `.env` note) is read later, possibly from another channel, and says
  * `neuralis <verb>` instead, as a literal.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { detectDocker, imageRunGroups, installKindOf } from '@neuralis/package-system/paths';
 import { detectChannel } from '../setup/discoverPackages.mts';
-import { PACKAGE_DIR, resolveInstallDir, type CliContext } from './registry.mts';
+import { HOST_IMAGE, PACKAGE_DIR, resolveInstallDir, type CliContext } from './registry.mts';
 
-export type InstallLayout = 'monorepo' | 'folder' | 'clone' | 'container' | 'host-tree';
+export type InstallLayout = 'monorepo' | 'folder' | 'clone' | 'container' | 'host-tree' | 'image' | 'native';
 
-/** The layout of `installDir`; `packageDir` is the code that is running. */
-export function installLayout(installDir: string, packageDir: string, inContainer = existsSync('/.dockerenv')): InstallLayout {
+/**
+ * The layout of `installDir`; `packageDir` is the code that is running. The
+ * folder kinds are the kernel's (`installKindOf`); the host package is told
+ * apart by where its code runs.
+ */
+export function installLayout(installDir: string, packageDir: string, inContainer = detectDocker()): InstallLayout {
+  const kind = installKindOf(installDir);
+  if (kind === 'image') return 'image';
+  if (kind === 'native') return 'native';
   if (detectChannel(packageDir) === 'monorepo') return 'monorepo';
-  let deps: Record<string, unknown> = {};
-  try {
-    deps = (JSON.parse(readFileSync(join(installDir, 'package.json'), 'utf-8')) as { dependencies?: Record<string, unknown> }).dependencies ?? {};
-  } catch {
-    // No readable manifest: not a folder; the checks below decide.
-  }
-  if (typeof deps.neuralis === 'string') return 'folder';
+  if (kind === 'folder') return 'folder';
   // A checkout before the container marker: a clone inside a devcontainer, CI
   // job or any image is still a clone; the image's own /neuralis has no `.git`.
   if (existsSync(join(installDir, '.git'))) return 'clone';
   return inContainer ? 'container' : 'host-tree';
 }
 
+/** This process runs inside a container: the image's own tree, or an image-only folder's one-shot. */
+export function insideImage(layout: InstallLayout): boolean {
+  return layout === 'container' || layout === 'image';
+}
+
 /** `verb` is the verb and its arguments, e.g. `pkg remove <name>`. */
 export function spellOn(layout: InstallLayout, verb: string): string {
   if (layout === 'folder' || layout === 'clone') return `npx neuralis ${verb}`;
   if (layout === 'monorepo') return `pnpm neuralis:${verb}`;
+  // The image's own tree is reached through an image-only folder's command line; the operator types that.
+  if (layout === 'image' || layout === 'container' || layout === 'native') return `neuralis ${verb}`;
   return `node bin/neuralis.mjs ${verb}`;
 }
 
@@ -79,6 +91,12 @@ function shellWord(path: string): string {
   return `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
+/** A documented argument with a shell expansion: double-quoted from its first `$` (`-v "$PWD:$PWD"`, `X="$HOME/x"`). */
+function expandingWord(arg: string): string {
+  const at = arg.indexOf('$');
+  return at < 0 ? arg : `${arg.slice(0, at)}"${arg.slice(at)}"`;
+}
+
 /**
  * The documented Docker-only setup: the image writes an install folder the host
  * runs, as the host user, through the bound socket. Every line runs verbatim —
@@ -91,16 +109,27 @@ function shellWord(path: string): string {
  */
 export function imageSetupCommand(version: string, composeOnly = false, folder: string | null = null): string[] {
   const enter = folder ? `cd ${shellWord(folder)}` : 'cd ~/neuralis   # the folder that holds docker-compose.yml';
+  // The flags are the one-shot container's own (`imageRunGroups`), with the
+  // host values spelled as the shell expansions an operator pastes.
+  const [run, ...mounts] = imageRunGroups({
+    stdin: composeOnly ? 'none' : 'tty',
+    user: '$(id -u):$(id -g)',
+    socket: '/var/run/docker.sock',
+    socketGid: '$(stat -c %g /var/run/docker.sock)',
+    hostHome: '$HOME/.neuralis',
+    dir: '$PWD',
+    workdir: null,
+    homeParent: null,
+    env: [],
+  }).map((group) => group.map(expandingWord).join(' '));
   return [
     composeOnly
       ? `NEURALIS_TAG=${version}   # the release in .env NEURALIS_IMAGE_TAG`
-      : `NEURALIS_TAG=${version}   # or a release tag: https://hub.docker.com/r/neuralisapp/neuralis/tags`,
+      : `NEURALIS_TAG=${version}   # or a release tag: https://hub.docker.com/r/${HOST_IMAGE}/tags`,
     composeOnly ? enter : 'mkdir -p ~/.neuralis ~/neuralis && cd ~/neuralis',
-    `docker run ${composeOnly ? '' : '-it '}--rm --user "$(id -u):$(id -g)" \\`,
-    '  -v /var/run/docker.sock:/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)" \\',
-    '  -v "$HOME/.neuralis:/.neuralis" -e NEURALIS_HOST_HOME="$HOME/.neuralis" \\',
-    '  -v "$PWD:$PWD" \\',
-    `  neuralisapp/neuralis:"$NEURALIS_TAG" node bin/neuralis.mjs setup${composeOnly ? ' --compose-only' : ''} --output "$PWD"`,
+    `docker run ${run} \\`,
+    ...mounts.map((line) => `  ${line} \\`),
+    `  ${expandingWord(`${HOST_IMAGE}:$NEURALIS_TAG`)} node bin/neuralis.mjs setup${composeOnly ? ' --compose-only' : ''} --output ${expandingWord('$PWD')}`,
     ...(composeOnly ? [] : ['docker compose up -d']),
   ];
 }

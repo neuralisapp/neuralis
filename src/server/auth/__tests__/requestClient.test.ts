@@ -7,13 +7,13 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const env = vi.hoisted(() => ({ trustedProxies: [] as Array<{ network: string; prefix: number; family: 'ipv4' | 'ipv6' }> }));
+const env = vi.hoisted(() => ({ trustedProxies: [] as Array<{ network: string; prefix: number; family: 'ipv4' | 'ipv6' }>, tunnel: null as 'cloudflare' | null }));
 vi.mock('../../config/env', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../config/env')>()),
-  getEnv: () => ({ trustedProxies: env.trustedProxies }),
+  getEnv: () => ({ trustedProxies: env.trustedProxies, tunnel: env.tunnel }),
 }));
 
-const { resolveClientAddress, normalizeAddress } = await import('../requestClient');
+const { resolveClientAddress, normalizeAddress, isTrustedProxyAddress } = await import('../requestClient');
 const { parseTrustedProxies } = await import('../../config/env');
 
 const PEER = 'x-neuralis-peer';
@@ -21,6 +21,20 @@ const PEER = 'x-neuralis-peer';
 describe('resolveClientAddress', () => {
   beforeEach(() => {
     env.trustedProxies = [];
+    env.tunnel = null;
+  });
+
+  it('a DECLARED same-machine tunnel: a loopback peer is keyed by its `CF-Connecting-IP`, so tunnel users never share the 127.0.0.1 bucket', () => {
+    env.tunnel = 'cloudflare';
+    expect(resolveClientAddress({ [PEER]: '127.0.0.1', 'cf-connecting-ip': '203.0.113.9' })).toEqual({ address: '203.0.113.9', source: 'forwarded' });
+    expect(resolveClientAddress({ [PEER]: '::1', 'cf-connecting-ip': '2001:db8::7' })).toEqual({ address: '2001:db8::7', source: 'forwarded' });
+    // Never from a non-loopback peer, never a malformed value, never X-Forwarded-For.
+    expect(resolveClientAddress({ [PEER]: '172.18.0.1', 'cf-connecting-ip': '203.0.113.9' })).toEqual({ address: '172.18.0.1', source: 'peer' });
+    expect(resolveClientAddress({ [PEER]: '127.0.0.1', 'cf-connecting-ip': 'garbage' })).toEqual({ address: '127.0.0.1', source: 'peer' });
+    expect(resolveClientAddress({ [PEER]: '127.0.0.1', 'x-forwarded-for': '203.0.113.9' })).toEqual({ address: '127.0.0.1', source: 'peer' });
+    // Paired control: no tunnel declared ⇒ the header is the caller's own text.
+    env.tunnel = null;
+    expect(resolveClientAddress({ [PEER]: '127.0.0.1', 'cf-connecting-ip': '203.0.113.9' })).toEqual({ address: '127.0.0.1', source: 'peer' });
   });
 
   it('no stamp ⇒ the shared `unstamped` key (limits, never trusts a header)', () => {
@@ -84,5 +98,25 @@ describe('parseTrustedProxies — topology, deny-by-default', () => {
       { network: '10.0.0.0', prefix: 8, family: 'ipv4' },
       { network: 'fd00::', prefix: 8, family: 'ipv6' },
     ]);
+  });
+});
+
+describe('isTrustedProxyAddress — the device link\'s "is this peer a declared proxy?"', () => {
+  beforeEach(() => {
+    env.trustedProxies = [];
+  });
+
+  it('no declared list ⇒ false for every address, loopback included', () => {
+    expect(isTrustedProxyAddress('127.0.0.1')).toBe(false);
+    expect(isTrustedProxyAddress('::1')).toBe(false);
+  });
+
+  it('a declared proxy (plain and IPv4-mapped) ⇒ true; an address outside the list or not an IP ⇒ false', () => {
+    env.trustedProxies = parseTrustedProxies('127.0.0.1, 10.0.0.0/8');
+    expect(isTrustedProxyAddress('127.0.0.1')).toBe(true);
+    expect(isTrustedProxyAddress('::ffff:127.0.0.1')).toBe(true);
+    expect(isTrustedProxyAddress('10.4.5.6')).toBe(true);
+    expect(isTrustedProxyAddress('127.0.0.2')).toBe(false);
+    expect(isTrustedProxyAddress('not-an-ip')).toBe(false);
   });
 });

@@ -354,7 +354,7 @@ function noteOrigin(origins, scope, origin) {
  * record shows them served by a private one — and no build `.npmrc` scope line
  * routes them there. pnpm would ask the public registry for those names
  * (metadata, the release-age check): a private scope's name leaks, and whoever
- * publishes it there is installed at first-party trust. Only names this build
+ * publishes it there is installed at native trust. Only names this build
  * REACHES count — the current host and local manifests' dependencies, walked
  * through the locks' snapshots — so a package removed since leaves no refusal
  * behind.
@@ -979,8 +979,8 @@ function exportLock(lockPath, trackedPath, outDir) {
   writeFileSync(join(outDir, 'tracked-lock.sha256'), `${sha256Text(readFileSync(trackedPath, 'utf8'))}\n`);
 }
 
-function run(cmd, args, cwd = process.cwd()) {
-  const res = spawnSync(cmd, args, { stdio: 'inherit', cwd });
+function run(cmd, args, cwd = process.cwd(), shell = false) {
+  const res = spawnSync(cmd, args, { stdio: 'inherit', cwd, shell });
   if (res.status !== 0) process.exit(res.status ?? 1);
 }
 
@@ -995,7 +995,9 @@ function run(cmd, args, cwd = process.cwd()) {
  */
 function buildPackage(kernelRoot, cwd = process.cwd(), runCommand = run, packageManager = 'pnpm') {
   const manifest = readJson(join(cwd, 'package.json'));
-  if (typeof manifest.scripts?.build === 'string') runCommand(packageManager, ['run', 'build'], cwd);
+  // Windows resolves the package manager only as a `.cmd`, which Node spawns through a shell
+  // alone; the arguments are fixed literals.
+  if (typeof manifest.scripts?.build === 'string') runCommand(packageManager, ['run', 'build'], cwd, process.platform === 'win32');
   if (manifest.neuralis?.app?.module) {
     if (typeof manifest.scripts?.['build:ui'] !== 'string') {
       console.error(`[build-workspace] ${manifest.name} declares neuralis.app.module but no "build:ui" script`);
@@ -1352,7 +1354,7 @@ async function validateInstalled(deployRoot, kernelRoot, hostManifestPath, lockP
 
   const definitions = new Map(roots.map(({ name, block }) => [
     name,
-    { id: name, provides: block.provides, configSettings: block.configSettings, access: { trust: 'first-party' } },
+    { id: name, provides: block.provides, configSettings: block.configSettings, access: { trust: 'native' } },
   ]));
   const judged = roots.map((r) => r.name).filter((name) => !refused.some((r) => r.packageId === name));
   const decided = decideSetConflicts(

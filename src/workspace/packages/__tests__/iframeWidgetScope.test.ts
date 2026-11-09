@@ -341,8 +341,8 @@ describe('IframeWidget scope effect — unchanged generation / session semantics
 describe('iframeWidgetSandbox — the kernel external-frame profile on the widget', () => {
   const HOST = 'https://neuralis.example';
 
-  it('gives a first-party https app on a foreign origin its own origin (the paired positive)', () => {
-    expect(iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/', trust: 'first-party' }, HOST)).toBe(
+  it('gives a native https app on a foreign origin its own origin (the paired positive)', () => {
+    expect(iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/', trust: 'native' }, HOST)).toBe(
       EXTERNAL_FRAME_SANDBOX,
     );
     expect(EXTERNAL_FRAME_SANDBOX).not.toMatch(/allow-top-navigation/);
@@ -352,11 +352,11 @@ describe('iframeWidgetSandbox — the kernel external-frame profile on the widge
     const opaque = [
       iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/', trust: 'trusted' }, HOST),
       iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/' }, HOST),
-      iframeWidgetSandbox({ kind: 'absolute', url: '/api/x', trust: 'first-party' }, HOST),
-      iframeWidgetSandbox({ kind: 'absolute', url: '//app.company.example/', trust: 'first-party' }, HOST),
-      iframeWidgetSandbox({ kind: 'absolute', url: `${HOST}/x`, trust: 'first-party' }, HOST),
-      iframeWidgetSandbox({ kind: 'absolute', url: 'http://app.company.example/', trust: 'first-party' }, HOST),
-      iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/', trust: 'first-party' }, null),
+      iframeWidgetSandbox({ kind: 'absolute', url: '/api/x', trust: 'native' }, HOST),
+      iframeWidgetSandbox({ kind: 'absolute', url: '//app.company.example/', trust: 'native' }, HOST),
+      iframeWidgetSandbox({ kind: 'absolute', url: `${HOST}/x`, trust: 'native' }, HOST),
+      iframeWidgetSandbox({ kind: 'absolute', url: 'http://app.company.example/', trust: 'native' }, HOST),
+      iframeWidgetSandbox({ kind: 'absolute', url: 'https://app.company.example/', trust: 'native' }, null),
       iframeWidgetSandbox({ kind: 'scoped-asset', coordinate: { packageId: 'p', surfaceId: 's', fingerprint: 'f' } }, HOST),
     ];
     expect(new Set(opaque)).toEqual(new Set([OPAQUE_FRAME_SANDBOX]));

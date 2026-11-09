@@ -2,14 +2,16 @@
  * MCP Apps sandbox shell (MCP1-C; CARD1 3B reserved handshake) — the
  * isolated-origin proxy page.
  *
- * Served ONLY on the sandbox origin (`NEURALIS_MCP_SANDBOX_PORT` — the host
+ * Served ONLY on the sandbox origin (`NEURALIS_MCP_SANDBOX_PORT` or a declared
+ * `NEURALIS_MCP_SANDBOX_ORIGIN` — the host
  * proxy (`src/proxy.ts`) 404s every other path there). The shell:
  *
  *   1. On load, asks its embedding parent for the resource with the reserved
  *      JSON-RPC notification `ui/notifications/sandbox-proxy-ready` (retried
  *      until answered). It accepts the reply only when the sender origin's
- *      HOSTNAME equals its own (a foreign site embedding the shell can never
- *      seed HTML onto this origin) and pins that origin for the session.
+ *      origin is the ONE trusted app origin, byte for byte (a foreign site
+ *      embedding the shell can never seed HTML onto this origin; the sandbox may
+ *      live on a hostname of its own) and pins that origin for the session.
  *   2. On the reserved `ui/notifications/sandbox-resource-ready` reply,
  *      `document.write`s the template HTML (CSP `<meta>` already injected
  *      server-side by the template route) into an inner iframe
@@ -22,11 +24,13 @@
  *      control frames: the handshake and content-size reports ride the standard
  *      JSON-RPC surface (`ui/notifications/size-changed`).
  *
- * Embedding enforcement is the message-level bootstrap hostname pin (a foreign
+ * Embedding enforcement is the message-level bootstrap app-origin pin (a foreign
  * embedder gets an inert page); the `/mcp-sandbox` header rule in next.config.ts
  * neutralizes the global `X-Frame-Options: SAMEORIGIN` (which would refuse the
  * cross-PORT main-origin frame) with `frame-ancestors *`.
  */
+
+import { resolveTrustedAppOrigin } from '../../server/oauth/appOrigin';
 
 const SHELL_HTML = `<!DOCTYPE html>
 <html>
@@ -46,9 +50,7 @@ const SHELL_HTML = `<!DOCTYPE html>
   var proxyReadyTimer = null;
   var proxyReadyAttempts = 0;
 
-  function sameHostname(origin) {
-    try { return new URL(origin).hostname === location.hostname; } catch (e) { return false; }
-  }
+  var APP_ORIGIN = __APP_ORIGIN__;
   function isJsonRpc(d) {
     return d && typeof d === 'object' && !Array.isArray(d) && d.jsonrpc === '2.0';
   }
@@ -112,9 +114,9 @@ const SHELL_HTML = `<!DOCTYPE html>
     if (e.source === window.parent && window.parent !== window) {
       var d = e.data;
       if (!parentOrigin) {
-        // Bootstrap: hostname-pinned, once. Accept ONLY the reserved
+        // Bootstrap: pinned to the trusted app origin, once. Accept ONLY the reserved
         // resource-ready reply carrying the template HTML.
-        if (!sameHostname(e.origin)) return;
+        if (e.origin !== APP_ORIGIN) return;
         if (!isJsonRpc(d) || d.method !== 'ui/notifications/sandbox-resource-ready') return;
         var html = d.params && typeof d.params.html === 'string' ? d.params.html : null;
         if (html === null) return;
@@ -144,13 +146,28 @@ const SHELL_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+/**
+ * The shell with the ONE trusted app origin as the only parent it accepts —
+ * JSON-encoded for the inline `<script>` it lands in (the HTML tokenizer reads
+ * it first, so `<`, `>`, `&` and U+2028/U+2029 are escaped too).
+ */
+function renderSandboxShell(appOrigin: string): string {
+  const literal = JSON.stringify(appOrigin)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return SHELL_HTML.replace('__APP_ORIGIN__', () => literal);
+}
+
 export async function GET(): Promise<Response> {
   // CSP + X-Frame-Options for this path are OWNED by next.config.ts headers()
   // (`/mcp-sandbox` rule): config headers OVERRIDE same-key route headers, so a
   // header set here would be silently replaced by the global rule. The rule
   // ships `frame-ancestors *` (supersedes XFO) — the ENFORCEMENT against foreign
-  // embedders is the shell's message-level bootstrap hostname pin above.
-  return new Response(SHELL_HTML, {
+  // embedders is the shell's message-level bootstrap app-origin pin above.
+  return new Response(renderSandboxShell(resolveTrustedAppOrigin()), {
     headers: {
       'content-type': 'text/html; charset=utf-8',
       'x-robots-tag': 'noindex',

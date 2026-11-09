@@ -1,123 +1,34 @@
 /**
- * POST /api/projects/:id/packages/:slug/build
+ * POST /api/projects/:id/packages/:package/build
  *
- * Run the WASM build pipeline for a user package (`_packages/{slug}/`).
- * Requires an authenticated session, project membership, and package-management
- * permission. Build output is executable package runtime input, so it is treated
- * as a privileged package operation even when trust does not change.
+ * Build a WASM project package from its `src/` and reload it. The body — the
+ * FRESH `canManagePackages` floor (a build's output is executable runtime
+ * input), the package refused like an absent one outside the caller's write
+ * reach, the audit row and the reload — is the ONE shared
+ * `buildProjectPackage`, which the admin `project-packages` route reaches for
+ * the CLI and an agent's session. This route is its cookie door.
  *
- * Response: JSON with build log, success flag, durationMs. On success the host
- * reloads the package so the freshly built `dist/package.wasm` picks up.
+ * Response: `{ ok, logs, durationMs, error? }` — 400 with no source, 409 when
+ * this server has no WASM compiler (`toolchain-missing`, named in the logs),
+ * 500 when the build fails (the detail is in the host log).
  */
 
-import { canAccessScope } from '@neuralis/package-system/contracts';
 import { NextRequest, NextResponse } from 'next/server';
+import { projectPackageBuildStatus } from '@neuralis/package-system/contracts';
 import { requireSession } from '@/server/auth/session';
-import { getProjectById } from '@/server/store/ProjectStore';
-import { writeAuditLog } from '@/server/store/AuditStore';
-import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
-import { resolveProjectPackageInstance } from '@/server/packages/projectPackages';
-import { getLogger } from '@/server/logging/setup';
-import {
-  buildWasmPackage,
-  hasSourceCode,
-} from '@neuralis/package-system/runtime/wasm-build';
-import { resolveGuestPdkPath } from '@/server/host/builtinSlots';
-import { canManagePackages, resolveProjectAccess } from '@/server/projects/access';
+import { buildProjectPackage } from '@/server/packages/rescanProjectPackages';
+import { packageOpResponse } from '@/server/packages/packageOpResponse';
 
 type Params = { params: Promise<{ id: string; slug: string }> };
-
-type BuildResult = {
-  ok: boolean;
-  slug: string;
-  wasmPath?: string;
-  logs: string[];
-  durationMs: number;
-  error?: string;
-};
-
-const BUILD_FAILED = 'build-failed';
-const RELOAD_FAILED = 'reload-failed';
 
 export async function POST(_req: NextRequest, { params }: Params): Promise<NextResponse> {
   const session = await requireSession().catch(() => null);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const { id: projectId, slug } = await params;
-  const project = await getProjectById(projectId);
-  if (!project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-
-  const access = await resolveProjectAccess(session.id, projectId);
-  if (!access) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  if (!canManagePackages(access)) {
-    return NextResponse.json({ error: 'Forbidden: package management permission required' }, { status: 403 });
-  }
-
-  const logger = getLogger().child('package-build');
-  const record = await resolveProjectPackageInstance(projectId, slug);
-  if (!record?.packageRoot || !canAccessScope(record.ownerScope ?? { kind: 'project' }, access.session, 'write')) {
-    return NextResponse.json(
-      { error: `Package "${slug}" not found in project "${projectId}"` },
-      { status: 404 },
-    );
-  }
-
-  const logs: string[] = [];
-  const started = Date.now();
-
-  if (!hasSourceCode(record.packageRoot)) {
-    const result: BuildResult = {
-      ok: false,
-      slug,
-      logs: ['No buildable source found. A WASM package needs at least one of: src/tools/*.ts, src/routes/*.ts, src/lifecycle.ts (the node convention; the old single-entry src/index.ts is no longer supported).'],
-      durationMs: Date.now() - started,
-      error: 'no-source',
-    };
-    return NextResponse.json(result, { status: 400 });
-  }
-
-  logs.push('Building WASM package');
-
-  let wasmPath: string | undefined;
-  let buildError: string | undefined;
+  const { id: projectId, slug: packageId } = await params;
   try {
-    // The host resolves the guest PDK path from its runtime layout (bundling-immune)
-    // and passes it — wasmBuild's own `require.resolve`/`__dirname` self-resolution
-    // fails inside the Next bundle (BUG B).
-    wasmPath = await buildWasmPackage(record.packageRoot, { pdkGuestPath: resolveGuestPdkPath() });
-    logs.push('Build complete');
+    const result = await buildProjectPackage(session.id, projectId, packageId, { interactive: true });
+    return NextResponse.json(result, { status: projectPackageBuildStatus(result) });
   } catch (err) {
-    buildError = err instanceof Error ? err.message : String(err);
-    logger.error('Package build failed', { projectId, slug, packageId: record.packageId, error: buildError });
-    logs.push('Build failed. Check server logs for details.');
+    return packageOpResponse(err, 'Build failed');
   }
-
-  const durationMs = Date.now() - started;
-
-  await writeAuditLog({
-    userId: session.id,
-    action: 'package.build',
-    target: `${projectId}/${slug}`,
-    details: { success: !buildError, durationMs, error: buildError },
-  });
-
-  if (buildError) {
-    const result: BuildResult = { ok: false, slug, logs, durationMs, error: BUILD_FAILED };
-    return NextResponse.json(result, { status: 500 });
-  }
-
-  // Reload package so the loader transitions from `partial` → `loaded` (WASM wired).
-  try {
-    await getPackageRuntimeManager().reloadProjectPackage(projectId, slug);
-    logs.push('Package reloaded; runtime ready');
-  } catch (err) {
-    const reloadErr = err instanceof Error ? err.message : String(err);
-    logger.warn('Package reload after build failed', { projectId, slug, packageId: record.packageId, error: reloadErr });
-    logs.push(`Reload after build failed (${RELOAD_FAILED}). Run rescan or check server logs.`);
-    // Keep ok=true because the build itself succeeded; the user can manually rescan.
-  }
-
-  logger.info('Package build completed', { projectId, slug, packageId: record.packageId, wasmPath });
-  const result: BuildResult = { ok: true, slug, logs, durationMs };
-  return NextResponse.json(result);
 }

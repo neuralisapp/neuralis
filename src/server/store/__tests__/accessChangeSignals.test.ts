@@ -203,7 +203,7 @@ describe('ProjectStore — onMembershipChange', () => {
     const onDisk = JSON.parse(await readFile(join(appRoot, 'projects', 'p-migrate.json'), 'utf-8')) as {
       roleGrantVersion: number;
     };
-    expect(onDisk.roleGrantVersion).toBe(21); // the read DID write
+    expect(onDisk.roleGrantVersion).toBe(22); // the read DID write
     expect(seen).toEqual([]);
   });
 

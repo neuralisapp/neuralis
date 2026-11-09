@@ -212,7 +212,7 @@ function reloadsOf(spy: { mock: { calls: unknown[][] } }, id: string): number {
 }
 
 function projectId(dir: string, pid: string): string {
-  return toResolvedRecord(getScannerForDir(dir).listPackages()[0]!, pid, { kind: 'project' }, { directory: dir, uriRoot: dir.endsWith('_packages') ? 'packages://' : 'testpackages://' }).packageId;
+  return toResolvedRecord(getScannerForDir(dir).listPackages()[0]!, pid, { kind: 'project' }, { directory: dir, uriRoot: dir.endsWith('_packages') ? 'packages://' : 'testpackages://', plane: 'local' }).packageId;
 }
 
 beforeAll(async () => {
@@ -236,7 +236,7 @@ beforeAll(async () => {
             return src
               ? [{
                   slug: 'testpackages', uriRoot: 'testpackages://', containerRoot: src.dir,
-                  scope: src.scope, recognizesPackages: true, enabled: true, kind: 'local',
+                  scope: src.scope, packageFolders: [''], enabled: true, kind: 'folder',
                 }]
               : [];
           },
@@ -274,7 +274,7 @@ afterAll(async () => {
 });
 
 describe('a rescan syncs EVERY scanner of the project', () => {
-  it('a recognizesPackages-source package survives POST /api/packages/rescan, and `scanned` sums all scanners', async () => {
+  it('a package-folder source package survives POST /api/packages/rescan, and `scanned` sums all scanners', async () => {
     const pid = 'rs-all';
     const src = path.join(tmp, 'mounts', 'testpackages-rs-all');
     h.sources.set(pid, { dir: src, scope: { kind: 'project' } });
@@ -331,7 +331,7 @@ describe('a sync reloads only what changed on disk', () => {
     const mgr = getPackageRuntimeManager();
     for (let i = 0; i < 3; i++) {
       await scanner.rescan();
-      const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
+      const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://', plane: 'local' }));
       expect((await mgr.syncProjectPackagesToRuntime(pid, records)).errors).toEqual([]);
     }
     expect(reload).not.toHaveBeenCalled();
@@ -407,7 +407,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(src, pid);
     await editDescription(path.join(src, 'hello-r2'), 'changed');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://', plane: 'local' }));
     const mgr = getPackageRuntimeManager();
     const [a, b] = await Promise.all([
       mgr.syncProjectPackagesToRuntime(pid, records),
@@ -427,7 +427,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(src, pid);
     await editDescription(path.join(src, 'hello-r2'), 'changed');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://', plane: 'local' }));
     const mgr = getPackageRuntimeManager();
     let second: ReturnType<typeof mgr.syncProjectPackagesToRuntime> | null = null;
     h.onLog = (msg, meta) => {
@@ -451,7 +451,7 @@ describe('syncs and project reloads run one at a time per project', () => {
     const id = projectId(drops, pid);
     await editDescription(path.join(drops, 'b-pkg'), 'rebuilt');
     await scanner.scan();
-    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://' }));
+    const records = scanner.listPackages().map((r) => toResolvedRecord(r, pid, { kind: 'project' }, { directory: scanner.packagesDir, uriRoot: scanner.packagesDir.endsWith('_packages') ? 'packages://' : 'testpackages://', plane: 'local' }));
     const mgr = getPackageRuntimeManager();
     const reload = vi.spyOn(loader, 'reload');
     let queued: ReturnType<typeof mgr.syncProjectPackagesToRuntime> | null = null;

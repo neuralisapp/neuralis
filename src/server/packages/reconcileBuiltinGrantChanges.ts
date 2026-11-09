@@ -2,9 +2,10 @@
  * A builtin the operator ADDS or REMOVES after projects exist moves their role
  * grants with it — and the pure grant computations every package grant rides.
  *
- * `pnpm neuralis:pkg add|remove <name>` changes the dependency line (the trust
+ * `neuralis pkg add|remove <name>` changes the dependency line (the trust
  * act) and records the change in `<appRoot>/config/builtin-removals.json`
- * (written by the operator CLI, read once per boot), which holds two lists:
+ * (`builtinGrantChangesRecord.ts`, written by the operator CLI and by the
+ * runtime install transaction, read once per boot), which holds two lists:
  *
  * - `removals[]` — written BEFORE the package leaves the image: which of its
  *   provided features its manifest grants roles by default (`defaultRoleGrants`).
@@ -34,6 +35,7 @@
 
 import { parsePackageInstanceId } from '@neuralis/package-system/contracts';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { BUILTIN_GRANT_CHANGES_FILE, parseGrantChangeRecords, type BuiltinAdditionRecord } from './builtinGrantChangesRecord';
 import { join } from 'node:path';
 import { providedFeatureIds } from '@neuralis/package-system';
 import type { PackageDefinition } from '@neuralis/package-system/contracts';
@@ -146,11 +148,8 @@ export function revokeGrantsPatch(
   return { ...(updated ? { roles } : {}), appliedPackageGrants, ...(hadFeatures ? { packageGrantFeatures } : {}) };
 }
 
-/** The record file, relative to the app root (`~/.neuralis/app`). */
-export const BUILTIN_GRANT_CHANGES_FILE = join('config', 'builtin-removals.json');
-
-export type BuiltinRemovalRecord = { packageId: string; features: string[]; removedAt: string };
-export type BuiltinAdditionRecord = { packageId: string; addedAt: string };
+export { BUILTIN_GRANT_CHANGES_FILE };
+export type { BuiltinAdditionRecord, BuiltinRemovalRecord } from './builtinGrantChangesRecord';
 
 type Deps = {
   appRoot: string;
@@ -168,28 +167,6 @@ type Deps = {
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void; warn: (msg: string, meta?: Record<string, unknown>) => void };
 };
 
-function parseRecords(text: string): { removals: BuiltinRemovalRecord[]; additions: BuiltinAdditionRecord[] } {
-  const raw = JSON.parse(text) as { removals?: unknown; additions?: unknown };
-  const removals = Array.isArray(raw.removals)
-    ? raw.removals.filter(
-        (r): r is BuiltinRemovalRecord =>
-          Boolean(r) &&
-          typeof (r as BuiltinRemovalRecord).packageId === 'string' &&
-          Array.isArray((r as BuiltinRemovalRecord).features) &&
-          (r as BuiltinRemovalRecord).features.every((f) => typeof f === 'string'),
-      )
-    : [];
-  const additions = Array.isArray(raw.additions)
-    ? raw.additions.filter(
-        (r): r is BuiltinAdditionRecord =>
-          Boolean(r) &&
-          typeof (r as BuiltinAdditionRecord).packageId === 'string' &&
-          typeof (r as BuiltinAdditionRecord).addedAt === 'string',
-      )
-    : [];
-  return { removals, additions };
-}
-
 /**
  * The removal PROOF the runtime prunes per-agent overrides by: the ids of the
  * `removals[]` records this boot applies (package still absent from the deps).
@@ -204,7 +181,7 @@ export async function readBuiltinRemovalProof(appRoot: string, builtinIds: Reado
     return [];
   }
   try {
-    return [...new Set(parseRecords(text).removals.map((r) => r.packageId).filter((id) => !builtinIds.has(id)))];
+    return [...new Set(parseGrantChangeRecords(text).removals.map((r) => r.packageId).filter((id) => !builtinIds.has(id)))];
   } catch {
     return [];
   }
@@ -212,9 +189,9 @@ export async function readBuiltinRemovalProof(appRoot: string, builtinIds: Reado
 
 export async function reconcileBuiltinGrantChanges(deps: Deps): Promise<void> {
   const file = join(deps.appRoot, BUILTIN_GRANT_CHANGES_FILE);
-  let records: ReturnType<typeof parseRecords>;
+  let records: ReturnType<typeof parseGrantChangeRecords>;
   try {
-    records = parseRecords(await readFile(file, 'utf-8'));
+    records = parseGrantChangeRecords(await readFile(file, 'utf-8'));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
     deps.logger.warn('builtin grant-change record unreadable — no grant moved', {

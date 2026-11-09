@@ -29,7 +29,7 @@
  *     host-terminal proxy (`agent-core/src/hostBroker/mountHostTerminalCompanion.ts`).
  *     Each `return`s on paths the others own, so an unowned path is ignored by
  *     all three.
- *   - `:3100` (the app) — `next@16.3.6`'s `start-server.js:251` registers an
+ *   - `:3100` (the app) — `next@16.4.3`'s `start-server.js:236` registers an
  *     `'upgrade'` listener **unconditionally**, and its body destroys only on
  *     *throw*; an unclaimed path resolves and retains the socket.
  *
@@ -55,7 +55,7 @@
  *
  * `'data'` is the arm every real claimant trips — `ws` and any other flowing-mode
  * reader. `'readable'` is belt-and-braces for a claimant that reads in PAUSED
- * mode; no first-party mount does that today, and the arm exists so a future
+ * mode; no native mount does that today, and the arm exists so a future
  * non-`ws` claimant is not reaped for choosing the other read style.
  *
  * The `destroyed` arm answers a *different* question and is not redundant: a
@@ -158,7 +158,7 @@
  *   paths the others own. This file exists precisely so that shape stays
  *   forbidden.
  * - **Do NOT replace the timer with a synchronous or `setImmediate` check.** One
- *   mount claims **asynchronously**: `mountHostTerminalCompanion.ts:116` opens
+ *   mount claims **asynchronously**: `mountHostTerminalCompanion.ts` opens
  *   `void (async () => { … })()` and only reaches `wss.handleUpgrade(...)` after
  *   `resolveSessionUser`, `getProjectById`, `probeHostBroker`, `hostTerminalList`
  *   and `resolveRoots` have awaited. A prompt check destroys it mid-auth.
@@ -288,11 +288,10 @@ const SOCKET_ARMED = Symbol.for('neuralis.upgradeWatchdog.armed.v1');
 /**
  * Monotonic count of sockets this watchdog has reaped. The log is sampled off it.
  *
- * Deliberately the ONLY module-level state. An earlier draft also kept a `Set` of
- * pending timers for a `close()` that the hook design does not need — every timer
- * is `unref`ed and cleared on the socket's `'close'`, so nothing can hold the
- * process open and nothing needs an inventory. State nobody reads is not
- * defence in depth; it is a question a reviewer has to ask.
+ * The only module-level state of the reaping half. No `Set` of pending timers:
+ * every timer is `unref`ed and cleared on the socket's `'close'`, so nothing can
+ * hold the process open and nothing needs an inventory. The one inventory this
+ * file keeps is of SERVERS, for shutdown (`closeTrackedServerConnections`).
  */
 let orphanedUpgrades = 0;
 
@@ -361,7 +360,7 @@ export function armUpgradeWatchdog(
     // every unclaimed shape incl. the pipelined attack).
     if (socket.listenerCount('data') > 0) return;
     // Belt-and-braces for a claimant that reads in PAUSED mode instead. No
-    // first-party mount does today; this keeps a future non-`ws` claimant safe.
+    // native mount does today; this keeps a future non-`ws` claimant safe.
     if (socket.listenerCount('readable') > 0) return;
 
     orphanedUpgrades += 1;
@@ -388,6 +387,64 @@ export function armUpgradeWatchdog(
   });
 }
 
+/**
+ * The servers this hook has seen accept a connection, for ONE consumer: the
+ * shutdown owner's last step (`closeTrackedServerConnections`). Next's own
+ * SIGTERM cleanup awaits `server.close()`, which in production waits for every
+ * open keep-alive/SSE connection (it calls `closeAllConnections()` in dev
+ * only), so one browser tab or MCP client held every stop to the 40 s kill.
+ * Recorded HERE because this hook already sees every `http`/`https` server in
+ * the process, `:3100` included, which no other host code holds a reference
+ * to. `globalThis`-anchored (`Symbol.for`): the hook and the shutdown owner can
+ * be evaluated in different chunks. Cost: one `Set.add` per accepted TCP
+ * connection (an existing member is a no-op) and one delete per server close.
+ */
+const TRACKED_SERVERS = Symbol.for('neuralis.upgradeWatchdog.servers.v1');
+
+type ConnectionClosingServer = { closeAllConnections(): void };
+
+function trackedServers(): Set<ConnectionClosingServer> {
+  const g = globalThis as unknown as Record<symbol, Set<ConnectionClosingServer> | undefined>;
+  let servers = g[TRACKED_SERVERS];
+  if (!servers) {
+    servers = new Set();
+    g[TRACKED_SERVERS] = servers;
+  }
+  return servers;
+}
+
+function isConnectionClosingServer(value: unknown): value is ConnectionClosingServer {
+  return typeof value === 'object' && value !== null && 'closeAllConnections' in value
+    && typeof value.closeAllConnections === 'function';
+}
+
+function trackServer(server: unknown): void {
+  if (isConnectionClosingServer(server)) trackedServers().add(server);
+}
+
+function untrackServer(server: unknown): void {
+  if (isConnectionClosingServer(server)) trackedServers().delete(server);
+}
+
+/**
+ * Close every connection still open on every server this hook has seen — the
+ * shutdown owner calls it once, AFTER the drain and every teardown step, so the
+ * turns the drain saved are persisted before their sockets go. Returns the
+ * number of servers it closed connections on. Never throws.
+ */
+export function closeTrackedServerConnections(): number {
+  let closed = 0;
+  for (const server of trackedServers()) {
+    try {
+      server.closeAllConnections();
+      closed += 1;
+    } catch {
+      // One server failing to close must not keep the others open.
+    }
+  }
+  return closed;
+}
+
 function patchServerPrototype(proto: EventEmitter): void {
   if (isMarked(proto, WATCHDOG_INSTALLED)) return;
 
@@ -398,6 +455,8 @@ function patchServerPrototype(proto: EventEmitter): void {
     event: string | symbol,
     ...args: unknown[]
   ): boolean {
+    if (event === 'connection') trackServer(this);
+    else if (event === 'close') untrackServer(this);
     if (event === 'upgrade') {
       try {
         // `'upgrade'` is `(req, socket, head)`.

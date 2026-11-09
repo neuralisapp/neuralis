@@ -126,7 +126,8 @@ export function passesProjectAndOwnerScope(
   const manager = getPackageRuntimeManager();
   if (!manager.getProjectPackageIds(projectId).has(definition.id)) return false;
   // R2b — scope isolation: a package owned by a user/agent-scoped source is
-  // hidden unless the caller can access that scope. No recorded owner scope
+  // hidden unless the caller can access that scope, on that source's plane (a
+  // user-scope DEVICE folder serves its owner alone). No recorded owner scope
   // (default `_packages/`) ⇒ undefined ⇒ implicit project scope ⇒ visible.
   const ownerScope = manager.getPackageOwnerScope(projectId, definition.id);
   if (!ownerScope) return true;
@@ -139,6 +140,7 @@ export function passesProjectAndOwnerScope(
       grantedFeatures: scope.grantedFeatures,
     },
     'read',
+    manager.getPackageOwnerOrigin(projectId, definition.id),
   );
 }
 

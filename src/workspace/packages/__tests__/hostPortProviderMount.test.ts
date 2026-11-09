@@ -9,7 +9,7 @@
  *    tree, and no UI source lives outside `app/` (the union stylesheet scans
  *    `<pkg>/app/**` only — a class outside it is silently missing).
  *
- * 2. Every first-party install entry mounts `<WorkspaceHostPortProvider>`.
+ * 2. Every native install entry mounts `<WorkspaceHostPortProvider>`.
  *
  * `<SkillLauncher>` (and `<SkillButton>`) resolve the workspace port from that
  * provider. When it is missing, the component returns `null` — SILENTLY. No

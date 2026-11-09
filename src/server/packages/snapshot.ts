@@ -149,7 +149,7 @@ type SurfaceUrlNormalization =
  * Rules:
  *   - No url → keep the entry unchanged (a `direct` surface has no url).
  *   - Absolute URL (`http://`, `https://`, `//`, or leading `/`):
- *       - first-party / trusted packages: allowed as-is;
+ *       - native / trusted packages: allowed as-is;
  *       - untrusted packages: DROPPED with a warning — an untrusted surface
  *         may not load remote content and must ship its own asset under
  *         `_packages/{slug}/app/surfaces/{kind}/{surfaceId}/`.
@@ -399,7 +399,8 @@ function sanitizePackageDiagnostic(message: string): string {
     message === 'build-missing' ||
     message === 'runtime-unavailable' ||
     message === 'untrusted-node' ||
-    message === 'untrusted-mcp'
+    message === 'untrusted-mcp' ||
+    message === 'device-offline'
   ) return message;
   return 'Package runtime failed. Check server logs for details.';
 }

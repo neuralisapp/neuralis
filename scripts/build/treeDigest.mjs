@@ -175,7 +175,7 @@ function readManifest(pkgDir) {
  * Digest every BUILTIN-CLASS package under a node_modules root — that is, every
  * one whose own manifest carries a `neuralis` block, whatever its scope. Keying
  * on the manifest rather than on `@neuralis/*` is what lets an operator's own
- * first-party package take part; the scope is not the authorization boundary,
+ * native package take part; the scope is not the authorization boundary,
  * presence in the host's dependencies is.
  */
 export function digestInstalledPackages(nodeModulesRoot) {

@@ -1,0 +1,50 @@
+name: Idea or feedback
+description: Tell us what you use Neuralis for, what felt hard, or what is missing.
+title: "Feedback: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every kind of feedback helps: what you liked, what confused you, what you expected to find. Open questions are welcome in [Discussions](https://github.com/neuralisapp/neuralis/discussions) too.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of feedback is it?
+      options:
+        - An idea or a missing feature
+        - Something was hard to understand or find
+        - Something works well
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Neuralis?
+      options:
+        - Chat with an agent
+        - Agents, skills and workflows
+        - Files, sources and search
+        - Virtual desktop and browser
+        - Desktop app (Windows, Linux, macOS)
+        - Devices and connected computers
+        - Admin, users and permissions
+        - Packages and the package protocol
+        - The neuralis command line
+        - Installing or updating
+        - The website or the documentation
+        - Neuralis as a whole
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Your feedback
+      description: What you were doing, what you noticed and what would make it better.
+    validations:
+      required: true
+  - type: textarea
+    id: usage
+    attributes:
+      label: What do you use Neuralis for?
+      description: Optional — your team, your use case, how many people or agents. It helps us decide what to build next.

@@ -116,7 +116,7 @@ describe('package command/query routes', () => {
     const response = await postQuery(post('http://localhost:3100/api/packages/query', {
       projectId: 'proj-1',
       packageId: '@neuralis/package-system',
-      operation: 'project.list',
+      operation: 'definition.get',
     }));
 
     expect(response.status).toBe(403);
@@ -140,7 +140,7 @@ describe('package command/query routes', () => {
     const response = await postQuery(post('http://localhost:3100/api/packages/query', {
       projectId: 'proj-1',
       packageId: '@neuralis/package-system',
-      operation: 'project.list',
+      operation: 'definition.get',
       params: { projectRoot: '/tmp/forged' },
     }));
 

@@ -34,7 +34,7 @@ function getBuiltinRequires(): Pick<PackageDefinition, 'requires'>[] {
 }
 
 /** All features declared by builtin packages via requires.providesFeatures. */
-export function getFirstPartyFeatures(): string[] {
+export function getNativeFeatures(): string[] {
   return collectAllFeatures(getBuiltinRequires());
 }
 

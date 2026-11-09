@@ -35,7 +35,7 @@ vi.mock('../Dock', async () => {
   function DockCluster({ children }: { children: (open: boolean) => unknown }) { return children(false); }
   return { Dock, DockCluster };
 });
-vi.mock('../useDockItems', () => ({ usePrimaryDockItems: () => [], useSecondaryDockItems: () => [] }));
+vi.mock('../useDockItems', () => ({ usePrimaryDockItems: () => [], useSecondaryDockItems: () => [], useScopedSnapshotPending: () => false }));
 vi.mock('../AnimatedUniverseBackground', () => ({ AnimatedUniverseBackground: () => null }));
 vi.mock('../../theme/useTheme', () => ({ useTheme: () => ({ backgroundTheme: { useUniverseBackground: false }, dockTheme: { id: 'dark', colors: {} } }) }));
 

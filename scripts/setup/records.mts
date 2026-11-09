@@ -40,6 +40,9 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { detectDocker, homeNeedsNarrowing, narrowPrivateDir, runAclCommand, type AclCommandRunner } from '@neuralis/package-system/paths';
+import { HOST_SOURCE_KIND } from '@neuralis/package-system/contracts';
+import { stampFreshDataFormatLedger } from '@neuralis/package-system/data';
 import type { SetupConfig } from './types.mts';
 import { projectIdFromName } from '../../src/lib/utils';
 
@@ -89,7 +92,7 @@ export function buildSourceConfigSeeds(params: {
   isDocker?: boolean;
 }): SourceConfigSeed[] {
   const now = params.now ?? new Date().toISOString();
-  const isDocker = params.isDocker ?? (process.env.NEURALIS_DOCKER === 'true' || existsSync('/.dockerenv'));
+  const isDocker = params.isDocker ?? detectDocker();
   const hostHome = params.hostHome ?? process.env.NEURALIS_HOST_HOME;
   const hostProjectRoot = isDocker && hostHome ? join(hostHome, 'projects', params.projectId) : undefined;
 
@@ -98,7 +101,7 @@ export function buildSourceConfigSeeds(params: {
       source: 'packages',
       scope: { kind: 'project' },
       connection: {
-        kind: 'local',
+        kind: HOST_SOURCE_KIND,
         config: {
           root: '_packages',
           ...(hostProjectRoot ? { hostRoot: join(hostProjectRoot, '_packages') } : {}),
@@ -170,7 +173,26 @@ export async function writeSourceConfigsPreserving(
 // Directory skeleton + identity records
 // ---------------------------------------------------------------------------
 
-export async function createDirectorySkeleton(neuralisHome: string, projectId: string): Promise<void> {
+/**
+ * The data home's skeleton. On Windows, a home whose skeleton this call
+ * creates FIRST (no `app/users` yet — before any user, credential or session
+ * secret is written) outside the account's profile — a custom `NEURALIS_HOME`
+ * on another folder or drive — is made private to this account in one
+ * `icacls` run (the kernel's `narrowPrivateDir`) before the rest is created;
+ * the default `%USERPROFILE%\.neuralis` inherits the profile's list and is
+ * left alone. A failure throws: the home is never filled unprotected.
+ */
+export async function createDirectorySkeleton(
+  neuralisHome: string,
+  projectId: string,
+  acl: { platform?: NodeJS.Platform; env?: Readonly<Record<string, string | undefined>>; run?: AclCommandRunner } = {},
+): Promise<void> {
+  const platform = acl.platform ?? process.platform;
+  const fresh = !existsSync(join(neuralisHome, 'app', 'users'));
+  await mkdir(neuralisHome, { recursive: true, mode: 0o700 });
+  if (fresh && homeNeedsNarrowing(neuralisHome, acl.env ?? process.env, platform)) {
+    await narrowPrivateDir(neuralisHome, acl.run ?? runAclCommand);
+  }
   const dirs = [
     join(neuralisHome, 'app'),
     join(neuralisHome, 'app', 'users'),
@@ -200,6 +222,22 @@ export async function readOwnerRecord(neuralisHome: string, userId: string): Pro
     throw new Error(`The project owner's user record (${userId}) is incomplete.`);
   }
   return { email: raw.email, name: raw.name, passwordHash: raw.passwordHash };
+}
+
+/**
+ * A home this run CREATED (its first owner just written) holds no stored data,
+ * so its data-format ledger starts at every offline kind's final version — the
+ * last `to` its upgrade modules name. A first boot that then fails part-way
+ * leaves nothing for `upgrade` to raise. The kernel writes only when no ledger
+ * exists yet. Loads the upgrade modules (a few seconds, once per new home).
+ */
+export async function stampFreshHomeDataFormats(home: string): Promise<void> {
+  const { UPGRADES_DIR, loadUpgradeModules } = await import('../upgrade.mts');
+  const finals = new Map<string, number>();
+  for (const { module } of await loadUpgradeModules(UPGRADES_DIR)) {
+    for (const { kind, to } of module.kinds) finals.set(kind, Math.max(finals.get(kind) ?? 0, to));
+  }
+  await stampFreshDataFormatLedger(join(home, 'app'), [...finals].map(([kind, version]) => ({ kind, version })));
 }
 
 export async function writeOwnerRecord(config: SetupConfig): Promise<string> {

@@ -122,7 +122,7 @@ type Harness = {
 /**
  * A real HTTP server shaped like the `:3101` companion server: an ordinary
  * request handler plus ONE `'upgrade'` listener that returns on paths it does
- * not own — exactly the three first-party mounts' shape.
+ * not own — exactly the three native mounts' shape.
  *
  * `onUpgrade` lets a test play the claimant, synchronously or asynchronously.
  */
@@ -446,7 +446,7 @@ describe('armUpgradeWatchdog (real http.Server over real TCP)', () => {
   });
 
   it('(5c) spares a PAUSED-mode adopter that attaches only `readable` — the belt-and-braces arm', async () => {
-    // No first-party mount reads in paused mode today; the arm exists so a future
+    // No native mount reads in paused mode today; the arm exists so a future
     // non-`ws` claimant is not reaped for choosing the other read style. Without
     // a test the arm would be prose.
     const harness = await startHarness({

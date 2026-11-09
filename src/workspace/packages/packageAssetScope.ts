@@ -45,7 +45,7 @@ export const ASSET_SCOPE_HEARTBEAT_MS = 60_000;
  * `/api/package-app/_scope/{handle}/surface/…` url instead.
  *
  * `false` = a genuinely REMOTE absolute url, passed through as-is. Only
- * trusted/first-party packages reach this branch: the snapshot drops an
+ * trusted/native packages reach this branch: the snapshot drops an
  * untrusted absolute surface fail-closed.
  *
  * DELIBERATE DIVERGENCE — the absolute test below restates the kernel's

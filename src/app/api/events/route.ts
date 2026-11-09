@@ -1,7 +1,7 @@
 /**
  * GET /api/events — the unified workspace notification stream.
  *
- * ONE multiplexed SSE connection that fans eight low-rate channels out to the
+ * ONE multiplexed SSE connection that fans nine low-rate channels out to the
  * client over a single HTTP/1.1 connection:
  *   - `runtime`      — package-runtime invalidation (host PackageRuntime)
  *   - `presence`     — project user presence (agent-core `presenceBus`)
@@ -22,6 +22,16 @@
  *                      a row; the client re-reads rows through the gated
  *                      `/api/notifications` route). Host-only: not a kernel
  *                      `subscribeRealtime` channel.
+ *   - `members`      — who is online changed in this project (host presence
+ *                      registry; the payload is `{ projectId }` only, the client
+ *                      re-reads `GET /api/presence`). Host-only, like
+ *                      `notifications`.
+ *
+ * Every connection is also a CLIENT in the host's in-memory presence registry
+ * (`server/presence/clientRegistry.ts`) from open to teardown — a browser or the
+ * desktop window by its user agent (a label, never stored raw), a bearer
+ * connection under its token's grant. The registry entry goes with the same
+ * teardown, so a revocation that closes the connection drops it too.
  *
  * WHY: the host is served over HTTP/1.1 (no proxy), where browsers cap ~6
  * connections per origin. The workspace previously opened a SEPARATE EventSource
@@ -61,8 +71,8 @@
  * `?channels=a,b` NARROWS the connection to those channels (an intersection —
  * it never adds one the caller's gates refuse); absent, every channel rides.
  *
- * Frame shape: every event is `event: message` with JSON
- * `{ channel, name, payload }`; the client demuxes by `channel`.
+ * Frame shape: every event (the `meta` keepalive too) is `event: message` with
+ * JSON `{ channel, name, payload }`; the client demuxes by `channel`.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -75,13 +85,14 @@ import { onConnectionPrincipalRevoked } from '@/server/host/principalRevocation'
 import { onProjectRecordChange } from '@/server/store/ProjectStore';
 import { onNotificationCounts } from '@/server/notifications/notificationStore';
 import { hasFeature } from '@neuralis/package-system/access';
+import { cookieClientKind, onMembersPresenceChange, openHubClient } from '@/server/presence/clientRegistry';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // long-lived SSE
 
 /** Keepalive interval — `sseHeartbeatMs` platform key, read per connection.
  *  Must stay below the client watchdog's 60s STALE_MS (max 55s enforced by
- *  the declaration bounds). */
+ *  the declaration bounds); the keepalive is a `meta` frame the watchdog sees. */
 function heartbeatMs(): number {
   try {
     return Number(getPlatformConfigStore().get('sseHeartbeatMs')) || 25_000;
@@ -103,10 +114,14 @@ export async function GET(req: NextRequest): Promise<Response> {
   // F8 — auth (every deny gate) BEFORE constructing the stream.
   let session;
   let bearerExpiresAt: number | undefined;
+  let bearerGrant: { clientId: string; grantId?: string } | undefined;
   try {
     session = await resolveSessionContext(req, projectId, {
       acceptBearer: true,
-      onBearer: (grant) => { bearerExpiresAt = grant.expiresAt; },
+      onBearer: (grant) => {
+        bearerExpiresAt = grant.expiresAt;
+        bearerGrant = { clientId: grant.clientId, ...(grant.grantId ? { grantId: grant.grantId } : {}) };
+      },
     });
   } catch (err) {
     if (err instanceof SessionResolutionError) {
@@ -199,14 +214,10 @@ export async function GET(req: NextRequest): Promise<Response> {
         );
       }
 
-      heartbeat = setInterval(() => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(': keepalive\n\n'));
-        } catch {
-          closed = true;
-        }
-      }, heartbeatMs());
+      // A DATA frame, never an SSE comment: an EventSource dispatches no event
+      // for a `:` line, so the client's staleness watchdog would read an idle
+      // hub as dead and reopen it (with a held-transcript resume) every minute.
+      heartbeat = setInterval(() => send('meta', 'keepalive', {}), heartbeatMs());
       heartbeat.unref?.();
 
       // A server-side close — the teardown `cancel` would run is run here.
@@ -216,6 +227,19 @@ export async function GET(req: NextRequest): Promise<Response> {
         teardown();
         try { controller.close(); } catch { /* already closed */ }
       };
+      // members — who is online changed in this project (content-free).
+      if (rides('members')) {
+        unsubscribers.push(
+          onMembersPresenceChange(boundProjectId, () => send('members', 'changed', { projectId: boundProjectId })),
+        );
+      }
+
+      // This connection is a client of its user while it stays open.
+      const client = bearerGrant
+        ? { kind: 'other' as const, label: 'External client', clientId: bearerGrant.clientId, ...(bearerGrant.grantId ? { grantId: bearerGrant.grantId } : {}) }
+        : cookieClientKind(req.headers.get('user-agent'));
+      unsubscribers.push(openHubClient({ userId: session.userId, projectId: boundProjectId, ...client }));
+
       // Principal revocation.
       unsubscribers.push(onConnectionPrincipalRevoked({ userId: session.userId, projectId: boundProjectId }, closeFromServer));
       // A bearer connection lives no longer than its access token.

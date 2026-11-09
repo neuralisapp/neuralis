@@ -32,11 +32,18 @@
  *
  * In non-Docker mode there is no infra step — the SourcesPanel UI can add a
  * local source directly against the host path.
+ *
+ * On an image-only folder this runs in a one-shot container of the image: the
+ * host path is checked by the Docker daemon (a read-only bind of it), never by
+ * this container's own filesystem, and `--pkg` / `--neuralis` refuse — the
+ * folder runs the published image as it is.
  */
 
 import { readFile, writeFile, access, readdir, unlink } from 'node:fs/promises';
-import { CliExit, type CliContext } from './cli/registry.mts';
-import { spell } from './cli/spelling.mts';
+import { spawnSync } from 'node:child_process';
+import { readImageTag, resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { CliExit, HOST_IMAGE, type CliContext } from './cli/registry.mts';
+import { installLayout, spell } from './cli/spelling.mts';
 import {
   insertVolumeLines,
   packageBindHostPath,
@@ -81,12 +88,8 @@ function resolveHome(): string {
   return process.env.HOME || process.env.USERPROFILE || '/root';
 }
 
-function resolveNeuralisHome(): string {
-  return process.env.NEURALIS_HOME || join(resolveHome(), '.neuralis');
-}
-
 function sourceConfigDir(projectId: string): string {
-  return join(resolveNeuralisHome(), 'app', 'config', 'sources', projectId);
+  return join(resolveNeuralisHome().home, 'app', 'config', 'sources', projectId);
 }
 
 function dockerComposePath(installDir: string): string {
@@ -200,7 +203,7 @@ interface SourceConfig {
  */
 async function projectsToCheck(projectId: string | undefined): Promise<string[]> {
   if (projectId) return [projectId];
-  return (await listExistingProjects(resolveNeuralisHome())).map((p) => p.id).sort();
+  return (await listExistingProjects(resolveNeuralisHome().home)).map((p) => p.id).sort();
 }
 
 async function listSourceConfigsIn(projectIds: string[]): Promise<Array<SourceConfig & { projectId: string }>> {
@@ -777,8 +780,9 @@ async function promptMode(): Promise<'data' | 'neuralis' | 'pkg' | null> {
 
 // ── Commands ──────────────────────────────────────────────────────
 
-async function cmdAdd(installDir: string, absPath: string, slug: string): Promise<void> {
-  assertDirectory(absPath);
+async function cmdAdd(installDir: string, absPath: string, slug: string, onImage: boolean): Promise<void> {
+  if (onImage) assertHostDirectory(installDir, absPath);
+  else assertDirectory(absPath);
   const docker = isDockerMode(installDir);
 
   // INFRA-ONLY. We register the host↔container plumbing; we do NOT write a
@@ -904,6 +908,35 @@ function assertDirectory(absPath: string): void {
   if (!st.isDirectory()) throw new CliExit(1, `"${absPath}" is not a directory.`);
 }
 
+/**
+ * The same check where this process is a container and the path is the HOST's:
+ * the daemon binds it read-only into a throwaway container of the folder's own
+ * image (`--mount` refuses a missing source; `-v` would create it).
+ */
+function assertHostDirectory(installDir: string, absPath: string): void {
+  const source = `"source=${absPath.replace(/"/g, '""')}"`;
+  const probe = spawnSync('docker', ['run', '--rm', '--mount', `type=bind,${source},target=/probe,readonly`, `${HOST_IMAGE}:${readImageTag(installDir)}`, 'test', '-d', '/probe'], { encoding: 'utf-8' });
+  if (probe.status === 0) return;
+  if (probe.status === 1) throw new CliExit(1, `"${absPath}" is not a directory on the host.`);
+  throw new CliExit(1, `Path "${absPath}" does not exist on the host, or Docker cannot bind it.`, [probe.error?.message ?? probe.stderr.trim().split('\n').at(-1) ?? `docker run exited ${probe.status}`]);
+}
+
+/** `--pkg` / `--neuralis` on an image-only folder. */
+/** The desktop app runs on the machine itself: there is no container to bind a folder into. */
+function nativeMountRefusal(): CliExit {
+  return new CliExit(1, '"mount" does not apply to the desktop app: there is no container to bind a folder into', [
+    'A folder of this machine reaches the app through your own paired device: `neuralis device grant <dir>`, then attach it in Files as a host source.',
+    'The project\'s own folders (`data`, `packages`) are already the app\'s.',
+  ]);
+}
+
+function imageOnlyRefusal(flag: '--pkg' | '--neuralis'): CliExit {
+  return new CliExit(1, `${flag} does not apply to an image-only install folder`, [
+    'It runs the published image as it is: there is no package or source tree to bind into it.',
+    'Packages for this kind of install arrive with `neuralis package install` in a later release.',
+  ]);
+}
+
 export async function run(args: string[], ctx: CliContext): Promise<number> {
   const installDir = ctx.installDir;
   const command = args[0];
@@ -962,6 +995,8 @@ ${c.bold}Examples:${c.reset}
 
   const restArgs = args.slice(1);
 
+  if (installLayout(installDir, ctx.packageDir) === 'native') throw nativeMountRefusal();
+
   switch (command) {
     case 'add': {
       const { values, positionals } = parseArgs({
@@ -977,6 +1012,11 @@ ${c.bold}Examples:${c.reset}
       });
 
       if (values.neuralis && (values.pkg || values.slug)) throw new CliExit(1, '--neuralis cannot be combined with --pkg or --slug.');
+      const onImage = installLayout(installDir, ctx.packageDir) === 'image';
+      if (onImage && values.pkg) throw imageOnlyRefusal('--pkg');
+      if (onImage && values.neuralis) throw imageOnlyRefusal('--neuralis');
+      // The container sees none of the host's folders to browse.
+      if (onImage && !positionals[0]) throw new CliExit(1, `Name the host folder: ${spell('mount add <host-path>')}`);
 
       // Resolve the mount kind. Explicit flags win; a truly bare `add`
       // (no positional, no mode flag) opens the interactive mode picker.
@@ -1036,7 +1076,7 @@ ${c.bold}Examples:${c.reset}
       const absPath = resolve(ctx.cwd, hostPath);
       const defaultSlug = slugify(basename(absPath));
       const slug = values.slug || (positionals[0] ? defaultSlug : await promptInput('Source key', defaultSlug));
-      await cmdAdd(installDir, absPath, slug);
+      await cmdAdd(installDir, absPath, slug, onImage);
       break;
     }
 

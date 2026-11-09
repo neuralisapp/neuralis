@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,7 @@ type Scenario = {
   boundedCode?: number;
   hardCode?: number;
   measurements?: Array<string | null>;
-  /** When set, the sandbox gets a provisioned host plane and the fake image reports this helper sha. */
+  /** When set, the sandbox gets a provisioned device plane and the fake image reports this helper sha. */
   hostPlane?: { imageSha: string; installedContent: string; unconfined?: boolean };
   /** The sidecar image's source-hash label: undefined = matches the tree (default), null = no image, string = that label. */
   sidecarLabel?: string | null;
@@ -41,6 +42,8 @@ type Scenario = {
   composeText?: string;
   /** The container answers `compose ps` and `docker cp` hands back this build report. */
   report?: { uiCompat?: unknown; lock?: string; trackedSha?: string };
+  /** What `upgrade --check` would list for the new build (the pending offline data formats). */
+  pending?: string[];
 };
 
 const SIDECAR_LABEL = 'io.neuralis.sidecar.source-hash';
@@ -135,7 +138,7 @@ finish(98, '', 'unexpected fake docker command: ' + args.join(' '));
     // .env nor rewrites the live docker-compose.yml.
     const setupLogPath = join(sandbox, 'setup.jsonl');
 
-    // Hermetic host plane: NEURALIS_HOME and XDG_CONFIG_HOME point into the
+    // Hermetic machine side: NEURALIS_HOME and XDG_CONFIG_HOME point into the
     // sandbox, so the real machine's device service never leaks into the command
     // log. When the scenario asks for one, write the device's service naming a
     // helper file (an unconfined device's service names none).
@@ -155,6 +158,8 @@ finish(98, '', 'unexpected fake docker command: ' + args.join(' '));
     if (scenario.installedTree) {
       cwd = join(sandbox, 'installed', 'neuralis');
       cpSync(join(neuralisDir, 'scripts'), join(cwd, 'scripts'), { recursive: true });
+      // An installed tree resolves its dependencies (the kernel the command line imports) from its node_modules.
+      symlinkSync(join(neuralisDir, 'node_modules'), join(cwd, 'node_modules'), 'dir');
     }
     const harness = join(sandbox, 'harness.mts');
     writeFileSync(
@@ -171,8 +176,9 @@ const regenerate = async () => {
   ${scenario.installedTree && scenario.composeText !== undefined ? `writeFileSync(${JSON.stringify(join(cwd, 'docker-compose.yml'))}, ${JSON.stringify(scenario.composeText)});` : ''}
   return ${scenario.composeCode ?? 0};
 };
+const pendingCheck = async () => ${JSON.stringify(scenario.pending ?? [])};
 let code;
-try { code = await run(process.argv.slice(2), ctx, regenerate); } catch (err) { code = exitCodeFor(err, ctx); }
+try { code = await run(process.argv.slice(2), ctx, regenerate, pendingCheck); } catch (err) { code = exitCodeFor(err, ctx); }
 process.exit(code);
 `,
     );
@@ -232,6 +238,17 @@ describe('neuralis:rebuild — the compose file is regenerated before the build'
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.deepEqual(result.setupCommands, [['setup', '--compose-only']]);
     assert.ok(result.commands.some((c) => c[0] === 'compose' && c[1] === 'up'));
+  });
+
+  it('a pending offline upgrade is named before the build, with the stop → apply → start order; none says nothing', () => {
+    const pending = runScenario({ pending: ['source-folder-v1: brain-core/source → v3'] }, ['--no-prune', '--no-sidecar']);
+    assert.equal(pending.status, 0, pending.stdout + pending.stderr);
+    assert.match(pending.stdout, /pending offline upgrade — the rebuilt app answers 503 until it is applied/);
+    assert.match(pending.stdout, /source-folder-v1: brain-core\/source → v3/);
+    assert.match(pending.stdout, /docker compose stop neuralis` → `.*upgrade --apply` → `docker compose up -d -V`/);
+    assert.ok(pending.commands.some((c) => c[0] === 'compose' && c[1] === 'up'), 'the build still runs');
+    const none = runScenario({}, ['--no-prune', '--no-sidecar']);
+    assert.doesNotMatch(none.stdout, /pending offline upgrade/);
   });
 
   it('a failed regeneration stops before Docker builds anything, with its exit code', () => {

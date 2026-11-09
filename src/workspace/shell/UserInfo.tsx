@@ -1,6 +1,6 @@
 'use client';
 
-import { LogOut, Shield, ChevronDown, Pencil, Inbox } from 'lucide-react';
+import { LogOut, Shield, ChevronDown, Pencil, Inbox, Users } from 'lucide-react';
 import { useContext, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSession, signOut } from 'next-auth/react';
@@ -8,8 +8,9 @@ import { cn } from '@/lib/cn';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { UserAvatar } from './UserAvatar';
 import { UserProfilePopup } from './UserProfilePopup';
-import { dockSurface, useDockTransparency } from './dockSurface';
+import { dockSurface, dockNavigationSurface, useDockTransparency } from './dockSurface';
 import { InboxPanel } from './InboxPanel';
+import { PeoplePanel } from './PeoplePanel';
 import { UNREAD_PILL_STYLE, UnreadDot, badgeLabel } from './DockBadge';
 import { inboxRequestView, useInboxRequest, useUnreadTotal, type InboxView } from '../notifications/notificationsClient';
 
@@ -17,19 +18,24 @@ import type { DockEdge } from './dockPlacement';
 import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
 import { DEFAULT_THEME } from '../theme/themes';
 
+import type { TransparencyLevel } from '../store/types';
+
 type Props = {
   expanded?: boolean;
   align?: 'left' | 'right';
   disabled?: boolean;
   pinned?: boolean;
   edge?: DockEdge;
+  launcher?: boolean;
+  phoneNavigation?: TransparencyLevel;
+  iconSize?: number;
 };
 
-export function UserInfo({ expanded = false, align = 'left', disabled = false, pinned = true, edge = 'left' }: Props) {
+export function UserInfo({ expanded = false, align = 'left', disabled = false, pinned = true, edge = 'left', launcher = false, phoneNavigation, iconSize = 32 }: Props) {
   const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
   const { data: session } = useSession();
   const [isOpen, setIsOpen] = useState(false);
-  const [view, setView] = useState<'account' | 'inbox'>('account');
+  const [view, setView] = useState<'account' | 'inbox' | 'people'>('account');
   // Each entry into the inbox remounts it on the tab it was asked for.
   const [inboxEntry, setInboxEntry] = useState<{ n: number; view: InboxView }>({ n: 0, view: 'unread' });
   const [profileOpen, setProfileOpen] = useState(false);
@@ -37,7 +43,7 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
   const [profileAnchor, setProfileAnchor] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const btnRef = useRef<HTMLButtonElement>(null);
   const dockLevel = useDockTransparency();
-  const dockSurf = dockSurface(dockLevel, 'default');
+  const dockSurf = phoneNavigation ? dockNavigationSurface(phoneNavigation) : dockSurface(dockLevel, 'default');
 
   const name = session?.user?.name ?? session?.user?.email ?? 'User';
   const email = session?.user?.email ?? '';
@@ -97,16 +103,24 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
     setIsOpen(true);
   }, [inboxRequest, placePopup, openInbox]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); setIsOpen(false); btnRef.current?.focus(); } };
+    document.addEventListener('keydown', escape, true);
+    return () => document.removeEventListener('keydown', escape, true);
+  }, [isOpen]);
+
   const popup = isOpen ? createPortal(
     <>
       <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setIsOpen(false)} />
       <div
+        data-launcher-popover=""
         data-theme-id={dockTheme.id}
-        className="fixed backdrop-blur-xl rounded-xl overflow-hidden"
+        className={cn('fixed backdrop-blur-xl rounded-xl', launcher ? 'overflow-y-auto' : 'overflow-hidden')}
         style={{
           ...themeScopeStyle(dockTheme), backgroundColor: 'rgba(var(--w-bg-rgb), 0.96)',
           zIndex: 9999, minWidth: '12rem',
-          ...(edge === 'bottom'
+          ...(launcher ? { top: Math.max(8, Math.min(pos.top, window.innerHeight - 400)), left: Math.max(8, Math.min(pos.left, window.innerWidth - 320)), maxWidth: 'calc(100vw - 16px)', maxHeight: 'calc(100dvh - 16px)' } : edge === 'bottom'
             ? { bottom: window.innerHeight - pos.top, left: pos.left }
             : edge === 'right'
               ? { top: pos.top, right: window.innerWidth - pos.left }
@@ -121,6 +135,8 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
             onBack={() => setView('account')}
             onClose={() => setIsOpen(false)}
           />
+        ) : view === 'people' && projectId ? (
+          <PeoplePanel projectId={projectId} onBack={() => setView('account')} />
         ) : (
         <>
         <div className="px-3 pt-2.5 pb-1 text-[10px] font-semibold text-white/40 uppercase tracking-wider">
@@ -176,6 +192,16 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
                   {badgeLabel(unread)}
                 </span>
               ) : null}
+            </button>
+          ) : null}
+          {projectId ? (
+            <button
+              type="button"
+              onClick={() => setView('people')}
+              className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 text-white/80 hover:text-white hover:bg-white/5 rounded-lg transition"
+            >
+              <Users className="w-3.5 h-3.5 shrink-0" />
+              <span className="flex-1 text-xs font-medium">People</span>
             </button>
           ) : null}
           {userId ? (
@@ -235,14 +261,14 @@ export function UserInfo({ expanded = false, align = 'left', disabled = false, p
         className={cn(
           'rounded-xl transition flex items-center shrink-0 overflow-hidden',
           dockSurf.bg,
-          expanded ? 'w-full h-11 px-0' : 'w-12 h-11 justify-center',
+          phoneNavigation ? 'w-10 h-10 justify-center' : expanded ? 'w-full h-11 px-0' : 'w-12 h-11 justify-center',
           align === 'right' ? 'flex-row-reverse' : 'flex-row',
           'disabled:opacity-40 disabled:cursor-not-allowed',
         )}
         title={unread > 0 ? `${name} — ${unread} unread` : name}
       >
-        <div className="relative w-12 h-full flex items-center justify-center shrink-0">
-          <UserAvatar userId={userId ?? null} name={name} size={30} />
+        <div className={cn('relative h-full flex items-center justify-center shrink-0', phoneNavigation ? 'w-10' : 'w-12')}>
+          <UserAvatar userId={userId ?? null} name={name} size={iconSize} />
           {unread > 0 ? <UnreadDot className="absolute top-2 right-2.5" /> : null}
         </div>
         {expanded ? (

@@ -10,11 +10,11 @@
  * as unlimited/zero and a failed record is logged, not thrown.
  *
  * LLM provider keys are EXCLUDED (owner decision, v1): the set is DERIVED from
- * FIRST-PARTY manifest `credentials[]` declarations with `category === 'llm'`
- * — never hand-typed. SECURITY FLOOR: derive from first-party manifests ONLY —
+ * NATIVE manifest `credentials[]` declarations with `category === 'llm'`
+ * — never hand-typed. SECURITY FLOOR: derive from native manifests ONLY —
  * `category` is display metadata any manifest can set, and an untrusted
  * `_packages/` drop declaring `category:'llm'` on a counted id must not exempt
- * it (the caller passes the builtin set, which is first-party by source).
+ * it (the caller passes the builtin set, which is native by source).
  */
 
 import {
@@ -33,10 +33,10 @@ export type CredentialUseAuditSink = (event: {
   details?: Record<string, unknown>;
 }) => void;
 
-/** Derive the v1-excluded id set from FIRST-PARTY package definitions. */
-export function deriveLlmExcludedIds(firstPartyPackages: readonly PackageDefinition[]): Set<string> {
+/** Derive the v1-excluded id set from NATIVE package definitions. */
+export function deriveLlmExcludedIds(nativePackages: readonly PackageDefinition[]): Set<string> {
   const excluded = new Set<string>();
-  for (const pkg of firstPartyPackages) {
+  for (const pkg of nativePackages) {
     for (const cred of pkg.credentials ?? []) {
       if (cred.category === 'llm' && cred.id) excluded.add(cred.id);
     }

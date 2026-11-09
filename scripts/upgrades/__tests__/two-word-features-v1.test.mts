@@ -153,7 +153,7 @@ describe('two-word-features-v1 — the stored ids take their two-word names', ()
     expect(files(f.home)).toEqual(done);
   });
 
-  it('ONE --apply carries a v19/v2 record through v3 and v4: new ids, {21, 4}, the v3 write was {20, 3}, and device.own survives', { timeout: 60_000 }, async () => {
+  it('ONE --apply carries a v19/v2 record through v3, v4 and v5: new ids, {22, 5}, the v3 write was {20, 3}, and device.own survives', { timeout: 60_000 }, async () => {
     const f = fixture();
     const project = join(f.appRoot, 'projects', 'main.json');
     write(project, {
@@ -171,17 +171,23 @@ describe('two-word-features-v1 — the stored ids take their two-word names', ()
     write(join(f.appRoot, 'config', 'data-formats.json'), ledger);
 
     let afterDeviceStep: Record<string, any> | null = null;
+    let afterFeatureStep: Record<string, any> | null = null;
     const outcome = await runUpgrade({
+      appRuns: 'docker',
       apply: true,
       modulesDir: UPGRADES_DIR,
       roots: f,
       offline: async () => ({ offline: true }),
-      log: (line) => { if (line === 'source-device-v1: applied.') afterDeviceStep = json(project); },
+      log: (line) => {
+        if (line === 'source-device-v1: applied.') afterDeviceStep = json(project);
+        if (line === 'two-word-features-v1: applied.') afterFeatureStep = json(project);
+      },
     });
     expect(outcome).toMatchObject({ applied: true, pending: ['neuralis/project'] });
     expect(afterDeviceStep).toMatchObject({ roleGrantVersion: 20, formatVersion: 3 });
     const done = json(project);
-    expect(done).toMatchObject({ roleGrantVersion: 21, formatVersion: 4 });
+    expect(afterFeatureStep).toMatchObject({ roleGrantVersion: 21, formatVersion: 4 });
+    expect(done).toMatchObject({ roleGrantVersion: 22, formatVersion: 5 });
     expect(done.roles.admin.grantedFeatures).toEqual(['core.agents', 'files.read', 'exec.device', 'device.own']);
     // The v4 apply re-read the record the v3 apply wrote — never its own dry-run snapshot.
     expect(done.roles.admin.grantedFeatures).toContain('device.own');

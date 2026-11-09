@@ -1,11 +1,8 @@
 /**
- * Community package dispatch helpers.
- *
- * Handles `@neuralis/package-system` (kernel) introspection queries and
- * package-runtime commands for the community host. The kernel package id is
- * the single canonical surface.
- *
- * All package operations are project-scoped via ProjectPackageScanner.
+ * Community package dispatch helpers: a loaded package's definition and
+ * runtime queries, and the package-runtime commands, for the community host.
+ * The project's package list is `GET /api/projects/:id/packages` (the shared
+ * governance body), not a query here.
  */
 
 import type {
@@ -15,49 +12,15 @@ import type {
   PackageQueryResponse,
 } from '@neuralis/package-system';
 import { uninstallPackageFromProject } from './packageInstaller';
-import { getRuntime } from '../host/bootstrap';
 import { getPackageRuntimeManager } from './PackageRuntimeManager';
-import { getProjectPackageScanner } from './ProjectPackageScanner';
 import { getEnv } from '../config/env';
 import { resolveProjectRoot } from '@neuralis/package-system/paths';
 
 export async function handleDefaultCommunityPackageQuery(
   request: PackageQueryRequest,
 ): Promise<PackageQueryResponse | undefined> {
-  if (request.packageId === '@neuralis/package-system') {
-    const params = (request.params ?? {}) as Record<string, unknown>;
-    switch (request.operation) {
-      case 'firstparty.list': {
-        const runtime = await getRuntime();
-        await runtime.whenReady();
-        const loaded = runtime.getLoader().listLoaded();
-        return {
-          success: true,
-          data: loaded.map((pkg) => ({
-            packageId: pkg.id,
-            hosts: pkg.meta?.hosts ?? [],
-            source: 'first-party-catalog',
-          })),
-        };
-      }
-      case 'project.list': {
-        const projectRoot = resolveProjectRoot(getEnv().projectsRoot, request.context.projectId);
-        const scanner = getProjectPackageScanner(projectRoot);
-        return {
-          success: true,
-          data: scanner.listPackages().map((r) => ({
-            slug: r.slug,
-            packageId: r.packageId,
-            packageRoot: r.packageRoot,
-            trust: r.trust,
-            discoveredAt: r.discoveredAt,
-          })),
-        };
-      }
-      default:
-        return undefined;
-    }
-  }
+  // The kernel is reference-only: it answers no query of its own.
+  if (request.packageId === '@neuralis/package-system') return undefined;
 
   const runtimeManager = getPackageRuntimeManager();
   const registry = runtimeManager.getRegistry();

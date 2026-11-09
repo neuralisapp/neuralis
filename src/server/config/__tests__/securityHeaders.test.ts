@@ -26,13 +26,6 @@ describe('buildSecurityHeaders — package-app override ordering', () => {
   const appIdx = rules.findIndex((r) => r.source === '/api/package-app/:path*');
   const pubIdx = rules.findIndex((r) => r.source === '/api/package-app/_pub/:path*');
   const pkgIdx = rules.findIndex((r) => r.source === '/api/packages/:path*');
-  const machineIdx = rules.findIndex(
-    (r) => r.source === '/api/packages/machine-core/session/:key/stream/:path*',
-  );
-  const machineScopedIdx = rules.findIndex(
-    (r) => r.source === '/api/packages/@neuralis/machine-core/session/:key/stream/:path*',
-  );
-
   it('keeps the global /:path* rule FIRST with UNCHANGED permissive values', () => {
     expect(globalIdx).toBe(0);
     const g = rules[globalIdx];
@@ -144,23 +137,17 @@ describe('buildSecurityHeaders — package-app override ordering', () => {
     expect(value(p, 'Content-Security-Policy')).toBe('sandbox');
   });
 
-  it('RESTORES the global CSP for the machine-core stream lane, in BOTH package-id spellings', () => {
-    // `StreamProxy` is the one package route that legitimately serves a
-    // navigable HTML document (the KasmVNC shell). Under `sandbox` it would
-    // load into an opaque origin with no script and simply never connect —
-    // a silently dead desktop, which is exactly the named risk for this
-    // session. The catch-all resolves both spellings (`splitPackagePath`
-    // rejoins a scoped `@neuralis/machine-core`), so both are restored.
-    for (const idx of [machineIdx, machineScopedIdx]) {
-      expect(idx).toBeGreaterThan(pkgIdx);
-      const rule = rules[idx];
-      expect(rule.headers.map((h) => h.key)).toEqual(['Content-Security-Policy']);
-      // Byte-identical to the global policy — two spellings of one policy drift.
-      expect(value(rule, 'Content-Security-Policy')).toBe(
-        value(rules[globalIdx], 'Content-Security-Policy'),
-      );
-      expect(value(rule, 'Content-Security-Policy')).not.toBe('sandbox');
+  it('no rule after the package-route floor restores a script-bearing CSP under /api/packages/ — the machine-core stream lane included, in BOTH package-id spellings', () => {
+    // The catch-all stream lane serves container-authored bytes. On the app
+    // origin a script-bearing policy would run them with the viewer's cookie,
+    // so the lane keeps the package floor (`sandbox`: an opaque origin).
+    const later = rules.slice(pkgIdx + 1).filter((r) => r.source.startsWith('/api/packages/'));
+    expect(later.filter((r) => r.headers.some((h) => h.key === 'Content-Security-Policy'))).toEqual([]);
+    for (const path of ['machine-core', '@neuralis/machine-core']) {
+      const lane = `/api/packages/${path}/session/:key/stream/:path*`;
+      expect(rules.some((r) => r.source === lane), lane).toBe(false);
     }
+    expect(value(rules[pkgIdx], 'Content-Security-Policy')).toBe('sandbox');
   });
 
   it('keeps the package-route lane DISJOINT from the package-APP lane', () => {
@@ -177,5 +164,16 @@ describe('buildSecurityHeaders — package-app override ordering', () => {
     expect(value(sandbox, 'X-Frame-Options')).toBe('ALLOWALL');
     const machine = rules.find((r) => r.source === '/machine/:path*')!;
     expect(value(machine, 'Permissions-Policy')).toContain('fullscreen=(self)');
+  });
+
+  it('the /invite page (a token in its fragment) sends no Referer, cannot be framed or cached — AFTER the global rule', () => {
+    const inviteIdx = rules.findIndex((r) => r.source === '/invite');
+    expect(inviteIdx).toBeGreaterThan(globalIdx);
+    const invite = rules[inviteIdx]!;
+    expect(value(invite, 'Referrer-Policy')).toBe('no-referrer');
+    expect(value(invite, 'X-Frame-Options')).toBe('DENY');
+    expect(value(invite, 'Cache-Control')).toBe('no-store');
+    // The global policy, plus the frame ban — never a second, drifting copy of it.
+    expect(value(invite, 'Content-Security-Policy')).toBe(`${value(rules[globalIdx]!, 'Content-Security-Policy')}; frame-ancestors 'none'`);
   });
 });

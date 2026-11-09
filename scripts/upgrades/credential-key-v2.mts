@@ -2,7 +2,7 @@
  * Offline upgrade `credential-key-v2`: every encrypted credential opens under
  * the installation's own key file (`app/config/credential-master.key`) and salt
  * (`app/config/credential-salt.bin`). The credential store no longer derives a
- * key from `NEXTAUTH_SECRET` or a static salt when a file is missing — it
+ * key from the session secret (`NEXTAUTH_SECRET`) or a static salt when a file is missing — it
  * refuses by name — so this upgrade writes nothing: its dry run decrypts every
  * blob (values never leave this process, nothing is printed but the blob's
  * place) and BLOCKS on each one the key file cannot open, saying whether the
@@ -23,6 +23,7 @@ import {
 } from '../../src/server/store/CredentialStore';
 // The host's own kind declarations (the upgrade command verifies modules against every loaded one).
 import { HOST_DATA_FORMATS } from '../../src/server/store/dataFormats';
+import { readSessionSecretFile } from '../../src/server/config/sessionSecretFile';
 import { spell } from '../cli/spelling.mts';
 
 /** The retired fallback's salt — read only here, to say which blob still needs the retired key. */
@@ -70,16 +71,20 @@ async function opens(payload: EncryptedPayload, masterKey: Buffer, salt: Buffer,
   }
 }
 
-/** Why the key file cannot open this blob — the one retired key that still does, if any. */
-async function retiredKeyFor(payload: EncryptedPayload, scope: string, keyFile: Buffer | undefined): Promise<string> {
-  const secret = process.env.NEXTAUTH_SECRET;
+/**
+ * Why the key file cannot open this blob — the one retired key that still does, if any. The
+ * session secret is the data home's file first (`session-secret-v1` moved it there), else the
+ * `.env` value this run was started with.
+ */
+async function retiredKeyFor(payload: EncryptedPayload, scope: string, keyFile: Buffer | undefined, appRoot: string): Promise<string> {
+  const secret = readSessionSecretFile(appRoot) ?? process.env.NEXTAUTH_SECRET?.trim();
   if (secret && (await opens(payload, Buffer.from(secret, 'utf-8'), RETIRED_SALT, scope))) {
     return 'opens only under NEXTAUTH_SECRET (written while credential-master.key was missing)';
   }
   if (keyFile && (await opens(payload, keyFile, RETIRED_SALT, scope))) {
     return 'opens only under the static salt (written while credential-salt.bin was missing)';
   }
-  return secret ? 'opens under no key this install holds' : 'opens under no key this install holds (NEXTAUTH_SECRET was not set for this run)';
+  return secret ? 'opens under no key this install holds' : 'opens under no key this install holds (no session secret: neither app/config/session-secret.key nor NEXTAUTH_SECRET for this run)';
 }
 
 const REMEDY =
@@ -119,7 +124,7 @@ async function check(ctx: OfflineUpgradeContext): Promise<OfflineUpgradePlan> {
         // falls through to the diagnosis below
       }
     }
-    lines.push(`credentials/${blob.rel} · ${await retiredKeyFor(payload, blob.scope, keyFile)}`);
+    lines.push(`credentials/${blob.rel} · ${await retiredKeyFor(payload, blob.scope, keyFile, ctx.appRoot)}`);
   }
   return {
     files: [],

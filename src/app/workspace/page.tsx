@@ -5,6 +5,12 @@ import { getSSRSnapshot } from '@/server/packages/snapshotForSSR';
 import { refreshSnapshot } from './actions';
 import { WorkspacePageClient } from './WorkspacePageClient';
 import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts';
+import { detectDocker } from '@neuralis/package-system/paths';
+
+// Rendered per request, never prerendered: the page reads the visitor's session, and NextAuth
+// reads the session secret (a file in the data home, `sessionSecret`) the moment it is asked —
+// `next build` runs with no data home.
+export const dynamic = 'force-dynamic';
 
 export default async function WorkspacePage() {
   const user = await getSessionUser();
@@ -31,6 +37,7 @@ export default async function WorkspacePage() {
     <WorkspacePageClient
       initialSnapshot={initialSnapshot}
       refreshSnapshot={refreshSnapshot}
+      isDocker={detectDocker()}
       mustChangePassword={mustChangePassword}
       userId={user.id}
     />

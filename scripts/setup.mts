@@ -19,14 +19,25 @@
  *   --docker-gid <n> process and the socket, so in the image — started with
  *                    `--user "$(id -u):$(id -g)"` and the socket bound, as
  *                    `imageSetupCommand` prints — it already sees the host's.
+ *   --no-desktop     Leave the virtual desktop (machine-core) off.
+ *   --native --yes --owner-email <e> [--project <name>] [--qdrant docker|binary] [--desktop|--no-desktop]
+ *                    The desktop app's first run (its own host bundle only):
+ *                    asks nothing, the password on stdin, `.env` in
+ *                    <NEURALIS_HOME>/app/config (and, Qdrant in Docker, its
+ *                    compose file beside it).
+ *   --native --yes [--qdrant binary [--copy-vectors|--estimate-copy]]
+ *                    The same app adopting a home another install (Docker)
+ *                    set up: only its own `.env` and the install record.
+ *   --native --yes --refresh-qdrant   Its Qdrant lines again.
  */
 
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { mkdir, writeFile, access, stat, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, access, stat, readFile, statfs } from 'node:fs/promises';
 import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import { randomBytes, randomUUID, createCipheriv, createHash, hkdf } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import bcrypt from 'bcryptjs';
@@ -36,14 +47,29 @@ import { slugify } from '../src/lib/utils';
 // `./setup/records.mts`.
 
 import { CliExit, type CliContext } from './cli/registry.mts';
-import { installLayout, spell, spellOn, type InstallLayout } from './cli/spelling.mts';
+import { insideImage, installLayout, spell, spellOn, type InstallLayout } from './cli/spelling.mts';
 import {
   PORT_ROLES, answeringQdrant, bindMountOf, busyPortRefusal, detectEnvironment, detectQdrant, findBusyPorts, imageFix, nextFreePorts, portCheck, portClaims,
-  resolveConfigDir, resolveHostHome, setupRefusal,
-  type DetectedEnv, type Platform, type PortCheck, type PortClaim, type QdrantAnswer,
+  UPGRADE_DOCKER_FIRST, detectDocker, detectExistingSetup, recordedDockerQdrant, resolveConfigDir, resolveHostHome, settleLoopbackPorts, setupRefusal,
+  type DetectedEnv, type Platform, type PortCheck, type PortClaim, type QdrantAnswer, type RecordedQdrant,
 } from './setup/detect.mts';
+import { recordInstall } from './setup/installRecord.mts';
 import { askHidden } from './setup/ownerCheck.mts';
-import { writeMergedPlatformConfig } from './setup/platformConfig.mts';
+import { readPlatformConfig, writeMergedPlatformConfig } from './setup/platformConfig.mts';
+import {
+  OLLAMA_DEFAULT_PORT,
+  OLLAMA_EMBEDDING_DIMENSION,
+  OLLAMA_EMBEDDING_MODEL_ID,
+  OLLAMA_EMBEDDING_TAG,
+  OLLAMA_ENV_KEYS,
+  OLLAMA_MODES,
+  OLLAMA_OWN_PORT,
+  ollamaCostLine,
+  ollamaEnvLines,
+  ollamaPlatformChange,
+  parseOllamaMode,
+  type OllamaMode,
+} from './setup/ollamaVersion.mts';
 import {
   createDirectorySkeleton,
   findOrphanSourceConfigDirs,
@@ -52,21 +78,28 @@ import {
   type SetupProjectResolution,
   readOwnerRecord,
   writeOwnerRecord,
+  stampFreshHomeDataFormats,
   writeProjectRecord,
   writeSourceConfigsPreserving,
 } from './setup/records.mts';
 import {
   buildOriginLines,
+  carriedOrigins,
   carryOverEnv,
+  replaceOriginLines,
+  singleHostOrigins,
+  tunnelDomainOf,
+  tunnelOrigins,
+  tlsPortOrigins,
   codexLoopbackOptIn, codexLoopbackQuestion,
   normalizeTrustedProxies, trustedProxiesLines, buildNpmrcLines,
   imageTagLines, initialImageTag, resolveImageTag,
-  DEFAULT_QDRANT_PORT, hostQdrantUrl, originDefault, qdrantHostPort,
+  DEFAULT_QDRANT_GRPC_PORT, DEFAULT_QDRANT_PORT, hostQdrantUrl, nativeEnvLines, nativeQdrantLines, originDefault, qdrantBinaryPorts, qdrantHostPort, replaceNativeQdrantLines,
   isLoopbackPublicOrigin, normalizePublicOrigin,
-  readEnvFile,
-  resolveQdrantApiKey,
+  readEnvFile, replaceEnvFile, replaceEnvKey,
+  resolveQdrantApiKey, dockerIdentityLines,
   parseEnvContent as parseEnvContentShared,
-  type CarriedOverEnv, type PortTriple,
+  type CarriedOverEnv, type NativeQdrant, type PortTriple,
 } from './setup/envFile.mts';
 import { parseComposeLs, resolveComposeProject, type ComposeProjectRow } from './setup/composeProject.mts';
 import type {
@@ -88,6 +121,7 @@ import {
   NO_BUILD_INPUTS,
   OPERATOR_IMAGE_DIR,
   buildComposeContent,
+  writeDesktopCompanionCompose,
   hostReachableUrl,
   operatorDependencies,
   planOperatorImage,
@@ -101,8 +135,9 @@ import {
   assessQdrantGap,
   binaryInstallProbe,
   dockerInstallProbe,
-  qdrantImageRef,
+  qdrantBinaryName, qdrantImageRef,
   qdrantStatePath,
+  readQdrantState,
   resolveQdrantState,
   QDRANT_TARGET_VERSION,
   QDRANT_UPGRADE_COMMAND,
@@ -120,6 +155,12 @@ import {
   embeddingEndpointCredentialId,
   parseOperatorEndpoints,
 } from '@neuralis/package-system/contracts';
+import { bundleLayout, installKindOf, nativeConfigDir, resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { mintSessionSecret, readSessionSecretFile, sessionSecretPath, writeSessionSecretFile } from '../src/server/config/sessionSecretFile.ts';
+import { DISABLED_BUILTINS_KEY } from '../src/server/host/buildRefusals.ts';
+import { processExec } from './qdrant-upgrade/upgrade.mts';
+import { setupTunnelArgs } from './tunnel.mts';
+import { planTransfer, processTransferPorts, runTransfer, type TransferInput } from './qdrant-upgrade/transfer.mts';
 
 // ── ANSI Colors & Symbols ──────────────────────────────────────
 
@@ -203,7 +244,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.3.2',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.4.0',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -289,6 +330,8 @@ const LAYOUT_LABEL: Record<InstallLayout, string> = {
   clone: 'public host clone',
   container: 'Docker image',
   'host-tree': 'host package',
+  image: 'image-only folder',
+  native: 'desktop app',
 };
 
 function printDetection(env: DetectedEnv, layout: InstallLayout) {
@@ -1063,7 +1106,7 @@ async function ensureQdrant(
     const version = await resolveInstallQdrantVersion(
       binaryInstallProbe({
         storageDir: join(env.neuralisHome, 'qdrant-storage'),
-        binaryPath: join(binDir, 'qdrant'),
+        binaryPath: join(binDir, qdrantBinaryName()),
         runningVersion: null,
       }),
       env.neuralisHome,
@@ -1092,18 +1135,25 @@ async function ensureQdrant(
     const apiKey = resolveQdrantApiKey('binary', carriedKey, mintKey);
     reportKey(apiKey);
 
+    // Its own two loopback ports: the recorded ones, or the next free ones when another program holds them.
+    const settled = await settleLoopbackPorts([
+      { key: 'qdrant', port, address: '127.0.0.1' },
+      { key: 'qdrantGrpc', port: carried.qdrantGrpcPort, address: '127.0.0.1' },
+    ]);
+    const ports = { http: settled.get('qdrant')!, grpc: settled.get('qdrantGrpc')! };
+    const url = `http://localhost:${ports.http}`;
     step('Starting Qdrant...');
     const storageDir = join(env.neuralisHome, 'qdrant-storage');
-    await startQdrantBinary(binDir, storageDir, apiKey ?? undefined);
+    await startQdrantBinary(binDir, storageDir, apiKey ?? undefined, ports);
 
     step('Waiting for Qdrant...');
-    const healthy = await waitForQdrant('http://localhost:6333');
+    const healthy = await waitForQdrant(url);
     if (healthy) {
-      info(`Qdrant running on ${c.bold}http://localhost:6333${c.reset}`);
+      info(`Qdrant running on ${c.bold}${url}${c.reset}`);
     } else {
       warn('Qdrant started but health check timed out.');
     }
-    return { url: 'http://localhost:6333', mode: 'binary', apiKey, port, runningVersion: null };
+    return { url, mode: 'binary', apiKey, port: ports.http, grpcPort: ports.grpc, runningVersion: null };
   }
 
   if (choice === 1) {
@@ -1362,12 +1412,30 @@ async function chooseVectorConfig(
   deploymentMode: 'native' | 'docker',
   localLLMs: LocalLLMEntry[],
   advanced: boolean,
+  ollamaChoice: OllamaMode | null,
 ): Promise<VectorChoice> {
   heading('Vector (embeddings)');
 
   if (qdrantMode === 'skip') {
     info(`Qdrant skipped — no embedding (text and field search only)`);
     return { enabled: false };
+  }
+
+  // An Ollama the operator CHOSE (`--ollama existing|docker`) embeds locally from the start: the
+  // pinned model, enabled, no key needed. Without the choice the Gemini default below stands.
+  const chosenOllama = ollamaChoice === 'existing' || ollamaChoice === 'docker'
+    ? localLLMs.find((e) => e.kind === 'ollama-native' && e.enabled)
+    : undefined;
+  if (chosenOllama) {
+    info(`Embedding: ${c.bold}${OLLAMA_EMBEDDING_MODEL_ID}${c.reset} ${c.dim}(${OLLAMA_EMBEDDING_TAG}, local — no key)${c.reset}`);
+    if (ollamaChoice === 'existing' && env.ollama.running && !env.ollama.models.includes(OLLAMA_EMBEDDING_TAG)) {
+      step(`Pulling ${OLLAMA_EMBEDDING_TAG} into ${env.ollama.url}…`);
+      if (await pullOllamaModel(OLLAMA_EMBEDDING_TAG, env.ollama.url)) info(`Pulled ${c.bold}${OLLAMA_EMBEDDING_TAG}${c.reset}`);
+      else warn(`Could not pull ${OLLAMA_EMBEDDING_TAG}: run \`ollama pull ${OLLAMA_EMBEDDING_TAG}\`; indexing waits for it.`);
+    } else if (ollamaChoice === 'docker') {
+      console.log(`  ${c.dim}After \`docker compose up -d\`: docker compose exec ollama ollama pull ${OLLAMA_EMBEDDING_TAG} (indexing waits for it).${c.reset}`);
+    }
+    return { enabled: true, modelId: OLLAMA_EMBEDDING_MODEL_ID, dimension: OLLAMA_EMBEDDING_DIMENSION, ollamaUrl: chosenOllama.baseUrl };
   }
 
   const recommended = recommendedEmbeddingModel();
@@ -1442,7 +1510,7 @@ async function chooseVectorConfig(
     const installed = env.ollama.models.includes(model.apiModelId);
     if (!installed && env.ollama.running) {
       step(`Pulling Ollama model ${model.apiModelId}...`);
-      const ok = pullOllamaModel(model.apiModelId, env.ollama.url);
+      const ok = await pullOllamaModel(model.apiModelId, env.ollama.url);
       if (ok) {
         info(`Pulled ${c.bold}${model.apiModelId}${c.reset}`);
       } else {
@@ -1548,10 +1616,7 @@ async function askOllamaDeployment(
   if (idx === 1) {
     // Compose-managed Ollama: container is reachable from neuralis at the
     // bridge name `ollama` regardless of host deployment mode.
-    info(`Selected: ${c.bold}docker-compose Ollama${c.reset} → http://ollama:11434`);
-    console.log(`  ${c.dim}The generated docker-compose.yml will include the ollama service — \`docker compose up -d\` starts it.${c.reset}`);
-    console.log(`  ${c.dim}Pull a model afterwards: docker compose exec ollama ollama pull nomic-embed-text${c.reset}`);
-    return { id: 'ollama', label: 'Ollama (compose)', baseUrl: 'http://ollama:11434', kind: 'ollama-native', enabled: true };
+    return composeOllamaEntry();
   }
 
   if (idx === 2) {
@@ -1594,6 +1659,33 @@ async function askOllamaDeployment(
   return detectedOllamaEntry(url, deploymentMode);
 }
 
+/**
+ * `--ollama <mode>`: one of the words `allowed` (the Docker wizard has no
+ * `binary` — that one is the desktop app's own host), else a refusal; absent ⇒
+ * null (the question keeps its default answer).
+ */
+function parseOllamaFlag(cliArgs: string[], flagValue: (flag: string) => string | null, allowed: readonly OllamaMode[]): OllamaMode | null {
+  if (!cliArgs.includes('--ollama')) return null;
+  const mode = parseOllamaMode(flagValue('--ollama'));
+  if (!mode || !allowed.includes(mode)) throw new CliExit(1, `--ollama takes ${allowed.join(', ')}${allowed.includes('binary') ? '' : ' (the downloaded binary runs only on the desktop app\'s own host)'}`);
+  return mode;
+}
+
+/** The `.env` `OLLAMA_MODE` of a Docker install: what its endpoints say — the compose service, another Ollama, or none. */
+function dockerOllamaMode(localLLMs: readonly LocalLLMEntry[]): OllamaMode {
+  const ollama = localLLMs.find((e) => e.kind === 'ollama-native' && e.enabled);
+  if (!ollama) return 'none';
+  return ollama.baseUrl.startsWith('http://ollama:') ? 'docker' : 'existing';
+}
+
+/** The compose-managed Ollama: reachable from the app at the bridge name `ollama`, whatever the host mode. */
+function composeOllamaEntry(): LocalLLMEntry {
+  info(`Selected: ${c.bold}docker-compose Ollama${c.reset} → http://ollama:11434`);
+  console.log(`  ${c.dim}The generated docker-compose.yml will include the ollama service (loopback only) — \`docker compose up -d\` starts it.${c.reset}`);
+  console.log(`  ${c.dim}${ollamaCostLine('docker')}${c.reset}`);
+  return { id: 'ollama', label: 'Ollama (compose)', baseUrl: 'http://ollama:11434', kind: 'ollama-native', enabled: true };
+}
+
 /** The Ollama at `url` as a chat endpoint — the default answer when one was detected. */
 function detectedOllamaEntry(url: string, deploymentMode: 'native' | 'docker'): LocalLLMEntry {
   return { id: 'ollama', label: 'Ollama', baseUrl: hostReachableUrl(url, deploymentMode), kind: 'ollama-native', enabled: true };
@@ -1607,6 +1699,7 @@ async function configureLocalLLMs(
   env: DetectedEnv,
   deploymentMode: 'native' | 'docker',
   advanced: boolean,
+  ollamaChoice: OllamaMode | null,
 ): Promise<{ entries: LocalLLMEntry[]; keys: Record<string, string> }> {
   heading('Custom LLM endpoints');
   console.log(`  ${c.dim}Point Neuralis at an OpenAI-compatible or Ollama-native LLM server.${c.reset}`);
@@ -1622,9 +1715,16 @@ async function configureLocalLLMs(
 
   // Ollama gets the dedicated 3-way prompt because it's the most common path
   // (and the only one with a viable docker-compose service today).
-  const ollamaEntry = advanced
-    ? await askOllamaDeployment(env, deploymentMode)
-    : env.ollama.running ? detectedOllamaEntry(env.ollama.url, deploymentMode) : null;
+  // `--ollama <mode>` answers this question without asking it (`binary` is the desktop app's alone).
+  const ollamaEntry = ollamaChoice === 'docker'
+    ? composeOllamaEntry()
+    : ollamaChoice === 'existing'
+      ? detectedOllamaEntry(env.ollama.url, deploymentMode)
+      : ollamaChoice === 'none'
+        ? null
+        : advanced
+          ? await askOllamaDeployment(env, deploymentMode)
+          : env.ollama.running ? detectedOllamaEntry(env.ollama.url, deploymentMode) : null;
   if (ollamaEntry) {
     entries.push(ollamaEntry);
     info(`Added ${c.bold}${ollamaEntry.label}${c.reset} → ${ollamaEntry.baseUrl}`);
@@ -1723,7 +1823,15 @@ async function askEndpointNetwork(baseUrl: string): Promise<'private' | 'public'
 
 // ── Machine-core desktop variant + image prefetch ──────────────
 
-async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, advanced: boolean): Promise<MachineChoice> {
+/** The core packages every install loads, and the one it may leave off (`disabledBuiltinPackages`). */
+function printCorePackages(): void {
+  heading('Core packages');
+  info(`${c.bold}@neuralis/admin${c.reset} · ${c.bold}@neuralis/agent-core${c.reset} · ${c.bold}@neuralis/brain-core${c.reset} ${c.dim}— always on${c.reset}`);
+  step(`${c.bold}@neuralis/machine-core${c.reset} ${c.dim}— the virtual desktop (needs Docker); also runs sidecar MCP servers${c.reset}`);
+}
+
+async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, advanced: boolean, noDesktop: boolean): Promise<MachineChoice> {
+  printCorePackages();
   heading('Machine (virtual desktop)');
   console.log(`  ${c.dim}The first beta bundles Ubuntu + XFCE with Neuralis control and authentication.${c.reset}`);
   console.log(`  ${c.dim}machine-core streams the Webtop desktop into the workspace over Selkies.${c.reset}`);
@@ -1731,8 +1839,13 @@ async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, adv
   blank();
 
   if (!env.docker) {
-    warn('Docker not available — machine widget will surface a "docker-missing" error at runtime.');
-    return { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true, pullOnHost: false };
+    warn('Docker not available — the virtual desktop stays off (Admin → Config, disabledBuiltinPackages, turns it on).');
+    return { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true, pullOnHost: false, enabled: false };
+  }
+  const enabled = !noDesktop && (!advanced || !(await ask('Turn on the virtual desktop (machine-core)?', 'y')).toLowerCase().startsWith('n'));
+  if (!enabled) {
+    step('Virtual desktop off: machine-core stays installed and is not loaded (Admin → Config, disabledBuiltinPackages).');
+    return { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true, pullOnHost: false, enabled: false };
   }
 
   const variant = DEFAULT_MACHINE_VARIANT;
@@ -1740,9 +1853,9 @@ async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, adv
 
   // A pull started in the image's one-shot container dies with it: there the host pulls it
   // (the installer does; the summary names the command).
-  if (layout === 'container') {
+  if (insideImage(layout)) {
     step(`Pull it on the host before the first desktop start: ${c.bold}docker pull ${variant.derivativeImage}${c.reset}`);
-    return { variant, skipPrefetch: true, pullOnHost: true };
+    return { variant, skipPrefetch: true, pullOnHost: true, enabled: true };
   }
 
   const prefetch = advanced ? await ask('Pre-pull the Neuralis desktop image now (background)?', 'y') : 'y';
@@ -1760,7 +1873,7 @@ async function chooseMachineVariant(env: DetectedEnv, layout: InstallLayout, adv
     step(`Image prefetch skipped — the first desktop start needs it: docker pull ${variant.derivativeImage}`);
   }
 
-  return { variant, skipPrefetch, pullOnHost: false };
+  return { variant, skipPrefetch, pullOnHost: false, enabled: true };
 }
 
 async function backgroundPullMachineImage(image: string, dataHome: string): Promise<number | undefined> {
@@ -1836,6 +1949,19 @@ async function generateKeyFiles(neuralisHome: string): Promise<{ masterKey: Buff
   return { masterKey, salt };
 }
 
+/**
+ * The session secret file (`<home>/app/config/session-secret.key`): kept when
+ * present — rotating it signs every user out; otherwise the secret an older
+ * `.env` still carries (a re-run on an install set up before the file
+ * existed), else a new one. The `.env` this run writes no longer carries it.
+ */
+async function ensureSessionSecret(neuralisHome: string, carried: string | null): Promise<void> {
+  const appRoot = join(neuralisHome, 'app');
+  const outcome = await writeSessionSecretFile(appRoot, carried ?? mintSessionSecret());
+  if (outcome === 'kept') step('Session secret preserved — nobody gets logged out. (To rotate it, delete app/config/session-secret.key with the app stopped, then re-run setup.)');
+  else info(`Session secret: ${c.dim}${carried ? 'moved from .env into' : 'generated'} ${sessionSecretPath(appRoot)}${c.reset}`);
+}
+
 async function writeCredentials(
   config: SetupConfig,
   masterKey: Buffer,
@@ -1895,7 +2021,8 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
 
   const infraMode = config.qdrant.mode === 'skip' ? 'inmemory' : 'local';
 
-  // Minimal .env — only infra topology, ports, paths, master secret
+  // Minimal .env — only infra topology, ports, paths. The session secret is a
+  // file in the data home (`sessionSecretFile.ts`), never a line here.
   const lines: string[] = [
     `# Generated by: neuralis setup (${new Date().toISOString().split('T')[0]})`,
     `# Do not commit this file to version control.`,
@@ -1904,11 +2031,9 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
     '#   .env           — infrastructure topology (this file)',
     '#   platform.json  — runtime settings (~/.neuralis/app/config/platform.json)',
     '#   credentials/   — encrypted secrets (~/.neuralis/app/credentials/)',
+    '#   The session secret is app/config/session-secret.key in the data home.',
     '',
-    '# ── Master Secret (REQUIRED) ─────────────────────────',
-    `NEXTAUTH_SECRET=${config.nextAuthSecret}`,
-    '',
-    ...buildOriginLines(config.publicOrigin, config.ports),
+    ...buildOriginLines(config.origins, config.ports, config.tunnelDomain !== null, config.tunnelRestore),
     '',
     '# Compose project name. It prefixes the named volumes, the network and',
     '# every container name, so a re-run preserves it: renaming would orphan',
@@ -1949,6 +2074,14 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
       '# QDRANT_API_KEY=',
     );
   }
+  if (config.qdrant.mode === 'binary') {
+    lines.push(
+      '# The loopback ports the native Qdrant listens on (REST, gRPC). `neuralis up` and',
+      '# `neuralis qdrant-upgrade` start it on them; QDRANT_URL names the REST one.',
+      `NEURALIS_QDRANT_PORT=${config.qdrant.port}`,
+      `NEURALIS_QDRANT_GRPC_PORT=${config.qdrant.grpcPort ?? DEFAULT_QDRANT_GRPC_PORT}`,
+    );
+  }
   if (config.qdrant.mode === 'docker') {
     lines.push(
       '# The host loopback port the bundled Qdrant is published on (its container',
@@ -1973,46 +2106,19 @@ async function generateEnvFile(config: SetupConfig, env: DetectedEnv, configDir:
     ...buildNpmrcLines(config.buildNpmrc),
   );
 
-  if (env.ollama.running) {
-    lines.push(`OLLAMA_URL=${env.ollama.url}`);
-  } else {
-    lines.push('# OLLAMA_URL=http://localhost:11434');
-  }
+  lines.push('', ...ollamaEnvLines(dockerOllamaMode(config.localLLMs)));
 
   if (config.qdrant.mode === 'docker') {
     lines.push('# Docker note: Qdrant starts with the app stack.');
   }
 
-  lines.push(
-    '',
-    '# ── Docker (set automatically by docker-compose) ────',
-    `LOCAL_UID=${config.uid}`,
-    `LOCAL_GID=${config.gid}`,
-  );
-
-  if (config.dockerGid !== null) {
-    lines.push(
-      '# GID that owns /var/run/docker.sock on this host. docker-compose adds',
-      '# this as a supplementary group to the neuralis container so the app',
-      '# user can open the socket (machine-core spawns Webtop containers via it).',
-      `DOCKER_GID=${config.dockerGid}`,
-    );
-  } else {
-    lines.push(
-      '# /var/run/docker.sock not detected on this host — machine-core will',
-      '# surface a clean "docker-missing" error. Set DOCKER_GID manually if',
-      '# you plan to bind-mount the socket.',
-      '# DOCKER_GID=',
-    );
-  }
+  lines.push(...dockerIdentityLines(config));
 
   lines.push(
     '',
     '# ── Machine-core (per-user Webtop + Selkies + Playwright-over-CDP) ──',
-    `NEURALIS_MACHINE_DESKTOP_VARIANT=${config.machine.variant.key}`,
+    '# The desktop variant and idle timeout are platform settings (Admin → Config).',
     `NEURALIS_MACHINE_IMAGE=${config.machine.variant.derivativeImage}`,
-    'NEURALIS_MACHINE_CONTAINER_SCOPE=user',
-    'NEURALIS_MACHINE_IDLE_MINUTES=30',
     'NEURALIS_MACHINE_SCREEN=1920x1080',
     'NEURALIS_MACHINE_SIDECAR_PORT=9400',
     'NEURALIS_MACHINE_CDP_PORT=9222',
@@ -2104,7 +2210,8 @@ async function generateComposeFile(
  * install with no operator package runs the release image as is.
  */
 function operatorImageFor(input: ComposeEmitInput, configDir: string, dirs: { installDir: string; packageDir: string }): OperatorImage | null {
-  if (input.monorepo || !input.imageTag) return null;
+  // An image-only folder has no package list: it runs the release image as is.
+  if (input.monorepo || !input.imageTag || installKindOf(dirs.installDir) === 'image') return null;
   return planOperatorImage({
     installManifest: JSON.parse(readFileSync(join(dirs.installDir, 'package.json'), 'utf-8')) as unknown,
     contextDir: join(configDir, OPERATOR_IMAGE_DIR),
@@ -2124,7 +2231,6 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     appPort: config.ports.app,
     mcpPort: config.ports.mcp,
     sandboxPort: config.ports.sandbox,
-    nextAuthUrl: config.publicOrigin,
     composeProject: config.composeProject,
     brainInfraMode: config.qdrant.mode === 'skip' ? 'inmemory' : 'local',
     qdrantMode: config.qdrant.mode,
@@ -2136,12 +2242,10 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
     qdrantDashboard: true,
     codexLoopbackPublish: config.codexLoopback,
     composeOllama: config.localLLMs.some((e) => e.baseUrl.startsWith('http://ollama:')),
+    tunnel: config.tunnelDomain !== null,
     neuralisHome: hostHome,
     machine: {
-      desktopVariant: config.machine.variant.key,
       image: config.machine.variant.derivativeImage,
-      containerScope: 'user',
-      idleMinutes: 30,
       screen: '1920x1080',
       sidecarPort: 9400,
       cdpPort: 9222,
@@ -2167,6 +2271,8 @@ function composeInputFromSetup(config: SetupConfig, env: DetectedEnv, qdrantImag
  * pulled image.
  */
 function buildInputsFor(env: DetectedEnv, npmrcPath: string | undefined): BuildInputs {
+  // An image-only folder pulls a prebuilt image and has no package list to read.
+  if (installKindOf(env.projectRoot) === 'image') return NO_BUILD_INPUTS;
   const manifest = JSON.parse(readFileSync(join(env.projectRoot, 'package.json'), 'utf-8')) as unknown;
   if (!env.isClone && operatorDependencies(manifest) !== null) {
     return resolveBuildInputs({ hostDir: env.projectRoot, repoRoot: env.projectRoot, neuralisHome: env.neuralisHome, npmrcPath });
@@ -2234,7 +2340,6 @@ function composeInputFromExisting(
     appPort: Number(envVars.NEURALIS_APP_PORT) || 3100,
     mcpPort: Number(envVars.MCP_HTTP_PORT) || 3101,
     sandboxPort: Number(envVars.NEURALIS_MCP_SANDBOX_PORT) || 3102,
-    nextAuthUrl: envVars.NEXTAUTH_URL || 'http://localhost:3100',
     brainInfraMode,
     qdrantMode,
     qdrantUrl: envVars.QDRANT_URL ?? '',
@@ -2245,12 +2350,10 @@ function composeInputFromExisting(
     qdrantDashboard: envVars.QDRANT_DASHBOARD?.trim().toLowerCase() !== 'off',
     codexLoopbackPublish: codexLoopbackOptIn(envVars.NEURALIS_CODEX_LOOPBACK),
     composeOllama,
+    tunnel: tunnelDomainOf(envVars) !== null,
     neuralisHome: hostHome,
     machine: {
-      desktopVariant: machineEnv('NEURALIS_MACHINE_DESKTOP_VARIANT', 'ubuntu-xfce'),
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.3.2'),
-      containerScope: machineEnv('NEURALIS_MACHINE_CONTAINER_SCOPE', 'user'),
-      idleMinutes: Number(envVars.NEURALIS_MACHINE_IDLE_MINUTES) || 30,
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.4.0'),
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
       sidecarPort: Number(envVars.NEURALIS_MACHINE_SIDECAR_PORT) || 9400,
       cdpPort: Number(envVars.NEURALIS_MACHINE_CDP_PORT) || 9222,
@@ -2290,7 +2393,7 @@ function parseEnvContent(content: string): Record<string, string> {
 async function setupPreflight(ctx: CliContext, env: DetectedEnv, version: string, composeOnly: boolean, outputOverride: string | null): Promise<ImageRun | null> {
   const layout = installLayout(ctx.installDir, ctx.packageDir);
   const dir = resolveConfigDir(env, outputOverride);
-  const container = layout === 'container';
+  const container = insideImage(layout);
   const refusal = setupRefusal({
     layout,
     platform: env.platform,
@@ -2388,6 +2491,8 @@ async function runComposeOnly(
   }
 
   await generateComposeFile(input, configDir, { askOverwrite: false, version, installDir: ctx.installDir, packageDir: ctx.packageDir, dataHome: env.neuralisHome });
+  // A folder set up before the record existed gets its row at its first regeneration.
+  await recordInstall(env.neuralisHome, configDir);
 }
 
 // ── Existing Setup Check ───────────────────────────────────────
@@ -2434,6 +2539,35 @@ other question takes its default answer, changed later in the app.
   --output DIR        write .env and the compose files into DIR
   --uid N, --gid N    the user and group the stack runs as (default: detected)
   --docker-gid N      the Docker socket's group (default: detected)
+  --no-desktop        leave the virtual desktop (machine-core) off; it is off
+                      anyway without Docker (Admin → Config turns it on)
+  --ollama existing|docker|none   local models, unasked: the Ollama that runs, a
+                      compose service (loopback only), or none; existing/docker
+                      also make its embedding model the target, enabled
+  --tunnel DOMAIN [--access EMAIL|@DOMAIN]   then \`tunnel on DOMAIN\`: reach it
+                      from anywhere (app., mcp., sandbox.DOMAIN; Cloudflare)
+  --native --yes --owner-email EMAIL [--project NAME]
+                      the desktop app's first run: no questions, the password on
+                      stdin, .env in the data home's app/config
+    --qdrant docker|binary   where its vectors live (default: docker when Docker
+                      answers — a compose file of its own beside .env — else the
+                      app's own binary)
+    --desktop | --no-desktop the virtual desktop (default: on with Docker)
+    --ollama existing|docker|binary|none   local models (default: none);
+                      binary fetches Ollama into the data home when up starts
+    --tunnel DOMAIN [--access EMAIL|@DOMAIN]   then \`tunnel on DOMAIN\`
+  --native --yes      the desktop app adopting a home a Docker install set up:
+                      only its own .env, using that install's Qdrant; users and
+                      projects stay as they are
+    --qdrant binary [--copy-vectors]   its own Qdrant instead, the Docker vectors
+                      copied in (cold, the Docker Qdrant stopped meanwhile)
+  --native --yes --refresh-qdrant [--qdrant binary [--copy-vectors]]
+                      a home the app already runs: its Qdrant lines again (after
+                      the Docker install's key or port changed)
+  --native --yes --lan on|off   a home the app runs: listen on every address of
+                      this network (Qdrant and Ollama stay on loopback), or back
+  --native --yes --ollama MODE  a home the app runs: change its local models
+  Reach it from anywhere: ${spell('tunnel', ctx)} on DOMAIN (a Cloudflare named tunnel).
   -h, --help          this text`);
 }
 
@@ -2472,7 +2606,9 @@ function printSummary(config: SetupConfig, env: DetectedEnv, layout: InstallLayo
   }
 
   info(
-    `Machine: ${c.bold}${config.machine.variant.key}${c.reset} ${c.dim}(${config.machine.variant.derivativeImage}${config.machine.pullOnHost ? ', pull it on the host' : config.machine.skipPrefetch ? ', no prefetch' : ', prefetch running in background'})${c.reset}`,
+    config.machine.enabled
+      ? `Machine: ${c.bold}${config.machine.variant.key}${c.reset} ${c.dim}(${config.machine.variant.derivativeImage}${config.machine.pullOnHost ? ', pull it on the host' : config.machine.skipPrefetch ? ', no prefetch' : ', prefetch running in background'})${c.reset}`
+      : `Virtual desktop: ${c.bold}off${c.reset} ${c.dim}(machine-core not loaded — Admin → Config, disabledBuiltinPackages)${c.reset}`,
   );
 
   blank();
@@ -2487,7 +2623,7 @@ function printSummary(config: SetupConfig, env: DetectedEnv, layout: InstallLayo
     }
     console.log(`    ${c.bold}Build and start from the host folder:${c.reset}`);
     console.log(`      npm run build`);
-    console.log(`      npm run start`);
+    console.log(`      ${spell('start')}`);
   } else if (env.isClone) {
     console.log(`    ${c.bold}Development:${c.reset}`);
     console.log(`      pnpm build && pnpm dev:app`);
@@ -2501,6 +2637,18 @@ function printSummary(config: SetupConfig, env: DetectedEnv, layout: InstallLayo
 
   blank();
   console.log(`    Then open: ${c.cyan}${c.bold}${config.publicOrigin}${c.reset}`);
+  if (!config.tunnelDomain) {
+    const derived = singleHostOrigins(config.publicOrigin, config.ports);
+    if (config.origins.mcp !== derived.mcp) console.log(`    Kept from .env: MCP_BASE_URL=${config.origins.mcp}`);
+    if (config.origins.sandbox) console.log(`    Kept from .env: NEURALIS_MCP_SANDBOX_ORIGIN=${config.origins.sandbox}`);
+    if (config.origins.companion) console.log(`    Kept from .env: NEURALIS_COMPANION_ORIGIN=${config.origins.companion}`);
+    const tls = tlsPortOrigins(config.origins, config.ports);
+    if (tls.length > 0) {
+      warn(`The MCP server and the sandbox listen on plain http: your proxy must also serve ${tls.join(' and ')} with TLS,`);
+      console.log(`    ${c.dim}or declare names of your own in .env (MCP_BASE_URL, NEURALIS_MCP_SANDBOX_ORIGIN) — the deployment guide's public-origin table lists every shape.${c.reset}`);
+    }
+    console.log(`    ${c.dim}From anywhere: ${spell('tunnel')} on DOMAIN (a Cloudflare named tunnel; app., mcp. and sandbox.DOMAIN — or setup --tunnel DOMAIN).${c.reset}`);
+  }
   blank();
   if (config.machine.pullOnHost) {
     console.log(`  ${c.bold}The virtual desktop's image${c.reset} ${c.dim}(~3 GB; pull it on the host before the first desktop start):${c.reset}`);
@@ -2512,7 +2660,8 @@ function printSummary(config: SetupConfig, env: DetectedEnv, layout: InstallLayo
     console.log(`    Admin → Credentials         AI provider keys, Sign in with ChatGPT`);
     console.log(`    Admin → Vector              the embedding key, turn embedding on, rebuild`);
     console.log(`    Credentials → Custom endpoints   a local or self-hosted LLM server`);
-    const everyQuestion = layout === 'container' ? 'curl -fsSL https://neuralisapp.com/install.sh | sh -s -- --advanced' : spellOn(layout, 'setup --advanced');
+    // In the image the folder is written for the host, whose `neuralis` command runs the image again.
+    const everyQuestion = spellOn(layout, 'setup --advanced');
     console.log(`  ${c.dim}Every setup question instead: ${everyQuestion}${c.reset}`);
     blank();
   }
@@ -2539,11 +2688,447 @@ async function offerStart(configDir: string): Promise<void> {
 
 // ── Main ───────────────────────────────────────────────────────
 
+/** The whole of stdin, its first line — a password never rides argv, env or a log. */
+async function readSecretLine(input: NodeJS.ReadableStream): Promise<string> {
+  let text = '';
+  for await (const chunk of input) text += String(chunk);
+  return text.split(/\r?\n/, 1)[0] ?? '';
+}
+
+/**
+ * The platform-config seed of the virtual-desktop choice: off writes `disabledBuiltinPackages` (merged — an existing value always wins).
+ * The choice names its package; whether a boot may leave it out is that package's own manifest declaration (`optional`).
+ */
+function desktopSeed(enabled: boolean): Record<string, unknown> {
+  return enabled ? {} : { [DISABLED_BUILTINS_KEY]: ['@neuralis/machine-core'] };
+}
+
+/**
+ * The desktop app's own host turns the host-access plane ON: its first run
+ * pairs this computer as the owner's device, and with the plane off every
+ * folder of it answers `devices_disabled`. The key is the kill-switch, not
+ * the gate — pairing on the machine, a ceiling that grants no folder until
+ * the owner names one, and the OS sandbox still decide — and merged: an existing `false` (an operator's choice) stays.
+ * A Docker install's seed never carries it (the server as a device is its own
+ * decision there).
+ */
+const NATIVE_HOST_PLANE_SEED: Readonly<Record<string, unknown>> = Object.freeze({ hostBrokerEnabled: true });
+
+/** This host's loopback ports — the defaults or the next free ones, never a `reserved` one — and the Qdrant ports its mode listens on (`binary`: REST + gRPC, `docker`: the published REST port). */
+async function nativePorts(qdrant: 'binary' | 'docker' | 'none', reserved: number[] = []): Promise<{ ports: PortTriple; qdrantPorts: { http: number; grpc: number } }> {
+  const settled = await settleLoopbackPorts([
+    { key: 'app', port: 3100, address: '127.0.0.1' },
+    { key: 'mcp', port: 3101, address: '127.0.0.1' },
+    { key: 'sandbox', port: 3102, address: '127.0.0.1' },
+    ...(qdrant !== 'none' ? [{ key: 'qdrant', port: DEFAULT_QDRANT_PORT, address: '127.0.0.1' as const }] : []),
+    ...(qdrant === 'binary' ? [{ key: 'qdrantGrpc', port: DEFAULT_QDRANT_GRPC_PORT, address: '127.0.0.1' as const }] : []),
+  ], undefined, reserved);
+  return {
+    ports: { app: settled.get('app')!, mcp: settled.get('mcp')!, sandbox: settled.get('sandbox')! },
+    qdrantPorts: { http: settled.get('qdrant') ?? DEFAULT_QDRANT_PORT, grpc: settled.get('qdrantGrpc') ?? DEFAULT_QDRANT_GRPC_PORT },
+  };
+}
+
+/** The port the home's recorded Docker install publishes its Qdrant on: taken for this app's own binary even while that Qdrant is stopped. */
+function recordedDockerQdrantPort(home: string): number[] {
+  const recorded = recordedDockerQdrant(home);
+  return recorded.ok && recorded.mode === 'docker' && recorded.qdrant.mode === 'external' ? [Number(new URL(recorded.qdrant.url).port)] : [];
+}
+
+/** The bundle's Qdrant binary (the kernel's `bundleLayout`: `qdrant.exe` on Windows), or null where the bundle carries none. */
+function bundledQdrantOf(packageDir: string): string | null {
+  const path = bundleLayout(dirname(packageDir)).qdrant;
+  return existsSync(path) ? path : null;
+}
+
+/**
+ * The bundle's binary on `<home>/qdrant-storage`, with a minted key. A Qdrant
+ * version already recorded is never rewritten: on a home Docker set up it
+ * describes Docker's store.
+ */
+async function binaryQdrant(home: string, binary: string, ports: { http: number; grpc: number }): Promise<NativeQdrant> {
+  if (!existsSync(qdrantStatePath(home))) {
+    await resolveInstallQdrantVersion(binaryInstallProbe({ storageDir: join(home, 'qdrant-storage'), binaryPath: binary, runningVersion: null }), home);
+  }
+  return { mode: 'binary', apiKey: randomBytes(32).toString('hex'), ports };
+}
+
+/** The compose project of a data home's own Qdrant: one per home, so two homes never share a volume. */
+function desktopComposeProject(home: string): string {
+  return `neuralis-desktop-${createHash('sha256').update(home).digest('hex').slice(0, 8)}`;
+}
+
+/** The choices of `setup --native` (`parseNativeFlags`). */
+type NativeFlags = {
+  qdrant: 'docker' | 'binary' | null; copyVectors: boolean; estimateCopy: boolean; refresh: boolean; desktop: boolean | null;
+  /** `--ollama existing|docker|binary|none` — the local-model companion (a new home: default none; a set-up home: rewrites the choice). */
+  ollama: OllamaMode | null;
+  /** `--lan on|off` — every listener on all of this computer's addresses, or loopback again (a set-up home). */
+  lan: boolean | null;
+};
+
+function parseNativeFlags(cliArgs: string[], flagValue: (flag: string) => string | null): NativeFlags {
+  const qdrant = flagValue('--qdrant');
+  if (cliArgs.includes('--qdrant') && qdrant !== 'docker' && qdrant !== 'binary') throw new CliExit(1, '--qdrant takes docker or binary');
+  if (cliArgs.includes('--desktop') && cliArgs.includes('--no-desktop')) throw new CliExit(1, '--desktop and --no-desktop exclude each other');
+  const lan = flagValue('--lan');
+  if (cliArgs.includes('--lan') && lan !== 'on' && lan !== 'off') throw new CliExit(1, '--lan takes on or off');
+  const flags: NativeFlags = {
+    qdrant: qdrant as NativeFlags['qdrant'],
+    copyVectors: cliArgs.includes('--copy-vectors'),
+    estimateCopy: cliArgs.includes('--estimate-copy'),
+    refresh: cliArgs.includes('--refresh-qdrant'),
+    desktop: cliArgs.includes('--desktop') ? true : cliArgs.includes('--no-desktop') ? false : null,
+    ollama: parseOllamaFlag(cliArgs, flagValue, OLLAMA_MODES),
+    lan: cliArgs.includes('--lan') ? lan === 'on' : null,
+  };
+  if ((flags.copyVectors || flags.estimateCopy) && flags.qdrant !== 'binary') {
+    throw new CliExit(1, '--copy-vectors and --estimate-copy go with --qdrant binary: the Docker vectors are copied only into this app\'s own Qdrant');
+  }
+  return flags;
+}
+
+/** What the copy of the Docker vectors needs from the home's recorded Docker install (docker Qdrant mode only). */
+async function copySource(home: string): Promise<{ recorded: Extract<RecordedQdrant, { ok: true }>; docker: { url: string; apiKey: string }; input: TransferInput }> {
+  const recorded = recordedDockerQdrant(home);
+  if (!recorded.ok) throw new CliExit(1, `Nothing to copy: ${recorded.reason}`);
+  if (recorded.mode !== 'docker' || !recorded.volume || recorded.qdrant.mode !== 'external' || !recorded.qdrant.apiKey) {
+    throw new CliExit(1, `Nothing to copy: the install in ${recorded.install.dir} keeps no Qdrant volume (QDRANT_MODE=${recorded.mode})`);
+  }
+  const recordedVersion = (await readQdrantState(qdrantStatePath(home)))?.version ?? null;
+  return {
+    recorded,
+    docker: { url: recorded.qdrant.url, apiKey: recorded.qdrant.apiKey },
+    input: { home, installDir: recorded.install.dir, volume: recorded.volume, recordedVersion, bundleVersion: QDRANT_TARGET_VERSION },
+  };
+}
+
+/** `--estimate-copy`: the size of the Docker vectors and the free space, as one JSON line (the desktop app shows it). Nothing is written. */
+async function estimateCopy(home: string, ctx: CliContext): Promise<number> {
+  const source = await copySource(home);
+  try {
+    const plan = await planTransfer({ exec: processExec, freeBytes: async (dir) => { const fs = await statfs(dir); return fs.bavail * fs.bsize; }, log: () => {} }, source.input);
+    ctx.stdout(`${JSON.stringify({ bytes: plan.bytes, freeBytes: plan.free, volume: plan.volume })}\n`);
+    return 0;
+  } catch (err) {
+    throw new CliExit(1, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** The Docker vectors copied into this app's store before its `.env` names the binary (`--copy-vectors`). */
+async function copyVectors(home: string, binary: string, qdrant: Extract<NativeQdrant, { mode: 'binary' }>): Promise<void> {
+  const source = await copySource(home);
+  const ports = processTransferPorts({ binary, apiKey: qdrant.apiKey, ports: qdrant.ports, docker: source.docker, log: (line) => step(line) });
+  try {
+    await runTransfer(ports, source.input);
+  } catch (err) {
+    throw new CliExit(1, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** This host's `.env` (`<home>/app/config/.env`), its companions' compose file (a Qdrant and/or an Ollama in Docker), and the data home's record of the bundle. */
+async function writeNativeConfig(home: string, packageDir: string, ports: PortTriple, qdrant: NativeQdrant, qdrantImage: string | null, ollama: OllamaMode = 'none'): Promise<void> {
+  const configDir = nativeConfigDir(home);
+  await mkdir(configDir, { recursive: true, mode: 0o700 });
+  const date = new Date().toISOString().split('T')[0]!;
+  const project = qdrant.mode === 'docker' ? qdrant.project : desktopComposeProject(home);
+  if (qdrant.mode === 'docker' || ollama === 'docker') {
+    if (qdrant.mode === 'docker' && !qdrantImage) throw new Error('the desktop Qdrant\'s compose file needs the recorded Qdrant image');
+    await writeDesktopCompanionCompose(configDir, {
+      project,
+      qdrant: qdrant.mode === 'docker' ? { image: qdrantImage!, port: qdrant.port } : null,
+      ollama: ollama === 'docker' ? { port: OLLAMA_OWN_PORT } : null,
+    }, { date, version: await readNeuralisVersion(packageDir) });
+  }
+  await replaceEnvFile(join(configDir, '.env'), `${nativeEnvLines({ date, ports, bindHost: '127.0.0.1', qdrant, ollama: { mode: ollama, port: OLLAMA_OWN_PORT, composeProject: project } }).join('\n')}\n`, 0o600);
+  await recordInstall(home, packageDir);
+}
+
+/** The unasked embedding answer a home without a local model takes: the recommended model, off until its key. */
+function unaskedEmbedding(): { modelId: string; dimension: number } | undefined {
+  const recommended = recommendedEmbeddingModel();
+  return recommended ? { modelId: recommended.id, dimension: recommended.defaultDimension } : undefined;
+}
+
+/**
+ * `--lan on|off` on a home this app runs: every listener (the app, the MCP
+ * server, the sandbox origin) on all of this computer's addresses — Qdrant and
+ * Ollama stay on loopback, they have no login — or back on loopback. The
+ * origins follow (this computer's network address, or loopback) unless a
+ * tunnel names them; an MCP or sandbox origin the operator declared stays. Topology: the `.env` only, never a platform setting.
+ */
+async function switchNativeLan(home: string, on: boolean): Promise<number> {
+  const envPath = join(nativeConfigDir(home), '.env');
+  const text = readFileSync(envPath, 'utf-8');
+  const current = parseEnvContentShared(text);
+  const ports = carryOverEnv(current).ports;
+  const address = on ? lanAddress() : '127.0.0.1';
+  if (!address) throw new CliExit(1, 'this computer has no network address other than loopback: nothing on the network could reach it');
+  const tunnel = tunnelDomainOf(current);
+  const origins = tunnel ? tunnelOrigins(tunnel) : carriedOrigins(current, singleHostOrigins(`http://${address}:${ports.app}`, ports));
+  const bind = replaceEnvKey(replaceOriginLines(text, origins, tunnel !== null), 'NEURALIS_BIND_HOST', on ? '0.0.0.0' : '127.0.0.1');
+  await replaceEnvFile(envPath, bind, 0o600);
+  info(on
+    ? `Listening on this computer's network addresses from the next start: others on the network reach ${c.bold}${origins.app}${c.reset}. Qdrant and Ollama stay on loopback.`
+    : `Back on loopback from the next start: ${c.bold}${origins.app}${c.reset}.`);
+  if (!tunnel) info('The app\'s address changed: MCP and CLI clients sign in again, and paired devices pair again.');
+  return 0;
+}
+
+/** This computer's first non-internal IPv4 address (the one a LAN origin names), or null. */
+function lanAddress(): string | null {
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const entry of addresses ?? []) if (entry.family === 'IPv4' && !entry.internal) return entry.address;
+  }
+  return null;
+}
+
+/** `--ollama <mode>` on a home this app runs: the choice rewritten (`.env`, the companions' file, the platform seed). */
+async function switchNativeOllama(home: string, packageDir: string, mode: OllamaMode): Promise<number> {
+  const configDir = nativeConfigDir(home);
+  const envPath = join(configDir, '.env');
+  const text = readFileSync(envPath, 'utf-8');
+  const current = parseEnvContentShared(text);
+  if (mode === 'docker' && !dockerAnswersHere()) throw new CliExit(1, 'Docker (with Compose) does not answer on this computer: choose binary, existing or none');
+  const qdrantDocker = current.QDRANT_MODE?.trim() === 'docker';
+  const project = current.NEURALIS_COMPOSE_PROJECT?.trim() || desktopComposeProject(home);
+  if (qdrantDocker || mode === 'docker') {
+    const state = qdrantDocker ? await readQdrantState(qdrantStatePath(home)) : null;
+    if (qdrantDocker && !state) throw new CliExit(1, `${qdrantStatePath(home)} is missing: the Qdrant line of the compose file cannot be written`);
+    await writeDesktopCompanionCompose(configDir, {
+      project,
+      qdrant: qdrantDocker ? { image: qdrantImageRef(state!.version), port: qdrantHostPort(current) } : null,
+      ollama: mode === 'docker' ? { port: OLLAMA_OWN_PORT } : null,
+    }, { date: new Date().toISOString().split('T')[0]!, version: await readNeuralisVersion(packageDir) });
+  }
+  const kept = text.split('\n').filter((line) => {
+    const key = /^([A-Z][A-Z0-9_]*)=/.exec(line)?.[1];
+    return !(key && (OLLAMA_ENV_KEYS as readonly string[]).includes(key)) && !line.startsWith('# Local models (Ollama)') && !line.startsWith('# through the platform setting `ollamaUrl`');
+  });
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
+  const extra = !qdrantDocker && mode === 'docker' && !current.NEURALIS_COMPOSE_PROJECT ? [`NEURALIS_COMPOSE_PROJECT=${project}`] : [];
+  await replaceEnvFile(envPath, `${[...kept, '', ...ollamaEnvLines(mode, OLLAMA_OWN_PORT), ...extra].join('\n')}\n`, 0o600);
+  const change = ollamaPlatformChange(mode, await readPlatformConfig(home), `http://127.0.0.1:${OLLAMA_DEFAULT_PORT}`, unaskedEmbedding());
+  await writeMergedPlatformConfig(home, change.seed, change.replace);
+  info(`Local models: ${c.bold}${mode}${c.reset}${mode === 'none' ? '' : ` — ${ollamaCostLine(mode)}`} Applies at the next start.`);
+  return 0;
+}
+
+/** `tunnel on` exactly as the verb runs it (`setupTunnelArgs` validated it before setup wrote anything). */
+async function runTunnelOn(args: string[], ctx: CliContext): Promise<number> {
+  const { run: tunnel } = await import('./tunnel.mts');
+  return tunnel(args, ctx);
+}
+
+/** Docker with Compose answers here (the companions' file needs it). */
+function dockerAnswersHere(): boolean {
+  const docker = detectDocker();
+  return docker.available && docker.compose;
+}
+
+/** One line naming where this host's vectors live. */
+function describeQdrant(qdrant: NativeQdrant): string {
+  switch (qdrant.mode) {
+    case 'docker': return `Qdrant in Docker on 127.0.0.1:${qdrant.port} (\`neuralis up\` starts it)`;
+    case 'external': return qdrant.composeDir ? `the Docker install's Qdrant (${qdrant.url}, from ${qdrant.composeDir})` : `the Qdrant at ${qdrant.url}`;
+    case 'binary': return `its own Qdrant on 127.0.0.1:${qdrant.ports.http}`;
+    case 'skip': return 'vectors in memory';
+  }
+}
+
+/** `--refresh-qdrant`: the Qdrant lines of this host's `.env` written again — from the recorded Docker install, or this app's own binary. */
+async function refreshNativeQdrant(home: string, packageDir: string, flags: NativeFlags): Promise<number> {
+  const envPath = join(nativeConfigDir(home), '.env');
+  const text = readFileSync(envPath, 'utf-8');
+  const current = parseEnvContentShared(text);
+  if (current.QDRANT_MODE?.trim() === 'docker') {
+    throw new CliExit(1, `${home} runs this app's own Qdrant in Docker (docker-compose.yml beside ${envPath}); there is no other install's Qdrant to read again`);
+  }
+  if (flags.qdrant === 'docker') throw new CliExit(1, '--refresh-qdrant reads the Docker install\'s Qdrant by default; --qdrant docker gives a NEW data home its own');
+  let qdrant: NativeQdrant;
+  if (flags.qdrant === 'binary') {
+    const binary = bundledQdrantOf(packageDir);
+    if (!binary) throw new CliExit(1, 'this app has no Qdrant binary for this platform');
+    qdrant = current.QDRANT_MODE?.trim() === 'binary' && current.QDRANT_API_KEY?.trim()
+      ? { mode: 'binary', apiKey: current.QDRANT_API_KEY.trim(), ports: qdrantBinaryPorts(current) }
+      : await binaryQdrant(home, binary, (await nativePorts('binary', recordedDockerQdrantPort(home))).qdrantPorts);
+    if (flags.copyVectors && qdrant.mode === 'binary') await copyVectors(home, binary, qdrant);
+  } else {
+    const recorded = recordedDockerQdrant(home);
+    if (!recorded.ok) throw new CliExit(1, recorded.reason);
+    qdrant = recorded.qdrant;
+  }
+  await replaceEnvFile(envPath, replaceNativeQdrantLines(text, nativeQdrantLines(qdrant)), 0o600);
+  info(`Wrote the Qdrant lines of ${envPath}: ${describeQdrant(qdrant)}. Restart the app for it to take effect.`);
+  return 0;
+}
+
+/**
+ * The desktop app's setup, asking nothing (`--yes`); `.env` lands in
+ * `<home>/app/config` (never the read-only bundle).
+ *
+ *   setup --native --yes --owner-email <e> [--project <name>] [--qdrant docker|binary] [--desktop|--no-desktop]
+ *       a NEW data home, the password on stdin. Qdrant runs in Docker by default
+ *       when Docker answers — a compose file of its own beside this `.env`, a
+ *       named volume per home — else from the bundle's binary; the virtual
+ *       desktop (machine-core) is on with Docker and off without (the
+ *       `disabledBuiltinPackages` platform setting).
+ *   setup --native --yes [--qdrant binary [--copy-vectors | --estimate-copy]]
+ *       ADOPT a home another install (Docker) set up: this host's `.env` and the
+ *       install record. Its vectors are that install's Qdrant (`recordedDockerQdrant`
+ *       — the one thing read outside the home: the install the home records, its
+ *       `.env`); `--qdrant binary` gives this app its own store instead, and
+ *       `--copy-vectors` copies the Docker vectors into it (cold, counted).
+ *   setup --native --yes --refresh-qdrant [--qdrant binary [--copy-vectors]]
+ *       a home this app already runs: only the Qdrant lines of its `.env` again.
+ *
+ * Users, projects, credentials, settings and the session secret of an adopted
+ * home are the home's already and are not touched. Refused by name: owner flags
+ * on a set-up home, no owner flags on an empty one, a home whose session secret
+ * is still in an older Docker install's `.env`, a home this app already runs
+ * (`neuralis up` starts it), and every Qdrant the mode table cannot use.
+ */
+async function runNativeSetup(cliArgs: string[], ctx: CliContext): Promise<number> {
+  const flagValue = (flag: string): string | null => {
+    const idx = cliArgs.indexOf(flag);
+    return idx >= 0 ? (cliArgs[idx + 1] ?? null) : null;
+  };
+  if (!cliArgs.includes('--yes')) throw new CliExit(1, '--native runs without questions: add --yes (a new data home also needs --owner-email <email> and the password on stdin)');
+  if (installKindOf(ctx.packageDir) !== 'native') throw new CliExit(1, '--native sets up the desktop app\'s own host bundle, and this is not one');
+  const flags = parseNativeFlags(cliArgs, flagValue);
+  const tunnelArgs = setupTunnelArgs(cliArgs);
+  const home = resolveNeuralisHome(ctx.env as NodeJS.ProcessEnv).home;
+  const ownerFlags = cliArgs.includes('--owner-email') || cliArgs.includes('--project');
+  const binary = bundledQdrantOf(ctx.packageDir);
+  if (await detectExistingSetup(home)) {
+    if (existsSync(join(nativeConfigDir(home), '.env'))) {
+      if (flags.lan !== null) return switchNativeLan(home, flags.lan);
+      if (flags.ollama !== null) return switchNativeOllama(home, ctx.packageDir, flags.ollama);
+      if (flags.refresh) return refreshNativeQdrant(home, ctx.packageDir, flags);
+      throw new CliExit(1, `${home} is already set up — start it with \`neuralis up\` (\`--refresh-qdrant\` reads the Docker install's Qdrant again; \`--lan on|off\` and \`--ollama <mode>\` change those choices)`);
+    }
+    if (flags.lan !== null) throw new CliExit(1, `${home} is not set up for this app yet: --lan changes a home this app runs`);
+    if (flags.refresh) throw new CliExit(1, `${home} is not set up for this app yet — adopt it with \`neuralis setup --native --yes\``);
+    if (ownerFlags) throw new CliExit(1, `${home} is already set up — adopt it with \`neuralis setup --native --yes\` (no owner flags)`);
+    if (flags.desktop !== null) throw new CliExit(1, `--desktop and --no-desktop choose a NEW data home's packages; ${home} keeps its own (Admin → Config, disabledBuiltinPackages)`);
+    if (flags.qdrant === 'docker') throw new CliExit(1, 'an adopted home uses its Docker install\'s Qdrant by default; --qdrant binary gives this app its own');
+    if (readSessionSecretFile(join(home, 'app')) === null) throw new CliExit(1, `${home} has no session secret file yet: ${UPGRADE_DOCKER_FIRST}`);
+    if (flags.estimateCopy) return estimateCopy(home, ctx);
+    let qdrant: NativeQdrant;
+    let ports: PortTriple;
+    if (flags.qdrant === 'binary') {
+      if (!binary) throw new CliExit(1, 'this app has no Qdrant binary for this platform: keep the Docker install\'s Qdrant (no --qdrant)');
+      const settled = await nativePorts('binary', recordedDockerQdrantPort(home));
+      ports = settled.ports;
+      qdrant = await binaryQdrant(home, binary, settled.qdrantPorts);
+      if (flags.copyVectors && qdrant.mode === 'binary') await copyVectors(home, binary, qdrant);
+    } else {
+      const recorded = recordedDockerQdrant(home);
+      if (!recorded.ok) throw new CliExit(1, recorded.reason);
+      qdrant = recorded.qdrant;
+      ports = (await nativePorts('none')).ports;
+    }
+    await writeNativeConfig(home, ctx.packageDir, ports, qdrant, null);
+    info(`Adopted ${c.bold}${home}${c.reset} for this app: app on http://127.0.0.1:${ports.app}, ${describeQdrant(qdrant)}. Users, projects and settings are unchanged.`);
+    return 0;
+  }
+  if (flags.refresh || flags.copyVectors || flags.estimateCopy) throw new CliExit(1, `${home} is a new data home: --refresh-qdrant, --copy-vectors and --estimate-copy act on a home another install set up`);
+  if (tunnelArgs && flags.lan !== null) throw new CliExit(1, '--lan changes a home this app already runs; set the home up first');
+  const email = flagValue('--owner-email')?.trim().toLowerCase() ?? '';
+  if (!email.includes('@')) throw new CliExit(1, '--owner-email <email> is required: this data home has no owner yet');
+  const password = await readSecretLine(ctx.stdin);
+  if (password.length < 8) throw new CliExit(1, 'The password (on stdin) must be at least 8 characters');
+  const project = resolveSetupProjectId({ existingSetup: false, projects: [], answer: flagValue('--project')?.trim() || 'My Workspace' });
+  if (!project.ok) throw new CliExit(1, project.reason);
+
+  // Docker is asked only when a default depends on it.
+  const docker = flags.qdrant === 'binary' && flags.desktop !== null && flags.ollama !== 'docker' ? null : detectDocker();
+  const dockerAnswers = docker !== null && docker.available && docker.compose;
+  const mode = flags.qdrant ?? (dockerAnswers ? 'docker' : 'binary');
+  if (mode === 'docker' && !dockerAnswers) {
+    throw new CliExit(1, 'Docker (with Compose) does not answer on this computer: start it, or keep the vectors in this app\'s own Qdrant (--qdrant binary)');
+  }
+  const desktop = flags.desktop ?? dockerAnswers;
+  const ollama = flags.ollama ?? 'none';
+  if (ollama === 'docker' && !dockerAnswers) throw new CliExit(1, 'Docker (with Compose) does not answer on this computer: --ollama binary downloads Ollama for this app instead');
+  const settled = await nativePorts(mode === 'docker' ? 'docker' : binary ? 'binary' : 'none');
+  const { ports } = settled;
+  let qdrant: NativeQdrant;
+  let qdrantImage: string | null = null;
+  if (mode === 'docker') {
+    const composeProject = desktopComposeProject(home);
+    const version = await resolveInstallQdrantVersion(dockerInstallProbe({ composeProject, composeFilePath: join(nativeConfigDir(home), 'docker-compose.yml'), runningVersion: null }), home);
+    qdrantImage = qdrantImageRef(version);
+    qdrant = { mode: 'docker', apiKey: randomBytes(32).toString('hex'), port: settled.qdrantPorts.http, project: composeProject };
+  } else {
+    qdrant = binary ? await binaryQdrant(home, binary, settled.qdrantPorts) : { mode: 'skip' };
+  }
+  const vectors = qdrant.mode !== 'skip';
+  const recommended = recommendedEmbeddingModel();
+  const config: SetupConfig = {
+    owner: { email, name: email.split('@')[0] || 'owner', passwordHash: await bcrypt.hash(password, 12) },
+    ownerUserId: randomUUID(),
+    llmKeys: {},
+    qdrant: {
+      url: vectors ? `http://127.0.0.1:${settled.qdrantPorts.http}` : '',
+      mode: qdrant.mode === 'external' ? 'external' : qdrant.mode,
+      apiKey: qdrant.mode === 'docker' || qdrant.mode === 'binary' ? qdrant.apiKey : null,
+      port: settled.qdrantPorts.http,
+      grpcPort: settled.qdrantPorts.grpc,
+    },
+    // The unasked answer of the wizard: the recommended model as the target, off until its key is added in the app.
+    vector: vectors && recommended ? { enabled: false, modelId: recommended.id, dimension: recommended.defaultDimension } : { enabled: false },
+    machine: { variant: DEFAULT_MACHINE_VARIANT, skipPrefetch: true, pullOnHost: false, enabled: desktop },
+    neuralisHome: home,
+    projectId: project.projectId,
+    projectName: project.projectName,
+    deploymentMode: 'native',
+    codexLoopback: false,
+    trustedProxies: '',
+    buildNpmrc: null,
+    imageTag: null,
+    uid: process.getuid?.() ?? 1000,
+    gid: process.getgid?.() ?? 1000,
+    dockerGid: null,
+    localLLMs: [],
+    endpointKeys: {},
+    publicOrigin: `http://127.0.0.1:${ports.app}`,
+    tunnelDomain: null,
+    tunnelRestore: null,
+    origins: singleHostOrigins(`http://127.0.0.1:${ports.app}`, ports),
+    ports,
+    composeProject: '',
+  };
+  await createDirectorySkeleton(home, config.projectId);
+  // The secret BEFORE the owner: a crash between the two must never read as a home an earlier release set up (`secret_moved`).
+  await writeSessionSecretFile(join(home, 'app'), mintSessionSecret());
+  const userId = await writeOwnerRecord(config);
+  await stampFreshHomeDataFormats(home);
+  await writeProjectRecord(config, userId);
+  await writeSourceConfigsPreserving(home, config.projectId, userId);
+  await generateKeyFiles(home);
+  await writeMergedPlatformConfig(home, {
+    ...(config.vector.modelId ? { embeddingModelId: config.vector.modelId } : {}),
+    ...(config.vector.dimension !== undefined ? { embeddingDimension: config.vector.dimension } : {}),
+    ...(config.vector.enabled ? {} : { embeddingEnabled: false }),
+    ...desktopSeed(desktop),
+    ...NATIVE_HOST_PLANE_SEED,
+    ...(vectors ? ollamaPlatformChange(ollama, {}, `http://127.0.0.1:${OLLAMA_DEFAULT_PORT}`, unaskedEmbedding()).seed : {}),
+  });
+  await writeNativeConfig(home, ctx.packageDir, ports, qdrant, qdrantImage, ollama);
+  info(`Set up ${c.bold}${home}${c.reset}: owner ${email}, project ${config.projectName}, app on ${config.publicOrigin}, ${describeQdrant(qdrant)}, virtual desktop ${desktop ? 'on' : 'off'}, local models ${ollama}.`);
+  if (ollama !== 'none') info(`Local models: ${ollamaCostLine(ollama)} \`neuralis up\` fetches what is missing in the background; indexing waits for the model.`);
+  if (tunnelArgs) return runTunnelOn(tunnelArgs, ctx);
+  info(`To reach it from other devices: \`${spell('tunnel')} on DOMAIN\` (a Cloudflare tunnel; \`--tunnel DOMAIN\` does it during setup), or \`${spell('setup')} --native --yes --lan on\` (this network only).`);
+  return 0;
+}
+
 export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
   if (cliArgs.includes('--help') || cliArgs.includes('-h')) {
     printUsage(ctx);
     return 0;
   }
+  if (cliArgs.includes('--native')) return runNativeSetup(cliArgs, ctx);
   // The full question set; without it every question but the owner, the address and a busy
   // port takes its default answer, and the summary names where each one is changed in the app.
   const advanced = cliArgs.includes('--advanced');
@@ -2552,6 +3137,10 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     return idx >= 0 ? (cliArgs[idx + 1] ?? null) : null;
   };
   const outputOverride = flagValue('--output');
+  const ollamaFlag = parseOllamaFlag(cliArgs, flagValue, ['existing', 'docker', 'none']);
+  const tunnelArgs = setupTunnelArgs(cliArgs);
+  // `tunnel on` acts on the install folder's `.env`: a run writing elsewhere could not reach it.
+  if (tunnelArgs && outputOverride) throw new CliExit(1, '--tunnel acts on this install folder: run it without --output, or `neuralis tunnel on DOMAIN` in the folder afterwards');
 
   // Host identity overrides for the generated compose (user/group and the
   // docker supplementary group). Detection reads the running process and the
@@ -2604,7 +3193,8 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // the existing value: a maintenance re-run must not silently re-decide the
     // origin, the ports, the session secret or the compose project name.
     const configDir = resolveConfigDir(env, outputOverride);
-    const carried = carryOverEnv(await readEnvFile(configDir));
+    const existingEnv = await readEnvFile(configDir);
+    const carried = carryOverEnv(existingEnv);
 
     // 2b-2. Compose project name — preserved on an existing install, because it
     // prefixes the named volumes and every container name. Whatever this name
@@ -2662,7 +3252,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // configureLocalLLMs). An npm install folder and the image write a folder
     // that runs the published image, so they are Docker only; native runs from
     // a source clone (or the host package itself). The early no-Docker answer already chose native.
-    const deploymentMode = layout === 'folder' || layout === 'container' ? 'docker' : noDocker && !advanced ? 'native' : await askDeploymentMode(env);
+    const deploymentMode = layout === 'folder' || insideImage(layout) ? 'docker' : noDocker && !advanced ? 'native' : await askDeploymentMode(env);
 
     // 4. LLM keys (excl. OpenAI) + OpenAI via API-key / ChatGPT OAuth / both.
     // Unasked: no key (the default answer of every key prompt) — Admin → Credentials holds them.
@@ -2682,14 +3272,14 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // any reachable one. Runs BEFORE chooseVectorConfig so the embedding
     // step can offer "use the same Ollama for embeddings?" without needing
     // a second copy of the URL.
-    const localLlmChoice = await configureLocalLLMs(env, deploymentMode, advanced);
+    const localLlmChoice = await configureLocalLLMs(env, deploymentMode, advanced, ollamaFlag);
     const localLLMs = localLlmChoice.entries;
 
     // 6b. Vector (embeddings) — interactive, registry-driven.
-    const vector = await chooseVectorConfig(env, llmKeys, qdrant.mode, deploymentMode, localLLMs, advanced);
+    const vector = await chooseVectorConfig(env, llmKeys, qdrant.mode, deploymentMode, localLLMs, advanced, ollamaFlag);
 
     // 6c. Machine-core (virtual desktop) — bundled desktop + background image prefetch.
-    const machine = await chooseMachineVariant(env, layout, advanced);
+    const machine = await chooseMachineVariant(env, layout, advanced, cliArgs.includes('--no-desktop'));
 
     // 7. Project — already settled above on an existing install; a fresh one
     // mints its id from the name through the app's own derivation.
@@ -2703,21 +3293,26 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     info(`Project: ${c.bold}${projectName}${c.reset} ${c.dim}(id: ${projectId})${c.reset}`);
 
     // 7a. Host ports — every busy one named with its holder and a free one
-    // offered, before anything is written. Docker shape only: the compose file
-    // publishes them (a native server names its own clash when it starts).
+    // offered, before anything is written (Docker: the compose file publishes
+    // them). A native checkout's FIRST run takes the defaults or the next free
+    // ones (`neuralis start` binds what .env names); a re-run keeps the recorded
+    // ports, which its own running app may be holding.
     const settled = deploymentMode === 'docker'
       ? await settlePorts(portClaims({ ports: carried.ports, qdrantPort: qdrant.mode === 'docker' ? qdrant.port : null, codex: true }), ports, composeProject.name)
-      : { ports: carried.ports, qdrantPort: null, codexHolder: undefined };
+      : { ports: existingEnv.NEURALIS_APP_PORT ? carried.ports : (await nativePorts('none')).ports, qdrantPort: null, codexHolder: undefined };
     if (settled.qdrantPort !== null) Object.assign(qdrant, { port: settled.qdrantPort, url: `http://localhost:${settled.qdrantPort}` });
 
     // 7b. The public origin — the one value the wizard cannot detect. It is
-    // what NEXTAUTH_URL, APP_URL and the compose environment block all become,
+    // what NEXTAUTH_URL and APP_URL become (the compose file reads them from .env),
     // and a stale localhost value breaks the login round-trip for every user
     // who reaches the deployment by any other name.
     heading('Public origin');
     step('The origin users will actually reach this deployment on.');
     step(`${c.dim}Leave as-is for a single-machine install; use the LAN IP or domain otherwise.${c.reset}`);
-    let publicOrigin: string | null = null;
+    // A tunnel this install runs (`neuralis tunnel on`) keeps its origins: a re-run never asks them away.
+    const tunnelDomain = carried.tunnelDomain;
+    let publicOrigin: string | null = tunnelDomain ? tunnelOrigins(tunnelDomain).app : null;
+    if (tunnelDomain) step(`${c.dim}Kept: the tunnel on ${tunnelDomain} (\`neuralis tunnel off\` puts the origins back on this machine).${c.reset}`);
     while (publicOrigin === null) {
       const answered = await ask('Public origin', originDefault(carried.publicOrigin, carried.ports.app, settled.ports.app));
       publicOrigin = normalizePublicOrigin(answered);
@@ -2759,7 +3354,8 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     // 7b-3. Trusted reverse proxies — topology, never a tunable. The default is
     // the carried value; a fresh install trusts none (only the socket peer). A
     // loopback origin has no proxy in front of it: asked only for another origin.
-    let trustedProxies: string | null = advanced || !isLoopbackPublicOrigin(publicOrigin) ? null : normalizeTrustedProxies(carried.trustedProxies);
+    // A tunnel's connector dials loopback: no proxy address to declare (its header rule is the host's own).
+    let trustedProxies: string | null = advanced || (!isLoopbackPublicOrigin(publicOrigin) && !tunnelDomain) ? null : normalizeTrustedProxies(carried.trustedProxies);
     if (trustedProxies === null) {
       heading('Reverse proxy');
       step('Only when a reverse proxy fronts the app: its address (or CIDR), so logins and webhooks are limited per real client.');
@@ -2796,9 +3392,11 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       neuralisHome: env.neuralisHome,
       projectId,
       projectName,
-      // Preserve-if-exists: regenerating the session secret logs every user out.
-      nextAuthSecret: carried.nextAuthSecret ?? randomBytes(32).toString('base64'),
       publicOrigin,
+      tunnelDomain,
+      tunnelRestore: tunnelDomain ? carried.tunnelRestore : null,
+      // A tunnel's three, else the answer's derivation with the MCP and sandbox origins the operator declared kept.
+      origins: tunnelDomain ? tunnelOrigins(tunnelDomain) : carriedOrigins(existingEnv, singleHostOrigins(publicOrigin, settled.ports)),
       ports: settled.ports,
       composeProject: composeProject.name,
       deploymentMode,
@@ -2818,12 +3416,16 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     heading('Creating data directories');
     await createDirectorySkeleton(env.neuralisHome, projectId);
     info(`Data directory: ${c.bold}${env.neuralisHome}${c.reset}`);
+    // The session secret BEFORE the owner record: a crash between the two must never
+    // read as a home an earlier release set up (the boot's `secret_moved`).
+    await ensureSessionSecret(env.neuralisHome, carried.nextAuthSecret);
 
     let sourceConfigUserId = config.ownerUserId;
 
     // 9. Write records
     if (!env.existingSetup) {
       const userId = await writeOwnerRecord(config);
+      await stampFreshHomeDataFormats(config.neuralisHome);
       info(`Owner account created: ${c.bold}${config.owner.email}${c.reset}`);
       await writeProjectRecord(config, userId);
       info(`Project created: ${c.bold}${config.projectName}${c.reset}`);
@@ -2855,11 +3457,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       config.ownerUserId = sourceConfigUserId;
     }
 
-    if (carried.nextAuthSecret) {
-      step('Session secret preserved — nobody gets logged out. (Delete .env to rotate it.)');
-    }
-
-    // 10. Generate credential key files
+    // 10. Generate credential key files (the session secret is written in step 8)
     heading('Security');
     const { masterKey, salt } = await generateKeyFiles(env.neuralisHome);
     info(`Credential master key: ${c.dim}generated (credential-master.key)${c.reset}`);
@@ -2880,6 +3478,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       ...(config.vector.enabled ? {} : { embeddingEnabled: false }),
       machineDesktopVariant: config.machine.variant.key,
       machineImage: config.machine.variant.derivativeImage,
+      ...desktopSeed(config.machine.enabled),
     };
     if (config.vector.ollamaUrl) {
       platformSeed.ollamaUrl = config.vector.ollamaUrl;
@@ -2906,6 +3505,14 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
     await generateComposeFile(composeInputFromSetup(config, env, qdrantImage), configDir, {
       askOverwrite: true, version: await readNeuralisVersion(ctx.packageDir), installDir: ctx.installDir, packageDir: ctx.packageDir, dataHome: env.neuralisHome,
     });
+    // 13c. The data home's record of this folder: `neuralis` finds it from anywhere.
+    await recordInstall(env.neuralisHome, configDir);
+
+    // 13d. `--tunnel DOMAIN`: the ONE `tunnel on` path, now that `.env` and the compose file exist.
+    if (tunnelArgs) {
+      const code = await runTunnelOn(tunnelArgs, ctx);
+      if (code !== 0) return code;
+    }
 
     // 14. Summary, then the start offered where this process can start the stack.
     printSummary(config, env, layout, advanced);

@@ -6,10 +6,10 @@ import type { ProjectRecord } from '@/api/projects';
 import type { WorkspaceAgentRecord } from '@neuralis/package-system/contracts';
 import { listProjects as apiListProjects } from '@/api/projects';
 import { listAgents as apiListAgents } from '@/api/agents';
-import { setProjectIdProvider } from '@/api/http';
+import { ApiError, setProjectIdProvider } from '@/api/http';
 import { emitClientStateReset } from './clientResetBus';
 import type { WorkspaceOpenTarget } from '@neuralis/package-system/contracts';
-import type { AgentRuntime, CanvasView, DockPrefs, EntityState, FreeformGeometry, GeometrySlot, GroupScopeState, TiledLayoutState, ProjectWorkspaceState, RuntimeLocator, StageMode, TransparencyLevel, WidgetInstance, WorkspaceGroup, WorkspacePresentation, WorkspaceSession } from './types';
+import type { AgentRuntime, CanvasView, DockPrefs, DockPrefsId, EntityState, FreeformGeometry, GeometrySlot, GroupScopeState, TiledLayoutState, ProjectWorkspaceState, RuntimeLocator, StageMode, TransparencyLevel, WidgetInstance, WorkspaceGroup, WorkspacePresentation, WorkspaceSession } from './types';
 import { getWidgetDefinition, isRepeatableWidget, listDefaultOpenWidgets } from '../widgets/registry';
 import type { DockId } from '../shell/dockPlacement';
 import { normalizeDockPrefs } from '../shell/dockOrder';
@@ -199,6 +199,11 @@ export const SAVED_STAGE_MODES = ['tiled', 'canvas', 'grid'] as const satisfies 
 /** One action-time and render-time stage resolver; responsiveness never rewrites saved geometry. */
 export function effectiveStageMode(s: WorkspaceStore, runtimeKey: string | null): StageMode {
   if (!runtimeKey) return 'tiled';
+  if (s.dockEditing.phone) return 'phone';
+  if (s.dockEditing.primary || s.dockEditing.secondary) {
+    const manual = s.manualModeByRuntimeKey[runtimeKey];
+    return manual && manual !== 'phone' ? manual : s.runtimeByAgentId[runtimeKey]?.layout.stageMode ?? 'tiled';
+  }
   return s.manualModeByRuntimeKey[runtimeKey]
     ?? (s.autoPhoneEnabled && s.phoneAutoEligible ? 'phone' : s.runtimeByAgentId[runtimeKey]?.layout.stageMode ?? 'tiled');
 }
@@ -244,7 +249,7 @@ export type WorkspaceStore = {
   setPresentation: (presentation: WorkspacePresentation) => void;
   selectGroup: (groupId: string) => void;
   /** Layout → Edit docks Save: the whole Group list of the active project, once. */
-  saveGroups: (params: { groups: WorkspaceGroup[]; selectedGroupId: string | null; dock?: { dockId: DockId; prefs: DockPrefs } }) => void;
+  saveGroups: (params: { groups: WorkspaceGroup[]; selectedGroupId: string | null; dock?: { dockId: DockPrefsId; prefs: DockPrefs } }) => void;
   /**
    * Runtimes kept MOUNTED (hidden) after a presentation/Group switch, so going
    * back re-shows the same live windows. Transient; cleared on a project or
@@ -274,12 +279,14 @@ export type WorkspaceStore = {
   /**
    * Layout → Edit docks: which dock is in edit mode. TRANSIENT — outside
    * `partialize`, so a reload never reopens the editor. While editing, the
-   * draft lives in the `Dock` component; the store is written once, on Save.
+   * draft lives in the shared panel's `DockEditor`; the store is written once, on Save.
    */
-  dockEditing: Record<DockId, boolean>;
-  setDockEditing: (dockId: DockId | 'both', editing: boolean) => void;
-  /** Store one dock's arrangement in the ACTIVE project (`projectStateById[p].dock`). */
-  setDockPrefs: (params: { dockId: DockId; prefs: DockPrefs }) => void;
+  dockEditing: Record<DockId, boolean> & { phone?: boolean };
+  /** Browser-local phone arrangements, keyed by groupScopeKey(live user, project). */
+  phoneDockPrefsByScope?: Record<string, DockPrefs>;
+  setDockEditing: (dockId: DockPrefsId | 'both', editing: boolean) => void;
+  /** Save one desktop arrangement in the active project, or the live user/project's phone arrangement. */
+  setDockPrefs: (params: { dockId: DockPrefsId; prefs: DockPrefs }) => void;
 
   /** Composite-keyed like `runtimeByAgentId` (`agentRuntimeKey`). Transient. */
   fileMarksByAgentId: Record<string, Record<string, { kind: 'new' | 'modified'; ts: number }>>;
@@ -299,6 +306,13 @@ export type WorkspaceStore = {
    * `bootstrap()` only when no valid active project is left.
    */
   refreshProjects: () => Promise<void>;
+  /**
+   * Load again what the host did not answer (`unavailable`): the project list
+   * through `bootstrap()`, an agent list alone through `selectProject` (the
+   * narrow agent re-read that keeps the layout). A no-op after a success, a
+   * refusal or while a load runs. The workspace's hub-connect arm calls it.
+   */
+  reloadUnavailable: () => Promise<void>;
 
   selectProject: (projectId: string) => Promise<void>;
   selectAgent: (agentId: string) => void;
@@ -323,7 +337,7 @@ export type WorkspaceStore = {
 };
 
 /** The persisted slice of the store (partialize / storage / migrate share it). */
-type PersistedWorkspaceState = Pick<WorkspaceStore, 'runtimeByAgentId' | 'session' | 'projectStateById' | 'groupStateByScope'>;
+type PersistedWorkspaceState = Pick<WorkspaceStore, 'runtimeByAgentId' | 'session' | 'projectStateById' | 'groupStateByScope' | 'phoneDockPrefsByScope'>;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 
@@ -361,7 +375,8 @@ export function parsePersistedWorkspace(raw: unknown): PersistedWorkspaceState {
     const scope = parseGroupScope(value);
     if (scope) groupStateByScope[key] = scope;
   }
-  return { runtimeByAgentId, session, projectStateById, groupStateByScope };
+  const phoneDockPrefsByScope = Object.fromEntries(Object.entries(isRecord(p.phoneDockPrefsByScope) ? p.phoneDockPrefsByScope : {}).map(([key, value]) => [key, normalizeDockPrefs(value)]));
+  return { runtimeByAgentId, session, projectStateById, groupStateByScope, phoneDockPrefsByScope };
 }
 
 function ensureGroupRuntime(runtimeByAgentId: Record<string, AgentRuntime>, runtimeKey: string): Record<string, AgentRuntime> {
@@ -401,7 +416,7 @@ function retainKey(retained: string[], key: string | null, activeKey: string | n
 function ensureRuntime(runtimeByAgentId: Record<string, AgentRuntime>, runtimeKey: string): Record<string, AgentRuntime> {
   if (runtimeByAgentId[runtimeKey]) return runtimeByAgentId;
   // Phase 5 v6 step 5 — manifest-driven default-open widgets. Each
-  // first-party package declares `defaultOpen: true` on the widget surface
+  // native package declares `defaultOpen: true` on the widget surface
   // it wants auto-mounted per agent (e.g. agent-core's `chat`). The host
   // no longer has hardcoded knowledge of which type owns the slot.
   const defaults = listDefaultOpenWidgets();
@@ -466,6 +481,11 @@ export function stripWidgetNavs(
     }
   }
   return out ?? runtimeByAgentId;
+}
+
+/** How a failed list load reads: `unavailable` when the host did not answer it (network, 5xx) — re-run on the next hub connect — else `error`. */
+function loadFailureStatus(error: unknown): 'unavailable' | 'error' {
+  return error instanceof ApiError && error.status < 500 ? 'error' : 'unavailable';
 }
 
 /**
@@ -555,6 +575,7 @@ function partializeWorkspace(state: WorkspaceStore): PersistedWorkspaceState {
     session: { ...state.session, workspaceView: 'default' as const },
     projectStateById: state.projectStateById,
     groupStateByScope: state.groupStateByScope,
+    phoneDockPrefsByScope: state.phoneDockPrefsByScope,
   };
 }
 
@@ -654,6 +675,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
   autoPhoneEnabled: true,
   projectStateById: {},
   groupStateByScope: {},
+  phoneDockPrefsByScope: {},
   liveUserId: null,
   layoutEpoch: 0,
   fileMarksByAgentId: {},
@@ -667,13 +689,14 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     if (get().liveUserId === userId) return;
     // Another user's Group outlets must never stay mounted: the retained set
     // is dropped, so StageHost unmounts them before the new user paints.
-    set({ liveUserId: userId, retainedRuntimeKeys: [], canvasReveal: null });
+    set({ liveUserId: userId, retainedRuntimeKeys: [], canvasReveal: null, dockEditing: { primary: false, secondary: false, phone: false } });
     const key = activeRuntimeKeyOf(get());
     if (key && !get().runtimeByAgentId[key]) set((s) => ({ runtimeByAgentId: ensureRuntimeFor(s.runtimeByAgentId, key) }));
   },
 
   setPresentation(presentation) {
     const s = get();
+    if (s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone) return;
     const { projectId } = s.session;
     if (!s.liveUserId || !projectId) return;
     const scopeKey = groupScopeKey(s.liveUserId, projectId);
@@ -694,6 +717,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
 
   selectGroup(groupId) {
     const s = get();
+    if (s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone) return;
     const { projectId } = s.session;
     if (!s.liveUserId || !projectId) return;
     const scopeKey = groupScopeKey(s.liveUserId, projectId);
@@ -719,12 +743,13 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       for (const g of removed) delete runtimeByAgentId[runtimeKeyOf({ kind: 'group', userId: st.liveUserId as string, projectId, groupId: g.id })];
       // The agent dock's arrangement saved by the same Save lands in the same set().
       const entry = st.projectStateById[projectId] ?? { lastAgentId: st.session.agentId };
-      const projectStateById = dock
+      const projectStateById = dock && dock.dockId !== 'phone'
         ? { ...st.projectStateById, [projectId]: { ...entry, dock: { ...entry.dock, [dock.dockId]: normalizeDockPrefs(dock.prefs) } } }
         : st.projectStateById;
       return {
         runtimeByAgentId,
         projectStateById,
+        ...(dock?.dockId === 'phone' ? { phoneDockPrefsByScope: { ...st.phoneDockPrefsByScope, [scopeKey]: normalizeDockPrefs(dock.prefs) } } : {}),
         groupStateByScope: { ...st.groupStateByScope, [scopeKey]: { ...clean, presentation: clean.groups.length ? clean.presentation : 'agent' } },
         dockEditing: { ...st.dockEditing, [dock?.dockId ?? 'secondary']: false },
       };
@@ -747,15 +772,19 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
   setDockEditing(dockId, editing) {
     set((s) => ({
       dockEditing: dockId === 'both'
-        ? { primary: editing, secondary: editing }
+        ? { ...s.dockEditing, primary: editing, secondary: editing }
         : { ...s.dockEditing, [dockId]: editing },
     }));
   },
 
   setDockPrefs({ dockId, prefs }) {
-    const projectId = get().session.projectId;
-    if (!projectId) return;
+    const { session: { projectId }, liveUserId } = get();
+    if (!projectId || (dockId === 'phone' && !liveUserId)) return;
     const clean = normalizeDockPrefs(prefs);
+    if (dockId === 'phone' && liveUserId) {
+      set((s) => ({ phoneDockPrefsByScope: { ...s.phoneDockPrefsByScope, [groupScopeKey(liveUserId, projectId)]: clean }, dockEditing: { ...s.dockEditing, phone: false } }));
+      return;
+    }
     set((s) => {
       const entry = s.projectStateById[projectId] ?? { lastAgentId: s.session.agentId };
       return {
@@ -924,14 +953,15 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Bootstrap failed';
+      const status = loadFailureStatus(error);
       set((s) => ({
-        projects: s.projects.status === 'loading' ? { ...s.projects, status: 'error', error: message } : s.projects,
-        agents: s.agents.status === 'loading' ? { ...s.agents, status: 'error', error: message } : s.agents,
+        projects: s.projects.status === 'loading' ? { ...s.projects, status, error: message } : s.projects,
+        agents: s.agents.status === 'loading' ? { ...s.agents, status, error: message } : s.agents,
       }));
     }
   },
 
-  reset() { set(() => initialState()); },
+  reset() { set(() => ({ ...initialState(), dockEditing: { primary: false, secondary: false, phone: false } })); },
 
   async reload() { get().reset(); await get().bootstrap(); },
 
@@ -955,12 +985,18 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     set((s) => projectListState(projects, s.projectStateById));
   },
 
+  async reloadUnavailable() {
+    const { projects, agents, session } = get();
+    if (projects.status === 'unavailable') { await get().bootstrap(); return; }
+    if (agents.status === 'unavailable' && session.projectId) await get().selectProject(session.projectId);
+  },
+
   async selectProject(projectId) {
     if (!projectId) return;
     // A dock-edit draft belongs to the project it was seeded from; a switch
     // closes the editor instead of re-targeting that draft.
-    if (get().dockEditing.primary || get().dockEditing.secondary) {
-      set({ dockEditing: { primary: false, secondary: false } });
+    if (get().dockEditing.primary || get().dockEditing.secondary || get().dockEditing.phone) {
+      set({ dockEditing: { primary: false, secondary: false, phone: false } });
     }
     // FAST PATH (the project switch store): when we remember which agent the
     // user last used in this project, select it IMMEDIATELY — its persisted
@@ -1020,7 +1056,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     } catch (error) {
       if (get().session.projectId !== projectId) return;
       const message = error instanceof Error ? error.message : 'Failed to load agents';
-      set((s) => ({ agents: { ...s.agents, status: 'error', error: message } }));
+      set((s) => ({ agents: { ...s.agents, status: loadFailureStatus(error), error: message } }));
     }
   },
 
@@ -1412,12 +1448,14 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
   },
 
   clearManualStageMode() {
+    if (get().dockEditing.primary || get().dockEditing.secondary || get().dockEditing.phone) return;
     const key = activeRuntimeKeyOf(get());
     if (!key || !get().manualModeByRuntimeKey[key]) return;
     set(s => { const next = { ...s.manualModeByRuntimeKey }; delete next[key]; return { manualModeByRuntimeKey: next, canvasReveal: null }; });
   },
 
   setStageMode({ agentId, mode }) {
+    if (get().dockEditing.primary || get().dockEditing.secondary || get().dockEditing.phone) return;
     if (!agentId) return;
     const rk = activeKey(agentId);
     if (!rk) return;
@@ -1576,7 +1614,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             if (target) runtimeByAgentId[agentRuntimeKey(target, bareId)] = runtime;
           }
         }
-        return { runtimeByAgentId, session, projectStateById, groupStateByScope: {} };
+        return { runtimeByAgentId, session, projectStateById, groupStateByScope: {}, phoneDockPrefsByScope: {} };
       },
       // workspaceView is transient (the 'agent_create' view must not survive a
       // refresh) — force it to 'default'; with no agent the workspace renders

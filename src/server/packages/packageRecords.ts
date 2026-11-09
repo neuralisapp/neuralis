@@ -1,6 +1,6 @@
 import { relative, sep } from 'node:path';
 import { validateManifest } from '@neuralis/package-system';
-import type { PackageDefinition, SourceScope } from '@neuralis/package-system/contracts';
+import type { PackageDefinition, PackageReader, ScopeOrigin, SourcePlane, SourceScope } from '@neuralis/package-system/contracts';
 import { packageInstanceId } from '@neuralis/package-system/contracts';
 import { sanitizePackageId } from '@neuralis/package-system/paths';
 import { BUILTIN_PACKAGE_IDS } from '../host/builtinSlots';
@@ -22,7 +22,7 @@ export type ProjectPackageRecord = {
   packageRoot: string;
   /** When the scanner discovered/refreshed this package */
   discoveredAt: number;
-  /** Capped at 'trusted' for project packages — never 'first-party' */
+  /** Capped at 'trusted' for project packages — never 'native' */
   trust: 'trusted' | 'untrusted';
   /**
    * WASM runtime only: `mtimeMs:size` of the wasm entry and `dist/routes.json`
@@ -30,6 +30,10 @@ export type ProjectPackageRecord = {
    * the sync compares to swap the module; absent for every other runtime.
    */
   artifactStamp?: string;
+  /** A device folder's package: the reader its bytes come through (the loader re-reads with it). */
+  reader?: PackageReader;
+  /** The device is unreachable: the package is listed as not available, from its last read. */
+  unavailable?: 'device-offline';
 };
 
 // Squat protection for RETIRED platform ids only — packages that no longer
@@ -59,7 +63,8 @@ export function sanitizeProjectPackageDefinition(
   trust: 'trusted' | 'untrusted' = 'untrusted',
 ): PackageDefinition {
   assertProjectPackageIdAllowed(definition.id);
-  if (!validateManifest(definition).valid) throw new Error(`Invalid authored package manifest: ${definition.id}`);
+  const validation = validateManifest(definition);
+  if (!validation.valid) throw new Error(`Invalid authored package manifest ${JSON.stringify(definition.id)}: ${validation.errors[0]}`);
   return {
     ...definition,
     access: {
@@ -73,11 +78,11 @@ export function toResolvedRecord(
   r: ProjectPackageRecord,
   projectId: string,
   scope: SourceScope,
-  origin?: { directory: string; uriRoot: string },
+  origin?: { directory: string; uriRoot: string; plane: SourcePlane },
 ): ResolvedPackageRecord {
   const sanitized = sanitizeProjectPackageDefinition(r.definition, r.trust);
   const validation = validateManifest(sanitized);
-  if (!validation.valid) throw new Error(`Invalid authored package manifest: ${r.packageId}`);
+  if (!validation.valid) throw new Error(`Invalid authored package manifest ${JSON.stringify(r.packageId)}: ${validation.errors[0]}`);
   const rel = origin ? relative(origin.directory, r.packageRoot).split(sep).join('/') : r.slug;
   if (rel === '..' || rel.startsWith('../')) throw new Error('Package root escapes its source');
   const originUri = origin ? `${origin.uriRoot}${origin.uriRoot.endsWith('://') || origin.uriRoot.endsWith('/') || !rel ? '' : '/'}${rel}` : `packages://${rel}`;
@@ -92,6 +97,7 @@ export function toResolvedRecord(
     originUri,
     scope: 'project',
     ownerScope: scope,
+    ...(origin ? { ownerOrigin: { plane: origin.plane } } : {}),
     ownerProjectId: projectId,
     definition: runtimeId === r.packageId ? sanitized : { ...sanitized, id: runtimeId },
     packageRoot: r.packageRoot,
@@ -100,6 +106,8 @@ export function toResolvedRecord(
     installedAt: r.discoveredAt,
     updatedAt: r.discoveredAt,
     ...(r.artifactStamp !== undefined ? { artifactStamp: r.artifactStamp } : {}),
+    ...(r.reader ? { reader: r.reader } : {}),
+    ...(r.unavailable ? { unavailable: r.unavailable } : {}),
   };
 }
 
@@ -119,6 +127,13 @@ export type ResolvedPackageRecord = {
    */
   ownerScope?: SourceScope;
   /**
+   * The plane of the source that contributed this package, carried from the
+   * source owner's `PackageSourceRoot.plane` — the 4th `canAccessScope`
+   * argument (a user-scope DEVICE folder serves its owner alone). Never
+   * re-derived from the slug or the root's shape. Absent ⇒ no recorded source.
+   */
+  ownerOrigin?: ScopeOrigin;
+  /**
    * Owning PROJECT id, carried explicitly.
    *
    * It is also the `project` of the instance `packageId`; the value travels on
@@ -137,6 +152,10 @@ export type ResolvedPackageRecord = {
   updatedAt?: number;
   /** The scanner's WASM artifact stamp (see `ProjectPackageRecord`). */
   artifactStamp?: string;
+  /** A device folder's reader (see `ProjectPackageRecord`); `packageRoot` is then a path on that device. */
+  reader?: PackageReader;
+  /** See `ProjectPackageRecord`. */
+  unavailable?: 'device-offline';
 };
 
 export type PackageCatalogMeta = {

@@ -12,6 +12,12 @@
  * `X-Real-IP` and `Forwarded` are never read. No stamp (a request emitted
  * before the stamp was installed) is the shared `unstamped` key, which
  * limits rather than trusts.
+ *
+ * A DECLARED same-machine tunnel (`NEURALIS_TUNNEL=cloudflare`) dials over
+ * loopback, so every remote user would share the `127.0.0.1` bucket — one
+ * user's wrong passwords would lock everyone out. There a LOOPBACK peer is
+ * keyed by its `CF-Connecting-IP` (one address, the edge's own header). Named
+ * residual: a process already on this machine can pick its own limiter key.
  */
 
 import { BlockList, isIP } from 'node:net';
@@ -53,8 +59,23 @@ function trustedList(): BlockList | null {
   return cache.list;
 }
 
+function isLoopbackAddress(address: string): boolean {
+  return address === '::1' || (isIP(address) === 4 && address.startsWith('127.'));
+}
+
 function isTrusted(list: BlockList, address: string): boolean {
   return list.check(address, isIP(address) === 6 ? 'ipv6' : 'ipv4');
+}
+
+/**
+ * Is this socket peer a DECLARED trusted proxy? The same list and check the
+ * limiter key uses — no list ⇒ `false`. The device link reads it so a local
+ * reverse proxy never makes every device look like this machine.
+ */
+export function isTrustedProxyAddress(address: string): boolean {
+  const list = trustedList();
+  const normalized = normalizeAddress(address);
+  return list !== null && normalized !== null && isTrusted(list, normalized);
 }
 
 export function resolveClientAddress(headers: HeaderSource): ClientAddress {
@@ -63,7 +84,12 @@ export function resolveClientAddress(headers: HeaderSource): ClientAddress {
   if (!peer) return { address: 'unstamped', source: 'unstamped' };
 
   const list = trustedList();
-  if (!list || !isTrusted(list, peer)) return { address: peer, source: 'peer' };
+  if (!list || !isTrusted(list, peer)) {
+    const tunnelled = getEnv().tunnel === 'cloudflare' && isLoopbackAddress(peer)
+      ? normalizeAddress(readHeader(headers, 'cf-connecting-ip') ?? '')
+      : null;
+    return tunnelled ? { address: tunnelled, source: 'forwarded' } : { address: peer, source: 'peer' };
+  }
 
   const hops = (readHeader(headers, 'x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
   let client = peer;

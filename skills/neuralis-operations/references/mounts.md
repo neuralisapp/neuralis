@@ -1,12 +1,27 @@
 # Filesystem mounts
 
+## The commands
+
+```bash
+neuralis mount add HOST_PATH [--slug NAME] [--project ID]   # a data source
+neuralis mount add HOST_PATH --neuralis [--with-docker]         # the /neuralis overlay
+neuralis mount add HOST_PATH --pkg PACKAGE_NAME               # a package folder
+neuralis mount list [--project ID]
+neuralis mount remove SLUG [--project ID]
+neuralis mount remove --neuralis
+neuralis mount remove --pkg PACKAGE_NAME
+```
+
+Without `--project`, `list` shows every project's attachments and `remove` checks every
+project's source configs for references — a mount is instance-wide.
+
 ## Mounting is not attaching
 
-`npx neuralis mount add` writes **infrastructure**: a bind mount plus the environment
+`neuralis mount add` writes **infrastructure**: a bind mount plus the environment
 pair that lets the runtime describe it. It does not create a source, and agents cannot
 reach the folder yet. Three steps, in order:
 
-1. `npx neuralis mount add <host-path> --slug <name>` — writes the bind and env pair.
+1. `neuralis mount add <host-path> --slug <name>` — writes the bind and env pair.
 2. Restart so compose applies it (`docker compose up -d`; `-V` is not needed unless the
    overlay itself was added or removed).
 3. Attach it as a filesystem source from the Files UI, choosing its scope.
@@ -26,10 +41,6 @@ override survives. That is the entire reason for the split.
 
 ## The `--neuralis` overlay
 
-```bash
-npx neuralis mount add HOST_FOLDER --neuralis [--with-docker]
-```
-
 Binds the host's own Neuralis folder onto `/neuralis` inside the container. The
 image-built runtime and the installed packages survive it — both sit behind anonymous
 volumes precisely so a whole-folder overlay cannot shadow them — so what the overlay
@@ -42,17 +53,8 @@ Two consequences worth stating:
   baked copy — which is why a pulled image can read its own operator skills with no host
   folder at all. Only the Discover *suggestion* is overlay-gated; the content is there
   either way, and a hand-typed source reaches it.
-- The overlay binds onto the container WORKDIR, so its root holds `.env`. Discover offers
-  two proposals accordingly: **Neuralis Skills** rooted at `<overlay>/skills` (manual, shown
-  only when that folder exists, and read-only through an explicit `**` write/exec deny) and
-  **Neuralis Tree** over the whole folder, which pre-fills a skills-only sync `include` plus
-  denies on `.env*` (read and write) and on writing `Dockerfile`, `docker/**` and every compose
-  file the daemon would pick up — `rebuild` runs `docker compose up` with no `-f`, so an
-  override beside the base is merged and a bare `compose.yaml` replaces it, `.yml` and `.yaml`
-  alike. Prefer the first unless you are editing platform source. Two reasons the
-  narrow one is not just tidier: a sync `include` bounds the index, not what `fs_read` can
-  reach, and a source attached at user or agent scope grants its creator write+exec
-  regardless of the access you pick in the form — only a path rule takes that back.
+- The overlay binds onto the container WORKDIR, so its root holds `.env`. What Discover offers over it,
+  and why the narrow proposal is not just tidier: §A source over a folder of skills, below.
 - Script edits under `scripts/` apply immediately, because they run through `tsx` at
   invocation. Host application code does **not** hot-reload; that still needs a rebuild.
 
@@ -60,10 +62,6 @@ Two consequences worth stating:
 capability: anything that can reach the socket can control the daemon.
 
 ## Package folders
-
-```bash
-npx neuralis mount add DIR --pkg PACKAGE_NAME
-```
 
 The live-edit lane for a package already registered and installed. The folder is BOUND
 onto `/neuralis/node_modules/<name>` — over the copy the image installed — so discovery,
@@ -73,21 +71,24 @@ image deployed for the package, so it resolves the image's ONE kernel and ONE Re
 never a dev checkout's links. The tool pre-creates the mask's mountpoint as you, so Docker
 never creates it as root inside your folder. It also writes the `/mounts/<slug>` bind and
 its host pair, for a source rooted at the folder. A name that is not a host dependency is
-inert until `npx neuralis pkg add` registers it (the tool says which case you are in) —
+inert until `neuralis pkg add` registers it (the tool says which case you are in) —
 see `own-packages.md`.
+
+**`--pkg` and a plain data mount are not alternatives, and `--pkg` does both jobs:** the
+`/mounts/<slug>` bind it writes carries its `NEURALIS_MOUNT_<slug>` / `NEURALIS_MOUNT_HOST_<SLUG>`
+pair. That pair is not decoration: it is how a source rooted at the mount derives its
+host path. Without it the operator has to type `hostRoot` into the source by hand, an
+explicit value wins over every derivation, and a wrong one persists with nothing
+validating it. You cannot get the pair by running a data mount over the same slug
+afterwards — both add forms refuse a container path that already exists. **A mount slug
+may contain `-`, and the metadata names normalise it to `_`** (`my-pkg` →
+`NEURALIS_MOUNT_HOST_MY_PKG`); the two sides agree, so do not "fix" one of them.
 
 An override written by an older host may still carry a `NEURALIS_PKG_LINKS` line and a
 `NODE_PATH` fallback. Nothing reads either; `mount add <dir> --pkg <name>` gives that folder
 its bind.
 
 ## Removing
-
-```bash
-npx neuralis mount list
-npx neuralis mount remove SLUG
-npx neuralis mount remove --neuralis
-npx neuralis mount remove --pkg PACKAGE_NAME
-```
 
 Removing the last machine-local mount deletes the override file entirely (the tool
 prints "no machine-local mounts remain") — the base compose file needs no override to
@@ -96,3 +97,39 @@ run, and an empty generated file would only invite hand-edits.
 A removed mount leaves its attached source behind, now pointing at nothing. Detach it
 from the Files UI too, or it reports as errored — per-source isolation means only that
 one row breaks, not the whole drive.
+
+**`mount remove --pkg <name>` alone leaves the package registered.** It drops both binds,
+the mask and the host pair; the dependency line survives it, and the next start loads the
+image's installed copy. `pkg remove` takes out both the line and the mount.
+
+## A source over a folder of skills
+
+**A source over a folder of skills is a discovery mechanism, not just access.** A directory
+containing a `SKILL.md` is treated as a package root, so attaching a read-only source over the
+deployment's `skills/` folder makes each one a *discovered source package* that reaches an agent's
+context by itself, instead of a file someone has to know to open. Root it at the skills folder and
+**never at the deployment root** — that directory holds the `.env` carrying the session secret and
+the vector-store key, and a source there would put both into agent reach and into the vector index.
+
+With the overlay configured, Files → Discover offers this ready-made, narrowest first:
+
+- **Neuralis Skills** — rooted at `neuralis-tree:skills` (the tree's `skills/` on whichever plane
+  opens it: the overlay here, the host's own folder on a native install), user-scoped, manual sync, and read-only via a
+  `**` write/exec deny. This is the one to click. The root *is* the boundary, so nothing outside the
+  skills folder is reachable, and no filter has to hold the line. It appears only when the overlay
+  root actually has a `skills/` folder — better no row than a row pointing at nothing.
+- **Neuralis Tree** — the whole overlay, for editing platform source. It pre-fills
+  `include: ['skills/**']` so a "turned it on and left it" attach does not index the entire folder,
+  plus denies on the two things that make this root dangerous: `.env*` (no read, no write — it
+  carries the session secret and the vector-store key) and write on `Dockerfile`, `docker/**` and
+  every compose file the daemon would pick up. That last set is wider than the file this repo
+  ships: `neuralis:rebuild` runs `docker compose up` with no `-f`, so Compose's default discovery
+  applies — `compose.override.yaml` and `docker-compose.override.yaml` beside the base are MERGED,
+  and a bare `compose.yaml` REPLACES it — so all four spellings, `.yml` and `.yaml`, are denied. Ordinary editable rules, not immutable floors; the owner
+  can remove any of them before or after saving.
+
+**Two traps, both of which look closed when they are not.** A sync `include` decides what gets
+INDEXED, never what `fs_read` can reach — the source root and the path rules do that. And a
+"read-only" attach cannot be expressed through the default access block: attaching at any scope
+other than project rewrites `default` to all-false and grants the creator read+write+exec directly,
+so read-only needs an explicit path row. Both proposals above are built that way.

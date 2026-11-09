@@ -5,17 +5,17 @@
  * Discovered by `scripts/upgrade.mts`; never imported by the app.
  *
  * A flagged source's root is a CONTAINER path (`/mounts/<slug>`). Inside the
- * image it exists; on the host plane, where the documented command runs, it is
+ * image it exists; on the machine, where the documented command runs, it is
  * reached through the machine-local override's `NEURALIS_MOUNT_*` pairs — read
  * with the kernel's own pair parser and brain-core's longest-prefix derivation,
  * the same two the runtime derives a source's host root with.
  */
 
-import type { PackageSourceRoots, SourceScope } from '@neuralis/package-system/contracts';
+import type { PackageSourceRoots, SourcePlane, SourceScope } from '@neuralis/package-system/contracts';
 import type { OfflineUpgradeContext, OfflineUpgradeModule } from '@neuralis/package-system/data';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { discoverOsMounts, resolveProjectRoot } from '@neuralis/package-system/paths';
+import { detectDocker, discoverOsMounts, resolveProjectRoot } from '@neuralis/package-system/paths';
 import { AppSourceConfigStore, SOURCE_CONFIG_FORMAT, deriveHostRootFromOsMounts } from '@neuralis/brain-core';
 import {
   applyPackageIdentityUpgrade,
@@ -35,10 +35,17 @@ import { selectFlaggedPackageRoots } from '../../src/server/packages/projectPack
 // The host's own kind declarations (the upgrade command verifies modules against every loaded one).
 import { HOST_DATA_FORMATS, PROJECT_UPGRADE_STEPS } from '../../src/server/store/dataFormats';
 
-type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; uriRoot: string };
+type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string };
+
+/**
+ * The `brain-core/source-config` version THIS step stamps. A chained step pins
+ * its own and never imports the live `SOURCE_CONFIG_FORMAT.version`: a later
+ * step (`source-root-pair-v1`) raises the live one.
+ */
+const SOURCE_CONFIG_REVISION = 2;
 
 /** The `NEURALIS_MOUNT_*` environment lines of the compose override (absent file ⇒ none). */
-function overrideMountEnv(overrideFile: string): NodeJS.ProcessEnv {
+export function overrideMountEnv(overrideFile: string): NodeJS.ProcessEnv {
   // Only the override's pairs — never this process's own environment. (`NODE_ENV` is a required key of the type.)
   const env: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV };
   if (!existsSync(overrideFile)) return env;
@@ -63,22 +70,22 @@ function deps(ctx: OfflineUpgradeContext, overrideFile: string): Omit<PackageIde
   const logger = { info: (): void => {}, warn: (message: string): void => ctx.log(`warn: ${message}`) };
   const configs = new AppSourceConfigStore(ctx.appRoot);
   const sourceRoots: Pick<PackageSourceRoots, 'listPackageSourceRoots'> = {
-    listPackageSourceRoots: (projectId) => configs.listPackageSourceRoots(projectId, resolveProjectRoot(ctx.projectsRoot, projectId)),
+    listPackageSourceRoots: (projectId) => configs.listPackageSourceRoots(projectId, resolveProjectRoot(ctx.projectsRoot, projectId), detectDocker()),
   };
   return {
     roots: { home: ctx.home, appRoot: ctx.appRoot, projectsRoot: ctx.projectsRoot },
     sourceRoots,
     builtinIds: BUILTIN_PACKAGE_IDS,
-    recordVersions: { project: PROJECT_UPGRADE_STEPS.identity.to, sourceConfig: SOURCE_CONFIG_FORMAT.version },
+    recordVersions: { project: PROJECT_UPGRADE_STEPS.identity.to, sourceConfig: SOURCE_CONFIG_REVISION },
     // The activation path's scanners, metadata only: no watcher, no load.
     async enumerateInstances(projectIds, roots): Promise<PackageIdentityInstance[]> {
       const result: PackageIdentityInstance[] = [];
       for (const projectId of projectIds) {
-        const entries: ScannerEntry[] = [{ scanner: getProjectPackageScanner(resolveProjectRoot(ctx.projectsRoot, projectId), logger), ownerScope: { kind: 'project' }, uriRoot: 'packages://' }];
+        const entries: ScannerEntry[] = [{ scanner: getProjectPackageScanner(resolveProjectRoot(ctx.projectsRoot, projectId), logger), ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'packages://' }];
         // A disabled flagged source still owns its stored references.
         for (const source of selectFlaggedPackageRoots((await roots.listPackageSourceRoots(projectId)).map((root) => ({ ...root, enabled: true })))) {
           const dir = planeDirectory(projectId, source.uriRoot, source.dir, overrideFile);
-          entries.push({ scanner: getScannerForDir(dir, logger), ownerScope: source.ownerScope, uriRoot: source.uriRoot });
+          entries.push({ scanner: getScannerForDir(dir, logger), ownerScope: source.ownerScope, plane: source.plane, uriRoot: source.uriRoot });
         }
         await Promise.all(entries.map((entry) => entry.scanner.scan()));
         const incomplete = entries.find((entry) => !entry.scanner.scanComplete && !(entry.uriRoot === 'packages://' && entry.scanner.missingWithReachableParent));
@@ -86,7 +93,7 @@ function deps(ctx: OfflineUpgradeContext, overrideFile: string): Omit<PackageIde
           throw new Error(`Project ${projectId}: the package inventory of ${incomplete.uriRoot} (${incomplete.scanner.packagesDir}) could not be read completely.`);
         }
         for (const entry of entries) for (const record of entry.scanner.listPackages()) {
-          const resolved = toResolvedRecord(record, projectId, entry.ownerScope, { directory: entry.scanner.packagesDir, uriRoot: entry.uriRoot });
+          const resolved = toResolvedRecord(record, projectId, entry.ownerScope, { directory: entry.scanner.packagesDir, uriRoot: entry.uriRoot, plane: entry.plane });
           if (!resolved.originUri) throw new Error('Package instance origin missing');
           result.push({ packageId: resolved.packageId, manifestId: resolved.manifestId, originUri: resolved.originUri, projectId, ownerScope: entry.ownerScope, packageRoot: record.packageRoot });
         }
@@ -109,7 +116,7 @@ export function createPackageIdentityUpgrade(overrideFile: string, options: Pick
     kinds: [
       { kind: HOST_DATA_FORMATS.project.kind, to: PROJECT_UPGRADE_STEPS.identity.to },
       ...PACKAGE_IDENTITY_AGENT_CORE_KINDS,
-      { kind: SOURCE_CONFIG_FORMAT.kind, to: SOURCE_CONFIG_FORMAT.version },
+      { kind: SOURCE_CONFIG_FORMAT.kind, to: SOURCE_CONFIG_REVISION },
     ],
     async dryRun(ctx) {
       const plan = await dryRunPackageIdentityUpgrade(deps(ctx, overrideFile));

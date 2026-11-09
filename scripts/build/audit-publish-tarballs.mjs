@@ -19,12 +19,14 @@
  * tests: those assert that what we meant to ship is present, this asserts that
  * nothing else is.
  *
- * `--tarballs <dir>` audits READY tarballs instead (the `pnpm pack` output the
- * release workflow publishes byte for byte): the same path and content checks
- * on the extracted files, plus the packed `package.json` — a `workspace:`,
- * `file:` or `link:` specifier left in it installs nowhere, and only a real
- * pack shows it (the dry-run list reads the workspace manifest). The directory
- * must hold exactly one tarball per publishable package.
+ * `--tarballs <dir>` audits READY tarballs instead (the pack output the
+ * release workflow publishes byte for byte — `pnpm pack`, and `npm pack` for
+ * the CLI, whose native helpers need their exec bit): the same path and
+ * content checks on the extracted files, plus the packed `package.json` — a
+ * `workspace:`, `file:` or `link:` specifier left in it installs nowhere, and
+ * only a real pack shows it (the dry-run list reads the workspace manifest) —
+ * and every file `native/manifest.json` marks `executable` must be executable.
+ * The directory must hold exactly one tarball per publishable package.
  *
  *   node neuralis/scripts/build/audit-publish-tarballs.mjs [--strict] [--tarballs <dir>]
  *        [--forbid-root <abs path>[:<abs path>…]]… [--forbid-text <text>]…
@@ -173,7 +175,7 @@ function escapeRegExp(text) {
 }
 
 /**
- * Private first-party package names every public write refuses whatever the
+ * Private native package names every public write refuses whatever the
  * caller passes: a package that lives in its own private repository and is
  * never published. A runner cannot learn one from its environment the way it
  * learns the private repository's name, and spelling it here would publish it
@@ -200,7 +202,7 @@ export function privateMarkers({ roots, texts = [], nameHashes = PRIVATE_PACKAGE
     ...roots.map((root) => ({ what: `the machine-absolute path ${root}`, pattern: new RegExp(`${escapeRegExp(root)}(?![\\w.-])`) })),
     ...privateTexts.map((text) => ({ what: `the private identifier "${text}"`, pattern: new RegExp(escapeRegExp(text), 'i') })),
     {
-      what: 'a private first-party package name',
+      what: 'a private native package name',
       pattern: { test: (content) => [...String(content).matchAll(SCOPED_NAME)].some((m) => hashes.has(sha256(m[0].toLowerCase()))) },
     },
   ];
@@ -275,7 +277,26 @@ function auditWorkspaceTrees(findings, opts) {
   return total;
 }
 
-/** Ready `pnpm pack` tarballs: exactly one per publishable package. */
+/**
+ * Every file a package's `native/manifest.json` marks `executable` must carry an
+ * exec bit in the extracted tarball: the consumer runs it as it lands
+ * (`pnpm pack` keeps the bit only on `bin` files, `npm pack` keeps the file's own).
+ */
+function executableFindings(label, root, findings) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(root, 'native', 'manifest.json'), 'utf8'));
+  } catch {
+    return;
+  }
+  for (const [file, entry] of Object.entries(manifest?.files ?? {})) {
+    const path = join(root, 'native', file);
+    if (entry?.executable !== true || !existsSync(path)) continue;
+    if ((statSync(path).mode & 0o111) === 0) findings.push(`${label}: native/${file} is not executable in the tarball`);
+  }
+}
+
+/** Ready packed tarballs: exactly one per publishable package. */
 function auditTarballs(dir, findings, opts) {
   const expected = new Set(PACKAGES.map((rel) => JSON.parse(readFileSync(join(REPO_ROOT, rel, 'package.json'), 'utf8')).name));
   const tarballs = readdirSync(dir).filter((name) => name.endsWith('.tgz')).sort();
@@ -304,6 +325,7 @@ function auditTarballs(dir, findings, opts) {
       }
       const files = walkFiles(root);
       total += files.length;
+      executableFindings(manifest.name, root, findings);
       uiModuleFindings(name, manifest, files, findings);
       pathFindings(name, files, findings);
       scanContents(name, root, files, findings, opts);

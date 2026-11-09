@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -139,6 +140,50 @@ describe('installShutdownHandlers', () => {
   });
 });
 
+// Windows has no SIGTERM to deliver: `neuralis up` stops its host with a
+// `shutdown` message on the ipc channel. It must reach THIS owner — the drain —
+// not a second stop path. The SIGTERM listener the owner installs is captured,
+// and a stand-in process carries the channel events to it.
+describe('the supervisor\'s ipc stop reaches the shutdown owner', () => {
+  async function wired() {
+    const { installShutdownHandlers } = await freshModule();
+    const { followSupervisor } = await import('../homeLock');
+    const on = vi.spyOn(process, 'on').mockReturnValue(process);
+    let onSigterm: (() => void) | undefined;
+    try {
+      installShutdownHandlers();
+      onSigterm = on.mock.calls.find(([event]) => event === 'SIGTERM')?.[1] as () => void;
+    } finally {
+      on.mockRestore();
+    }
+    const proc = Object.assign(new EventEmitter(), { connected: true, send: () => true, channel: { unref: vi.fn() } });
+    proc.on('SIGTERM', onSigterm!);
+    peekRuntime.mockReturnValue({ shutdown: async () => {}, drainAll });
+    expect(followSupervisor({ NEURALIS_SUPERVISOR: 'ipc' }, proc as never)).toBe('following');
+    expect(proc.channel.unref).toHaveBeenCalled();
+    return proc;
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  it('`shutdown` drains through the owner, once; another message does nothing (paired control)', async () => {
+    const proc = await wired();
+    proc.emit('message', 'stop-please');
+    await settle();
+    expect(drainAll).not.toHaveBeenCalled();
+    proc.emit('message', 'shutdown');
+    proc.emit('message', 'shutdown');
+    await settle();
+    expect(drainAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('the channel\'s loss (the supervisor died) drains through the owner too', async () => {
+    const proc = await wired();
+    proc.emit('disconnect');
+    await settle();
+    expect(drainAll).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('the hard exit deadline', () => {
   it('forces an exit when a teardown step never settles', async () => {
     const { addShutdownStep, runShutdown } = await freshModule();
@@ -192,5 +237,50 @@ describe('the hard exit deadline', () => {
       get: () => { throw new Error('Config key not registered'); },
     });
     await expect(runShutdown('SIGTERM')).resolves.toBeUndefined();
+  });
+});
+
+describe('open client connections (a browser tab, an SSE tap, an MCP client)', () => {
+  it('are closed after the teardown, so a production server.close() finishes in seconds, not at the kill', async () => {
+    const { createServer, request, Server } = await import('node:http');
+    const hadOwnEmit = Object.getOwnPropertyNames(Server.prototype).includes('emit');
+    const { installUpgradeWatchdog } = await import('../../upgradeWatchdog');
+    installUpgradeWatchdog();
+    const server = createServer((_req, res) => {
+      // An SSE-shaped response that never ends on its own.
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': open\n\n');
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      await new Promise<void>((resolve) => {
+        const req = request({ host: '127.0.0.1', port, path: '/api/events' }, (res) => {
+          res.once('data', () => resolve());
+          res.on('error', () => {});
+        });
+        req.on('error', () => {});
+        req.end();
+      });
+      // Next's own SIGTERM cleanup: stop accepting and wait for every connection.
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      const { runShutdown } = await freshModule();
+      await runShutdown('SIGTERM');
+      const outcome = await Promise.race([
+        closed.then(() => 'closed' as const),
+        new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 2_000)),
+      ]);
+      expect(outcome).toBe('closed');
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      if (!hadOwnEmit) Reflect.deleteProperty(Server.prototype, 'emit');
+      Reflect.deleteProperty(Server.prototype, Symbol.for('neuralis.upgradeWatchdog.v1'));
+      const https = await import('node:https');
+      Reflect.deleteProperty(https.Server.prototype, 'emit');
+      Reflect.deleteProperty(https.Server.prototype, Symbol.for('neuralis.upgradeWatchdog.v1'));
+      delete (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('neuralis.upgradeWatchdog.servers.v1')];
+    }
   });
 });

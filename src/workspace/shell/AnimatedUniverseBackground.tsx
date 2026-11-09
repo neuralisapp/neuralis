@@ -13,8 +13,50 @@ type Node = {
   age: number;       // frames alive (for fade-in)
 };
 
-/** `reduce` users get exactly one static frame; everyone else gets the loop. */
+/** `reduce` users and a software-composited window get exactly one static frame; everyone else gets the loop. */
 type Motion = 'static' | 'animate';
+
+/**
+ * A GPU-less compositor (WSLg's `llvmpipe`, SwiftShader, Windows' Basic Render
+ * Driver) re-blurs every `backdrop-blur` panel above this canvas on every frame
+ * it paints: measured ~1 core of GPU process at ~14 frames/s. There the sky is
+ * one static frame. Asked ONCE per page through a throwaway WebGL context that
+ * is released at once. No WebGL context at all is a software compositor too
+ * (`--disable-gpu`, a blocklisted driver: measured ~1 core); a context that
+ * hides its renderer name (no debug extension) keeps the loop.
+ */
+export function softwareCompositedRenderer(renderer: string | null): boolean {
+  return renderer !== null && /llvmpipe|swiftshader|softpipe|software|basic render/i.test(renderer);
+}
+
+/** The renderer answer when no WebGL context can be made — `softwareCompositedRenderer` reads it as software. */
+export const NO_WEBGL_CONTEXT = 'software: no WebGL context';
+
+/**
+ * The page-wide answer of this ONE detector: set on `<html>` when the window
+ * composites in software, so a package's own CSS motion holds still there too
+ * (`:root[data-software-compositor] …`) — the chat's empty-state
+ * constellation cost ~1 core of its own on one. A package never runs a second
+ * detector; it reads this attribute.
+ */
+export const SOFTWARE_COMPOSITOR_ATTRIBUTE = 'data-software-compositor';
+
+let rendererAnswer: string | null | undefined;
+
+function webglRenderer(): string | null {
+  if (rendererAnswer !== undefined) return rendererAnswer;
+  rendererAnswer = null;
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    if (!gl) rendererAnswer = NO_WEBGL_CONTEXT;
+    else {
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      if (info) rendererAnswer = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL));
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+    }
+  } catch { rendererAnswer = NO_WEBGL_CONTEXT; }
+  return rendererAnswer;
+}
 
 const NODE_COUNT = 100;
 const DEPTH = 1200;
@@ -67,8 +109,10 @@ export function AnimatedUniverseBackground({ starColor = '#ffffff' }: { starColo
 
   useEffect(() => {
     const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const software = softwareCompositedRenderer(webglRenderer());
+    document.documentElement.toggleAttribute(SOFTWARE_COMPOSITOR_ATTRIBUTE, software);
     const apply = (): void => {
-      setMotion(query.matches ? 'static' : 'animate');
+      setMotion(query.matches || software ? 'static' : 'animate');
     };
     apply();
     query.addEventListener('change', apply);
@@ -241,8 +285,12 @@ export function AnimatedUniverseBackground({ starColor = '#ffffff' }: { starColo
       loop.schedule(motion === 'static' ? repaintOnce : render);
     };
 
+    // A hidden tab and an unfocused window (the desktop app behind another
+    // window, or in the tray) run no loop — from the mount on, not only after
+    // a later blur: the sky holds its last frame and resumes on return.
+    const away = (): boolean => document.hidden || !document.hasFocus();
     const handleVisibility = () => {
-      if (document.hidden) {
+      if (away()) {
         loop.pause();
         return;
       }
@@ -258,8 +306,14 @@ export function AnimatedUniverseBackground({ starColor = '#ffffff' }: { starColo
       warmPool();
       paint();
     } else {
-      loop.schedule(render);
+      if (away()) {
+        // Mounted unfocused: one frame so the sky is there, then paused until focus.
+        paint();
+        loop.pause();
+      } else loop.schedule(render);
       document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('blur', handleVisibility);
+      window.addEventListener('focus', handleVisibility);
     }
     window.addEventListener('resize', resize);
 
@@ -267,6 +321,8 @@ export function AnimatedUniverseBackground({ starColor = '#ffffff' }: { starColo
       loop.cancel();
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('blur', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
     };
     // The static frame repaints for a new star colour; the running loop reads `star` itself.
   }, [motion, motion === 'static' ? starColor : null]);

@@ -7,7 +7,8 @@
  *    old key, which was the raw header string.
  *  - An unknown email pays one bcrypt compare against a real cost-12 hash and
  *    counts on the same axes as a wrong password, so neither the clock nor the
- *    lockout says whether the account exists.
+ *    lockout says whether the account exists. The compare is the off-thread
+ *    `verifyPassword`; a compare it cannot answer refuses the login.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
@@ -16,11 +17,13 @@ const mocks = vi.hoisted(() => ({
   findUserByEmail: vi.fn(),
   updateUser: vi.fn(async () => null),
   writeAuditLog: vi.fn(),
+  verifyPassword: vi.fn(),
+  realVerifyPassword: undefined as undefined | ((password: string, hash: string) => Promise<boolean>),
 }));
 
 vi.mock('../../config/env', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../config/env')>()),
-  getEnv: () => ({ auth: { secret: 'authorize-test-secret' }, trustedProxies: [] }),
+  getEnv: () => ({ trustedProxies: [] }),
 }));
 vi.mock('../../init', () => ({
   assertSetupComplete: async () => undefined,
@@ -32,6 +35,12 @@ vi.mock('../../store/UserStore', async (importOriginal) => ({
   updateUser: mocks.updateUser,
 }));
 vi.mock('../../store/AuditStore', () => ({ writeAuditLog: mocks.writeAuditLog }));
+// A spy over the REAL pool: every row runs the actual worker unless it says otherwise.
+vi.mock('../passwordPolicy', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../passwordPolicy')>();
+  mocks.realVerifyPassword = real.verifyPassword;
+  return { ...real, verifyPassword: mocks.verifyPassword };
+});
 
 const { authOptions } = await import('../authOptions');
 const { beginLoginAttempt, resetLoginRateLimitForTests } = await import('../rateLimit');
@@ -49,6 +58,7 @@ function login(email: string, password: string, headers: Record<string, string> 
 describe('authorize — the resolved client address and the unknown-email cost', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.verifyPassword.mockImplementation(mocks.realVerifyPassword!);
     resetLoginRateLimitForTests();
     mocks.findUserByEmail.mockImplementation(async (email: string) =>
       email === 'known@x.co'
@@ -58,17 +68,24 @@ describe('authorize — the resolved client address and the unknown-email cost',
   });
 
   it('an unknown email pays a real bcrypt compare and counts like a wrong password', async () => {
-    const compare = vi.spyOn(bcrypt, 'compare');
-    try {
-      expect(await login('ghost@x.co', 'x')).toBeNull();
-      expect(compare).toHaveBeenCalledTimes(1);
-      expect(String(compare.mock.calls[0]![1])).toMatch(/^\$2[aby]\$12\$/);
-    } finally {
-      compare.mockRestore();
-    }
+    expect(await login('ghost@x.co', 'x')).toBeNull();
+    expect(mocks.verifyPassword).toHaveBeenCalledTimes(1);
+    expect(String(mocks.verifyPassword.mock.calls[0]![1])).toMatch(/^\$2[aby]\$12\$/);
     for (let i = 0; i < 4; i += 1) await login('ghost@x.co', 'x');
     expect(beginLoginAttempt('ghost@x.co', PEER).kind).toBe('locked');
-  });
+  }, 30_000);
+
+  it('a wrong password is refused; a compare the pool cannot answer refuses too, never accepts, and counts nothing', async () => {
+    expect(await login('known@x.co', 'wrong')).toBeNull();
+    resetLoginRateLimitForTests();
+    const { PasswordHasherUnavailableError } = await import('../passwordPolicy');
+    mocks.verifyPassword.mockRejectedValue(new PasswordHasherUnavailableError('the worker stopped'));
+    for (let i = 0; i < 6; i += 1) expect(await login('known@x.co', 'right-password')).toBeNull();
+    expect(mocks.writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'login.failed', details: expect.objectContaining({ reason: 'verifier_unavailable' }) }));
+    expect(mocks.writeAuditLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'login.success' }));
+    // Paired control: the server's failure locked nothing — the same pair logs in once the pool answers.
+    expect(beginLoginAttempt('known@x.co', PEER).kind).toBe('proceed');
+  }, 30_000);
 
   it('a rotated X-Forwarded-For does not mint a fresh bucket: the 6th attempt is refused', async () => {
     for (let i = 0; i < 5; i += 1) await login('known@x.co', 'wrong', { 'x-forwarded-for': `198.51.100.${i}` });

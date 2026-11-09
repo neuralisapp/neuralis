@@ -42,8 +42,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // Ensure project packages are loaded before building snapshot
   await ensureProjectPackagesLoaded(projectId);
 
-  // The first-party UI modules + the union stylesheet, built once per
-  // first-party package set. A build failure costs the attachments, never the
+  // The native UI modules + the union stylesheet, built once per
+  // native package set. A build failure costs the attachments, never the
   // snapshot.
   const ui = await getUiAttachments().catch(() => null);
 

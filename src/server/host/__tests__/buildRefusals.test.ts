@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PackageDefinition } from '@neuralis/package-system/contracts';
-import { BUILD_VALIDATE_RECORD, admitBuiltins, readBuildRefusals } from '../buildRefusals';
+import { BUILD_VALIDATE_RECORD, admitBuiltins, optionalBuiltinIds, readBuildRefusals, readDisabledBuiltins } from '../buildRefusals';
+import { HOST_CONFIG_SETTINGS } from '../../config/hostConfigSettings';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -19,7 +20,7 @@ function hostRoot(record?: string): string {
 }
 
 const def = (id: string, keys: string[] = []): PackageDefinition => ({
-  id, name: id, source: { kind: 'neuralis' }, access: { trust: 'first-party' },
+  id, name: id, source: { kind: 'neuralis' }, access: { trust: 'native' },
   ...(keys.length > 0 ? { configSettings: keys.map((key) => ({ key, type: 'string', default: '', description: key })) } : {}),
 } as PackageDefinition);
 const noOwner = (): undefined => undefined;
@@ -90,5 +91,63 @@ describe('the build admission record', () => {
     );
     expect(refused).toEqual([{ packageId: '@acme/loud', reason: 'load_failed' }]);
     expect(keyCollisions).toEqual([]);
+  });
+});
+
+describe('the operator\'s turned-off builtins (disabledBuiltinPackages)', () => {
+  it('the host reader takes ONLY a builtin whose manifest declares itself optional; every other id is named and ignored, a non-list turns nothing off', () => {
+    const optional = optionalBuiltinIds([def('@neuralis/agent-core'), { ...def('@neuralis/machine-core'), optional: true }, { ...def('@acme/x'), optional: 'true' as unknown as boolean }]);
+    expect(optional).toEqual(new Set(['@neuralis/machine-core']));
+    expect(readDisabledBuiltins(['@neuralis/machine-core'], optional)).toEqual({ disabled: new Set(['@neuralis/machine-core']), ignored: [], malformed: false });
+    expect(readDisabledBuiltins(['@neuralis/agent-core', '@neuralis/machine-core', '@acme/x'], optional)).toEqual({
+      disabled: new Set(['@neuralis/machine-core']), ignored: ['@neuralis/agent-core', '@acme/x'], malformed: false,
+    });
+    // No declaration, no turning off: the host names no package itself.
+    expect(readDisabledBuiltins(['@neuralis/machine-core'], new Set())).toEqual({ disabled: new Set(), ignored: ['@neuralis/machine-core'], malformed: false });
+    for (const value of [undefined, null, '', []]) expect(readDisabledBuiltins(value, optional)).toEqual({ disabled: new Set(), ignored: [], malformed: false });
+    for (const value of ['@neuralis/machine-core', { '@neuralis/machine-core': true }, [1]]) expect(readDisabledBuiltins(value, optional)).toMatchObject({ disabled: new Set(), malformed: true });
+  });
+
+  it('the shipped virtual desktop declares itself optional, and no other native package does', () => {
+    const manifests = ['admin', 'agent-core', 'brain-core', 'machine-core'].map((slug) =>
+      JSON.parse(readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'packages', slug, 'package.json'), 'utf8')) as { name: string; neuralis: Record<string, unknown> });
+    expect(manifests.filter((m) => m.neuralis.optional === true).map((m) => m.name)).toEqual(['@neuralis/machine-core']);
+  });
+
+  it('a turned-off builtin is left out as `disabled` before any other judgement; the rest are admitted in order', () => {
+    const { admitted, refused } = admitBuiltins(
+      [def('@neuralis/agent-core'), def('@neuralis/machine-core', ['machineImage']), def('@neuralis/admin')],
+      [{ packageId: '@neuralis/machine-core', reason: 'load_failed' }],
+      noOwner,
+      new Set(['@neuralis/machine-core']),
+    );
+    expect(admitted.map((m) => m.id)).toEqual(['@neuralis/agent-core', '@neuralis/admin']);
+    expect(refused).toEqual([{ packageId: '@neuralis/machine-core', reason: 'disabled' }]);
+  });
+
+  it('the key is a host-declared json setting whose default turns nothing off', () => {
+    expect(HOST_CONFIG_SETTINGS.find((s) => s.key === 'disabledBuiltinPackages')).toMatchObject({ type: 'json', default: [] });
+  });
+});
+
+describe('a package from the runtime install record (no build record judges it)', () => {
+  const provides = (id: string, contract: string): PackageDefinition => ({ ...def(id), provides: [contract] } as PackageDefinition);
+
+  it('in conflict with an image builtin over a config key or a contract it is refused ALONE as `conflict`; the image package keeps it', () => {
+    const { admitted, refused } = admitBuiltins(
+      [def('@neuralis/agent-core', ['toolResultContentCapChars']), def('@acme/late', ['toolResultContentCapChars']), provides('@neuralis/brain-core', 'package-source-roots'), provides('@acme/late2', 'package-source-roots')],
+      [],
+      noOwner,
+      new Set(),
+      new Set(['@acme/late', '@acme/late2']),
+    );
+    expect(admitted.map((m) => m.id)).toEqual(['@neuralis/agent-core', '@neuralis/brain-core']);
+    expect([...refused].sort((a, b) => a.packageId.localeCompare(b.packageId))).toEqual([{ packageId: '@acme/late', reason: 'conflict' }, { packageId: '@acme/late2', reason: 'conflict' }]);
+  });
+
+  it('the same pair with NEITHER side from the record is left to the build record (nothing refused here)', () => {
+    const { admitted, refused } = admitBuiltins([def('@neuralis/agent-core', ['k']), def('@acme/late', ['k'])], [], noOwner);
+    expect(admitted).toHaveLength(2);
+    expect(refused).toEqual([]);
   });
 });

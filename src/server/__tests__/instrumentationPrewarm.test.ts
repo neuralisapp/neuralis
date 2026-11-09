@@ -14,6 +14,8 @@ vi.mock('../init', () => ({ getSetupState: () => mocks.setup() }));
 vi.mock('../upgradeWatchdog', () => ({ installUpgradeWatchdog: () => mocks.order.push('watchdog') }));
 vi.mock('../requestPeerStamp', () => ({ installRequestPeerStamp: () => mocks.order.push('peer') }));
 vi.mock('../host/shutdown', () => ({ installShutdownHandlers: () => mocks.order.push('shutdown'), addShutdownStep: vi.fn() }));
+// The data-home lock is claimed right after the signal handlers, before anything reads the tree.
+vi.mock('../host/homeLock', () => ({ claimHomeLock: async () => { mocks.order.push('homeLock'); } }));
 vi.mock('../host/bootstrap', () => ({
   getRuntime: async () => {
     await mocks.runtime();
@@ -54,18 +56,29 @@ describe('the setup state', () => {
     mocks.setup.mockResolvedValue({ configured: false, reason: 'secret_missing' });
     vi.stubEnv('MCP_HTTP_PORT', '3101');
     await register();
-    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown']);
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'homeLock']);
     expect(mocks.runtime).not.toHaveBeenCalled();
     expect(mocks.startMcp).not.toHaveBeenCalled();
     expect(mocks.error).toHaveBeenCalledTimes(1);
-    expect(mocks.error).toHaveBeenCalledWith('setup', expect.stringMatching(/NEXTAUTH_SECRET is not set\. Run setup/));
+    expect(mocks.error).toHaveBeenCalledWith('setup', expect.stringMatching(/^Neuralis is not set up: the data home has no session secret \(app\/config\/session-secret\.key\)\. Run setup /));
+  });
+
+  it('an owner but no secret file (an earlier release set it up): one line naming upgrade --apply, never setup', async () => {
+    mocks.setup.mockResolvedValue({ configured: false, reason: 'secret_moved' });
+    await register();
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'homeLock']);
+    expect(mocks.runtime).not.toHaveBeenCalled();
+    expect(mocks.error).toHaveBeenCalledTimes(1);
+    const line = String(mocks.error.mock.calls[0]?.[1]);
+    expect(line).toContain('`neuralis upgrade --apply`');
+    expect(line).not.toMatch(/setup/i);
   });
 
   it('with the secret but no owner account: the boot runs and one info line says so', async () => {
     mocks.setup.mockResolvedValue({ configured: false, reason: 'setup_incomplete' });
     mocks.runtime.mockResolvedValue();
     await register();
-    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'monitor']);
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'homeLock', 'monitor']);
     await vi.waitFor(() => expect(mocks.runtime).toHaveBeenCalled());
     expect(mocks.info).toHaveBeenCalledTimes(1);
     expect(mocks.info).toHaveBeenCalledWith('setup', expect.stringContaining('no owner account yet'));
@@ -78,7 +91,7 @@ describe('runtime-ready attachment prewarm', () => {
     mocks.runtime.mockReturnValue(new Promise<void>((resolve) => { ready = resolve; }));
     mocks.ui.mockImplementation(() => new Promise<void>(() => {}));
     await register();
-    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'monitor']);
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'homeLock', 'monitor']);
     expect(mocks.ui).not.toHaveBeenCalled();
     ready();
     await vi.waitFor(() => expect(mocks.ui).toHaveBeenCalledTimes(1));
@@ -131,7 +144,7 @@ describe('real package manager readiness', () => {
     let ready: () => void = () => { throw new Error('not initialized'); };
     mocks.whenReady.mockImplementation(() => new Promise<void>((resolve) => { ready = resolve; }));
     await register();
-    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'monitor']);
+    expect(mocks.order).toEqual(['watchdog', 'peer', 'shutdown', 'homeLock', 'monitor']);
     await vi.waitFor(() => expect(mocks.whenReady).toHaveBeenCalledTimes(1));
     expect(mocks.ui).not.toHaveBeenCalled();
     expect(mocks.error).not.toHaveBeenCalled();

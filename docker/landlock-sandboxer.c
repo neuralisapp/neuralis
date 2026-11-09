@@ -7,7 +7,7 @@
 //
 // WHO RUNS THROUGH IT. In the CONTAINER this is the wall builder for
 // lower-trust agents; `exec.unconfined` holders bypass it (bare spawn) —
-// that bypass is deliberate and owner-decided. On the HOST PLANE there is NO
+// that bypass is deliberate and owner-decided. On the DEVICE PLANE there is NO
 // bypass for anyone, owner included: every host exec and every host PTY is
 // spawned through this helper, and if the helper is missing the broker answers
 // 503 rather than spawning bare.
@@ -301,7 +301,7 @@ static int probe_abi(void) {
 // renumbering them is the silently-catastrophic error.
 //
 // The verdict is EACCES, not KILL_PROCESS (owner decision, 2026-08-18): the
-// same filter now rides the CONTAINER plane and an interactive terminal tab, and
+// same filter now rides the LOCAL plane and an interactive terminal tab, and
 // a silent SIGSYS kill of a member's tab is a capability degradation. Security
 // value is identical — the syscall never reaches the kernel either way.
 //
@@ -407,19 +407,92 @@ static int apply_seccomp(void) {
 // Layer 5 — per-spawn path masking. Ranked LAST and deliberately FAIL-SOFT.
 //
 // It is DEAD on stock Ubuntu 24.04+: the shipped unprivileged_userns AppArmor
-// profile allows creating the namespace but denies capabilities inside it, so
-// the mount fails for want of CAP_SYS_ADMIN. It is measured working on WSL2,
+// profile allows creating the namespace but then refuses the id maps, the
+// mount and getattr on inherited descriptors — so the layer is probed in a
+// throwaway child and never entered there. It is measured working on WSL2,
 // which is exactly why it must not be the floor — a positive result there does
 // not generalise. On a system unit the same effect is available natively via
 // TemporaryFileSystem=/run + BindPaths=, which is where it belongs.
 // ---------------------------------------------------------------------------
-static void write_map(const char *path, const char *content) {
+static int write_map(const char *path, const char *content) {
   int fd = open(path, O_WRONLY | O_CLOEXEC);
   if (fd < 0)
-    return;
-  ssize_t ignored = write(fd, content, strlen(content));
-  (void)ignored;
+    return -1;
+  ssize_t n = write(fd, content, strlen(content));
   close(fd);
+  return n == (ssize_t)strlen(content) ? 0 : -1;
+}
+
+// Enter a user+mount namespace with the caller's own identity and private
+// mounts. Returns 0, or -1 with a reason in `why` — and on -1 the caller is
+// ALREADY inside a namespace it cannot leave.
+static int enter_mask_namespace(uid_t uid, gid_t gid, const char **why) {
+  if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) {
+    *why = "unshare unavailable";
+    return -1;
+  }
+  // IDENTITY map: the caller keeps its own uid/gid inside the namespace. The
+  // capabilities unshare() granted are enough for the mounts below and are
+  // dropped at the execve() of the command (a non-zero uid keeps none), so the
+  // child runs as itself — never as namespace root, whose identity git and
+  // every other "who am I" reader would report (a device commit authored
+  // `root`). Never map the caller to 0 here.
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%u %u 1", (unsigned)uid, (unsigned)uid);
+  if (write_map("/proc/self/uid_map", buf) != 0) {
+    *why = "uid map refused";
+    return -1;
+  }
+  write_map("/proc/self/setgroups", "deny");
+  snprintf(buf, sizeof(buf), "%u %u 1", (unsigned)gid, (unsigned)gid);
+  if (write_map("/proc/self/gid_map", buf) != 0) {
+    *why = "gid map refused";
+    return -1;
+  }
+  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+    *why = "cannot privatise mounts";
+    return -1;
+  }
+  return 0;
+}
+
+// A namespace that half-works is worse than none: Ubuntu 24.04+'s
+// unprivileged_userns AppArmor profile lets unshare() succeed and then refuses
+// the mounts, the id maps AND getattr on every inherited descriptor — the
+// command runs as `nobody` and a Node child aborts at start on fstat(0) EACCES.
+// So the namespace is tried in a throwaway child first; the real one is
+// entered only when the child got all the way through.
+static const char *const MASK_PROBE_WHY[] = {
+    NULL, "unshare unavailable", "uid map refused", "gid map refused",
+    "cannot privatise mounts", "inherited descriptors unreadable"};
+
+// Returns NULL when the namespace works, else the reason it does not.
+static const char *mask_namespace_refusal(uid_t uid, gid_t gid) {
+  pid_t pid = fork();
+  if (pid < 0)
+    return "probe fork failed";
+  if (pid == 0) {
+    const char *why = NULL;
+    if (enter_mask_namespace(uid, gid, &why) != 0) {
+      for (int i = 1; i < 5; i++)
+        if (strcmp(why, MASK_PROBE_WHY[i]) == 0)
+          _exit(i);
+      _exit(1);
+    }
+    struct stat st;
+    // A CLOSED fd 0 is not the restriction (EBADF); an unreadable one is.
+    _exit(fstat(STDIN_FILENO, &st) == 0 || errno == EBADF ? 0 : 5);
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0)
+    if (errno != EINTR)
+      return "probe lost";
+  if (!WIFEXITED(status))
+    return "probe died";
+  int code = WEXITSTATUS(status);
+  if (code == 0)
+    return NULL;
+  return code < 6 ? MASK_PROBE_WHY[code] : "probe failed";
 }
 
 // Never returns non-zero: masking is best-effort by design.
@@ -428,23 +501,19 @@ static void apply_mounts(const char *const *masks, int mask_count) {
     return;
   uid_t uid = getuid();
   gid_t gid = getgid();
-  if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) {
-    fprintf(stderr, "sandboxer: mask: unshare unavailable (%s) — relying on "
-                    "seccomp + the service account\n",
-            strerror(errno));
+  const char *refused = mask_namespace_refusal(uid, gid);
+  if (refused) {
+    fprintf(stderr, "sandboxer: mask: %s — skipping, relying on seccomp + the "
+                    "service account\n", refused);
     return;
   }
-  char buf[64];
-  snprintf(buf, sizeof(buf), "0 %u 1", (unsigned)uid);
-  write_map("/proc/self/uid_map", buf);
-  write_map("/proc/self/setgroups", "deny");
-  snprintf(buf, sizeof(buf), "0 %u 1", (unsigned)gid);
-  write_map("/proc/self/gid_map", buf);
-
-  if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
-    fprintf(stderr, "sandboxer: mask: cannot privatise mounts (%s) — skipping\n",
-            strerror(errno));
-    return;
+  const char *why = NULL;
+  if (enter_mask_namespace(uid, gid, &why) != 0) {
+    // The probe passed, so this is a race and we are already inside a namespace
+    // we cannot leave — running the command here is the stranded state the
+    // probe exists to prevent.
+    fprintf(stderr, "sandboxer: mask: %s after a passed probe (%s)\n", why, strerror(errno));
+    _exit(EXIT_SETUP);
   }
   for (int i = 0; i < mask_count; i++) {
     struct stat st;
@@ -529,8 +598,9 @@ fail:
 // Why this exists: `apply_seccomp` is reachable only from main() behind
 // `--deny-unix-sockets`, so for its whole life the filter was proven by NOBODY.
 // Three gates all passed with the x32 hole wide open — the Dockerfile build
-// stage, `landlockProbe.ts` (container boot) and `sandboxProbe.mjs` (broker
-// readiness) — because each only asked "does the helper exit 0?".
+// stage, `landlockProbe.ts` (container boot) and the broker's readiness probe
+// (today the kernel's `paths/sandboxProbe.ts`) — because each only asked "does
+// the helper exit 0?".
 //
 // A seccomp filter is IRREVERSIBLE for the installing thread, so the check runs
 // in a FORKED CHILD: an in-process assert would confine the rest of --selftest

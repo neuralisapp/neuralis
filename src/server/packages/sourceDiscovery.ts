@@ -10,6 +10,7 @@ import type {
   PackageFile,
   PackageSourceKind,
 } from '@neuralis/package-system/contracts';
+import { HOST_SOURCE_KIND } from '@neuralis/package-system/contracts';
 import {
   normalizeSource,
   resolveLocalMounts,
@@ -272,22 +273,28 @@ export function findPackageRootForPath(
   }
 }
 
+/**
+ * The names whose presence makes a directory a package: the explicit manifest
+ * files, then the content markers of known AI package structures.
+ */
+const PACKAGE_DIR_MARKERS: readonly string[] = [
+  'neuralis.package.json', 'package.json',
+  'skills', 'agents', 'rules', 'commands', 'hooks', 'guidances',
+  '.claude', '.gemini', '.cursor',
+  'SKILL.md', 'AGENTS.md', 'CLAUDE.md',
+];
+
+/** Is a directory whose entries are `names` a package? The ONE marker test — {@link hasPackageManifest} asks it of this disk, the scanner of a reader's listing. */
+export function isPackageDirListing(names: Iterable<string>): boolean {
+  const present = new Set(names);
+  return PACKAGE_DIR_MARKERS.some((marker) => present.has(marker));
+}
+
 export function hasPackageManifest(sourceRoot: string): boolean {
   if (!existsSync(sourceRoot)) {
     return false;
   }
-
-  // Explicit manifest files
-  if (existsSync(resolve(sourceRoot, 'neuralis.package.json'))) return true;
-  if (existsSync(resolve(sourceRoot, 'package.json'))) return true;
-
-  // Content-based markers — directories with known AI package structures
-  const contentMarkers = [
-    'skills', 'agents', 'rules', 'commands', 'hooks', 'guidances',
-    '.claude', '.gemini', '.cursor',
-    'SKILL.md', 'AGENTS.md', 'CLAUDE.md',
-  ];
-  return contentMarkers.some((marker) => existsSync(resolve(sourceRoot, marker)));
+  return PACKAGE_DIR_MARKERS.some((marker) => existsSync(resolve(sourceRoot, marker)));
 }
 
 function resolveDefinitionPathIfPresent(
@@ -487,7 +494,7 @@ function describeCanonicalSource(
         relativeRoot,
         sourceConfigPreview: {
           source: sourceRef,
-          connection: { kind: 'local', root: normalizedMountRoot },
+          connection: { kind: HOST_SOURCE_KIND, root: normalizedMountRoot },
           permissions: { default: { read: true, write: mountKey === 'main', exec: false } },
           createdAt: now,
           updatedAt: now,

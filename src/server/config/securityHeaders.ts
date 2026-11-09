@@ -27,11 +27,10 @@
  * The PACKAGE ROUTE lane (`/api/packages/*`, note `packages` ≠ `package-app`)
  * follows the same shape and is INDEPENDENT of those three — the paths are
  * disjoint, so only its own pair matters: the `/api/packages/:path*` sandbox
- * rule comes AFTER the global rule, and the two machine-core stream rules come
- * AFTER that one because they RESTORE `GLOBAL_CSP` for the one package route
- * that legitimately serves a navigable HTML document. Reorder those two before
- * the sandbox rule and the KasmVNC desktop dies silently — the shell would load
- * into an opaque origin with no script and simply never connect.
+ * rule comes AFTER the global rule, and nothing under `/api/packages/` comes
+ * after it: a package response never regains a script-bearing policy on the
+ * app origin (machine-core's stream lane included — its bytes are the
+ * container's).
  *
  * That third rule carries the CSP key ALONE, deliberately. It does NOT re-declare
  * `X-Content-Type-Options` / `Referrer-Policy` — the identical values already
@@ -56,9 +55,9 @@ export type SecurityHeaderRule = {
 };
 
 /**
- * The permissive baseline the whole app runs under. Named because the
- * machine-core stream rules below must RESTORE exactly this value — two
- * spellings of one policy would drift the moment either is edited.
+ * The permissive baseline the whole app runs under. Named because the invite
+ * rule below extends exactly this value — two spellings of one policy would
+ * drift the moment either is edited.
  */
 const GLOBAL_CSP = [
   "default-src 'self'",
@@ -93,8 +92,8 @@ const GLOBAL_CSP = [
  * active-document class as `attachment` (the primary fix, in
  * `packages/brain-core/src/domain/mime.ts`); this header is the second layer.
  *
- * **It is NOT merely a net for a forgetful first-party author — it is untrusted
- * GUEST containment, which is why it is not deletable on "no first-party route
+ * **It is NOT merely a net for a forgetful native author — it is untrusted
+ * GUEST containment, which is why it is not deletable on "no native route
  * needs it" grounds.** `PackageWasmRunner` returns the WASM guest's own
  * `PackageRouteResponse` — headers included — and the catch-all forwards any
  * non-JSON content-type verbatim. So an untrusted `_packages/` drop can emit
@@ -145,24 +144,24 @@ export function buildSecurityHeaders(): SecurityHeaderRule[] {
       source: '/api/packages/:path*',
       headers: [{ key: 'Content-Security-Policy', value: PACKAGE_ROUTE_CSP }],
     },
-    // machine-core's KasmVNC proxy is the ONE package route that legitimately
-    // serves a navigable HTML DOCUMENT (`StreamProxy` emits `text/html`), so it
-    // gets the global policy back. Both package-id spellings are restored
-    // because the catch-all resolves both (`splitPackagePath` rejoins a scoped
-    // `@neuralis/machine-core` from two URL segments, and the shipped skills use
-    // the scoped form) — restoring only one would leave the other lane serving
-    // the desktop shell under `sandbox`, i.e. a silently dead desktop.
-    //
-    // The LIVE widget iframe rides the `:3101` companion server, which
-    // `next.config` headers never touch; these rules keep the catch-all lane
-    // working for whichever spelling a deployment serves.
+    // ⛔ No rule after this one restores a script-bearing CSP under
+    // `/api/packages/`. machine-core's stream lane here serves CONTAINER-
+    // authored bytes (`StreamProxy`): on the app origin a script policy would
+    // run them with the viewer's cookie, so they load into the `sandbox`
+    // floor's opaque origin like every other package response. The desktop
+    // document lives on the companion server's own address only, which these
+    // headers never touch.
     {
-      source: '/api/packages/machine-core/session/:key/stream/:path*',
-      headers: [{ key: 'Content-Security-Policy', value: GLOBAL_CSP }],
-    },
-    {
-      source: '/api/packages/@neuralis/machine-core/session/:key/stream/:path*',
-      headers: [{ key: 'Content-Security-Policy', value: GLOBAL_CSP }],
+      // The invite page reads a single-use token from its URL fragment: no
+      // Referer may carry the page URL anywhere, no frame may host it, and no
+      // cache keeps it. AFTER the global rule, so these keys win by last-write.
+      source: '/invite',
+      headers: [
+        { key: 'Referrer-Policy', value: 'no-referrer' },
+        { key: 'X-Frame-Options', value: 'DENY' },
+        { key: 'Content-Security-Policy', value: `${GLOBAL_CSP}; frame-ancestors 'none'` },
+        { key: 'Cache-Control', value: 'no-store' },
+      ],
     },
     {
       // CARD1 3B header-override. The virtual package-app asset route

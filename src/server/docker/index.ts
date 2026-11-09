@@ -11,5 +11,3 @@ export { verifySocketAccessible } from './socketHealth';
 export type { SocketHealthLogger, SocketHealthResult } from './socketHealth';
 export { resolveSharedNetwork } from './networkDiscovery';
 export type { NetworkDiscoveryOpts, NetworkDiscoveryLogger } from './networkDiscovery';
-export { pullIfMissing } from './imageEnsure';
-export type { PullOpts, PullProgressEvent } from './imageEnsure';

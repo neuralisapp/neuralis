@@ -36,8 +36,8 @@ RUN apk add --no-cache curl ca-certificates && \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     URL="https://github.com/extism/js-pdk/releases/download/${EXTISM_JS_VERSION}/extism-js-${ARCH}-linux-${EXTISM_JS_VERSION}.gz" && \
-    curl -fsSL -o /tmp/extism-js.gz "${URL}" && \
-    EXPECTED_SHA=$(curl -fsSL "${URL}.sha256" | awk '{print $1}') && \
+    curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o /tmp/extism-js.gz "${URL}" && \
+    EXPECTED_SHA=$(curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 "${URL}.sha256" | awk '{print $1}') && \
     echo "${EXPECTED_SHA}  /tmp/extism-js.gz" | sha256sum -c - && \
     gunzip /tmp/extism-js.gz && \
     chmod +x /tmp/extism-js
@@ -61,14 +61,14 @@ RUN apk add --no-cache curl ca-certificates tar && \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     URL="https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${ARCH}-linux.tar.gz" && \
-    curl -fsSL -o /tmp/binaryen.tar.gz "${URL}" && \
+    curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o /tmp/binaryen.tar.gz "${URL}" && \
     echo "${EXPECTED_SHA}  /tmp/binaryen.tar.gz" | sha256sum -c - && \
     mkdir -p /tmp/binaryen && \
     tar -xzf /tmp/binaryen.tar.gz -C /tmp/binaryen --strip-components=1 && \
     test -x /tmp/binaryen/bin/wasm-merge && \
     test -x /tmp/binaryen/bin/wasm-opt
 
-# ── landlock sandboxer build stage (warded-bailey) ──────────
+# ── landlock sandboxer build stage ──────────
 # The OS-enforcement helper: a tiny, dependency-free, musl-static binary that
 # turns on a Landlock LSM filesystem sandbox for LOWER-TRUST agent shells, then
 # execve()s the command. Owner/admin (exec.unconfined) run WITHOUT it (bare
@@ -99,7 +99,9 @@ RUN gcc -static -O2 -Wall -Wextra -o /tmp/nrs-sandboxer /tmp/landlock-sandboxer.
     ( /tmp/nrs-sandboxer --selftest || [ $? -eq 91 ] )
 
 # ── Workspace manifests ─────────────────────────────────────
-# Every packages/<dir>/package.json at its own path, plus the one file a
+# Every packages/<dir>/package.json and apps/<dir>/package.json at its own
+# path (every workspace member keeps its importer, so the install never prunes
+# the tracked lock's entries for a member the image does not build), plus the one file a
 # `"preinstall": "node <file>"` names (pnpm runs a workspace package's own
 # preinstall during the install below) — and nothing else: the install layer
 # needs exactly these. Derived from the tree instead of one COPY per package,
@@ -110,11 +112,12 @@ RUN gcc -static -O2 -Wall -Wextra -o /tmp/nrs-sandboxer /tmp/landlock-sandboxer.
 FROM base AS manifests
 WORKDIR /src
 COPY packages packages
-RUN mkdir -p /out/packages && cd packages && for manifest in */package.json; do \
-      dir="${manifest%/package.json}" && mkdir -p "/out/packages/$dir" && cp "$manifest" "/out/packages/$manifest" && \
+COPY apps apps
+RUN for root in packages apps; do (cd "$root" && for manifest in */package.json; do \
+      dir="${manifest%/package.json}" && mkdir -p "/out/$root/$dir" && cp "$manifest" "/out/$root/$manifest" && \
       pre="$(node -p "/^node ([^ ]+)\$/.exec(require('./$manifest').scripts?.preinstall ?? '')?.[1] ?? ''")" && \
-      if [ -n "$pre" ]; then mkdir -p "/out/packages/$dir/$(dirname "$pre")" && cp "$dir/$pre" "/out/packages/$dir/$pre"; fi || exit 1; \
-    done
+      if [ -n "$pre" ]; then mkdir -p "/out/$root/$dir/$(dirname "$pre")" && cp "$dir/$pre" "/out/$root/$dir/$pre"; fi || exit 1; \
+    done) || exit 1; done
 
 # ── Local package sources ───────────────────────────────────
 # A package registered from a folder or a tarball OUTSIDE this repository
@@ -184,6 +187,9 @@ FROM base AS builder
 # via node-gyp at install time. python3 + a `python` alias cover gyp's
 # interpreter lookup (gyp scripts use a `#!/usr/bin/env python` shebang).
 RUN apk add --no-cache python3 make g++ && ln -sf python3 /usr/local/bin/python
+# The desktop app is a workspace member the image installs but never builds:
+# its `electron` install hook would fetch a ~100 MB runtime nothing here runs.
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 WORKDIR /src
 
 COPY package.json pnpm-lock.yaml* ./
@@ -310,12 +316,19 @@ COPY neuralis neuralis
 # the host's own, whose local `file:` paths exist only on the host). It is what
 # the standalone output embeds as the runner's package.json.
 COPY --from=local-sources /out/neuralis/package.json neuralis/package.json
-# NEXT_PUBLIC_* vars are inlined into the client bundle at `next build` —
-# runtime compose env can never change them. The image is Docker by definition.
-ENV NEXT_PUBLIC_NEURALIS_DOCKER=true
+# Whether the server runs in a container is a RUNTIME fact (the kernel's
+# `detectDocker`, handed to the workspace page as a prop) — never a NEXT_PUBLIC_*
+# build constant: the same build runs in this image and as a native host.
 RUN --mount=type=cache,target=/src/neuralis/.next/cache,id=neuralis-next \
-    mkdir -p neuralis/public && cd neuralis && \
-    NEXTAUTH_SECRET=neuralis-ci-build-only-not-a-runtime-secret pnpm run build
+    mkdir -p neuralis/public && cd neuralis && pnpm run build
+# The runnable tree, assembled HERE by the ONE layout script (the desktop build
+# runs the same one): the standalone output, the deploy node_modules with the
+# tracer's copies merged no-clobber, `_runtime/`, the untraced operator files,
+# the external aliases reconciled and node-pty proven to load. In this builder
+# stage, so the runner takes it in ONE layer instead of copying each part twice.
+RUN node neuralis/scripts/build/standalone-runtime.mts \
+      --app /src/neuralis --deploy-modules /deploy/node_modules \
+      --build-report /tmp/build-report --out /out/neuralis
 
 # ── Runner ──────────────────────────────────────────────────
 # Layout (wave6.6 — whole-folder --neuralis overlay):
@@ -434,7 +447,7 @@ COPY --from=binaryen-dl /tmp/binaryen/bin/wasm-merge /usr/local/bin/wasm-merge
 COPY --from=binaryen-dl /tmp/binaryen/bin/wasm-opt /usr/local/bin/wasm-opt
 RUN extism-js --version && wasm-merge --version && wasm-opt --version
 
-# warded-bailey Landlock sandboxer — the OS-enforcement wrapper spawned for
+# The Landlock sandboxer — the OS-enforcement wrapper spawned for
 # lower-trust agent shells (agent-core shellRunner). Resolved at runtime by
 # NEURALIS_LANDLOCK_SANDBOXER (default /usr/local/bin/nrs-sandboxer). The smoke
 # tolerates exit 91 (ABI < 3) for the same reason as the build stage, and — like
@@ -461,104 +474,21 @@ RUN ln -s /usr/local/lib/neuralis-cli/dist/neuralis.mjs /usr/local/bin/neuralis 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# 1. Next.js standalone output → /neuralis/ ROOT (flat layout). The
-#    standalone tree is `.next/standalone/neuralis/{server.js, package.json,
-#    .next/, src/, scripts/, Dockerfile, docs/, …}` — copying the CONTENT
-#    of the inner `neuralis/` subdir directly onto the WORKDIR gives us
-#    the same shape as the host's neuralis/ folder, so the `--neuralis`
-#    overlay drops in cleanly. Only the runtime-protected artefacts move
-#    into _runtime/ in step 2.
-COPY --from=app-builder /src/neuralis/.next/standalone/neuralis/. ./
-COPY --from=app-builder /src/neuralis/.next/standalone/node_modules ./node_modules-standalone
-
-# 1b. The operator runbook. Markdown reaches no import graph, so the Next tracer
-#     that carries `scripts/` in cannot see `skills/` — it needs saying. Baking it
-#     is what lets a pulled image answer "how do I mount a folder / sync a package"
-#     from `neuralis://` with no host checkout anywhere: the overlay then swaps in
-#     the live copy, and without the overlay this one still resolves.
-COPY neuralis/skills ./skills
-
-# 1c. The offline upgrade command, its modules and the offline-probe closure it
-#     imports, entered through the one CLI (`node bin/neuralis.mjs upgrade
-#     --apply` in a one-off container). Nothing the app runs imports them, so the
-#     tracer is no guarantee they arrive. The package algorithms behind the
-#     modules ship in `node_modules/@neuralis/*/dist` (their `./upgrade`
-#     subpaths, step 3).
-COPY neuralis/bin ./bin
-COPY neuralis/scripts/cli ./scripts/cli
-COPY neuralis/scripts/upgrade.mts neuralis/scripts/checkpoint.mts ./scripts/
-COPY neuralis/scripts/setup/detect.mts neuralis/scripts/setup/envFile.mts neuralis/scripts/setup/ownerCheck.mts ./scripts/setup/
-COPY neuralis/scripts/upgrades ./scripts/upgrades
-
-# 2. Move runtime-protected artefacts into _runtime/:
-#    - server.js  → /neuralis/_runtime/server.js
-#    - .next/     → /neuralis/_runtime/.next/
-#    These survive the whole-folder host overlay via an anonymous volume
-#    on /neuralis/_runtime/. Everything else at /neuralis/ root is host-
-#    editable when the overlay is on, baked-in when it's off.
+# 1. The runnable tree, assembled by `scripts/build/standalone-runtime.mts` in
+#    the app-builder stage (its header documents the layout) — ONE copy:
+#    _runtime/{server.js,.next,public,package.json,build}, node_modules/, and the
+#    host folder's own shape at the root (src/, scripts/, skills/, bin/, …), so
+#    the `--neuralis` overlay drops in cleanly. node_modules carries the external
+#    aliases reconciled and node-pty's native binding proven to load.
 #
-#    Also COPY package.json into _runtime/ — the bundled Next.js chunks
-#    under _runtime/.next/server/chunks/ do `require('../../package.json')`
-#    (via `createRequire(import.meta.url)` in `host/builtinSlots.ts`),
-#    which now resolves to `_runtime/package.json`. We keep the root
-#    /neuralis/package.json too for host-overlay compatibility.
-RUN mkdir -p ./_runtime && \
-    mv ./server.js ./_runtime/server.js && \
-    mv ./.next ./_runtime/.next && \
-    cp ./package.json ./_runtime/package.json
-
-# 3. node_modules at /neuralis/node_modules/ — the builder's deploy tree (the
-#    graph the Next build compiled against), with the file tracer's copies
-#    merged in NO-CLOBBER: the tracer copied from that same tree, so it only
-#    ever adds, never replaces.
-#    NOT under _runtime/ because skills and tooling reference
-#    `node_modules/<name>/skills/...` paths directly;
-#    burying it would require a docs/tooling sweep.
-#    Node walks UP from server.js (`_runtime/server.js`) for require
-#    resolution: `_runtime/node_modules/` (absent) → `/neuralis/node_modules/` ✓.
-RUN rm -rf ./node_modules
-COPY --from=builder /deploy/node_modules ./node_modules
-RUN cp -rn ./node_modules-standalone/. ./node_modules/ && \
-    rm -rf ./node_modules-standalone
-
-# 3b. Reconcile Turbopack's external aliases against the node_modules we just
-#     assembled. `.next/node_modules/<pkg>-<hash>` is a relative symlink into
-#     the BUILDER's pnpm store; the runner only reproduces that path as the
-#     file tracer's statically-reachable fragment. Pure-JS externals survive
-#     that; a native addon does not — node-pty's `build/Release/pty.node` is
-#     loaded through a computed path the tracer cannot see, so the traced copy
-#     ships `lib/` alone and every PTY spawn dies while the compiled copy sits
-#     unused two directories away. The script retargets each alias at
-#     `node_modules/<name>` (deployed, install scripts run) and FAILS THE
-#     BUILD if any alias has no flat counterpart, disagrees on major version,
-#     or leaves a declared native artifact unloadable. Retargeting also
-#     collapses the duplicate `ws`/`esbuild` instances the two trees produced.
-COPY neuralis/scripts/build/reconcile-runtime-externals.mjs /tmp/reconcile-runtime-externals.mjs
-RUN node /tmp/reconcile-runtime-externals.mjs /neuralis && rm /tmp/reconcile-runtime-externals.mjs
-
-# No build-provenance stamp here, deliberately. "Is this container running what
-# I just built?" used to be answered by a file written at this point, which meant
-# a second copy of the digest algorithm AND an answer that went stale the moment
-# `neuralis:sync` swapped a package. `neuralis:sync` now computes the digest
-# INSIDE the running container from the same module the host uses, and takes the
-# build time from `docker inspect`, which already knows it.
-
-# 4. Next.js static + public/ → _runtime/ (alongside server.js).
-#    Standalone does NOT include `.next/static` or `public/`, so explicit
-#    COPYs. Next.js resolves them via `dir = __dirname` (server.js dir),
-#    so they belong inside _runtime/. The public/ at /neuralis/public/
-#    (from standalone tracer) is harmless duplication — Next.js never
-#    looks there.
-COPY --from=app-builder /src/neuralis/.next/static ./_runtime/.next/static
-COPY --from=app-builder /src/neuralis/public ./_runtime/public
-
-# 4b. The build's own report: the UI-module verdicts, the admission record and —
-#     when local packages were built — the lock their dependencies resolved to.
-#     `pnpm neuralis:rebuild` copies it out after a green build (it names the
-#     refused packages and modules and keeps the lock for the next build). The
-#     boot reads `validate.json` (the builtins it leaves out); `ui-compat.json`
-#     and the lock are rebuild-side only.
-COPY --from=builder /tmp/build-report ./_runtime/build
+#    No build-provenance stamp here, deliberately. "Is this container running
+#    what I just built?" used to be answered by a file written at this point,
+#    which meant a second copy of the digest algorithm AND an answer that went
+#    stale the moment `neuralis:sync` swapped a package. `neuralis:sync` now
+#    computes the digest INSIDE the running container from the same module the
+#    host uses, and takes the build time from `docker inspect`, which already
+#    knows it.
+COPY --from=app-builder /out/neuralis/ ./
 
 # 5. /.neuralis dirs use 777 so any UID (compose user: override) can write.
 RUN mkdir -p /.neuralis/app /.neuralis/projects && chmod -R 777 /.neuralis

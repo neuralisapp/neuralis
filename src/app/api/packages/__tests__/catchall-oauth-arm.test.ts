@@ -105,6 +105,20 @@ describe('catch-all OAuth arm — dispatch', () => {
     expect(dispatched()).not.toHaveProperty('oauthClient');
   });
 
+  it('displayName: the COOKIE arm dispatches the record\'s name; the ticket and OAuth arms name nobody', async () => {
+    mocks.getUserById.mockResolvedValue({ id: 'u1', status: 'active', name: 'Ada Lovelace' });
+    mocks.getSessionUser.mockResolvedValueOnce({ id: 'u1', email: 'u1@x', name: 'U' });
+    await GET(req('http://localhost:3100/api/packages/agent-core/x', { 'x-project-id': 'p1' }), params);
+    expect(dispatched()!.session.displayName).toBe('Ada Lovelace');
+    mocks.routePackage.mockClear();
+    mocks.tryResolveSessionTicket.mockResolvedValueOnce({ kind: 'match', session: { ...oauthSession, requestId: 'r' } });
+    await GET(req('http://localhost:3100/api/packages/agent-core/x', { authorization: 'Bearer nrs1.r.s' }), params);
+    expect(dispatched()!.session).not.toHaveProperty('displayName');
+    mocks.routePackage.mockClear();
+    await GET(req('http://localhost:3100/api/packages/agent-core/x'), params);
+    expect(dispatched()!.session).not.toHaveProperty('displayName');
+  });
+
   it('a body cannot make the call interactive', async () => {
     const res = await POST(req('http://localhost:3100/api/packages/agent-core/x', { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, { method: 'POST' }), params);
     expect(res.status).toBe(200);

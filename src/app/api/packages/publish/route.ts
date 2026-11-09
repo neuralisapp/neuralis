@@ -11,7 +11,7 @@
  * project's scope (scanned packages ∪ deps-discovered builtins).
  */
 
-import { isAbsolute, join, relative } from 'node:path';
+import { join } from 'node:path';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/server/auth/session';
 import { packageSlug, publishPackage } from '@/server/packages/packagePublisher';
@@ -20,16 +20,10 @@ import { ensureCommunityRuntime } from '@/server/packages/runtime';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
 import { BUILTIN_PACKAGE_IDS } from '@/server/host/builtinSlots';
 import { listProjectsForUser, getProjectById } from '@/server/store/ProjectStore';
-import { resolveProjectRoot } from '@neuralis/package-system/paths';
+import { isPathInside, resolveProjectRoot } from '@neuralis/package-system/paths';
 import { getEnv } from '@/server/config/env';
 import { writeAuditLog } from '@/server/store/AuditStore';
 import { canManagePackages, resolveProjectAccess } from '@/server/projects/access';
-
-/** True when `child` is `parent` or nested within it (no `..` escape, no absolute). */
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
-}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   let session;
@@ -79,7 +73,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Defense-in-depth containment: the artifact path is host-derived and must
     // stay under the project root (never a caller-supplied outputDir).
     const artifactBase = join(projectRoot, 'publish', packageSlug(packageId));
-    if (!isInside(projectRoot, artifactBase)) {
+    if (!isPathInside(projectRoot, artifactBase)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 

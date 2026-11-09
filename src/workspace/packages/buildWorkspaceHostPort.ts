@@ -1,6 +1,6 @@
 /**
  * Implementation of `WorkspaceHostPort`. The host exposes one workspace state
- * surface; every first-party package consumes it through
+ * surface; every native package consumes it through
  * `<NeuralisHostProvider>`.
  */
 
@@ -87,7 +87,20 @@ function subscribeVisibleSkills(onStoreChange: () => void): () => void {
   return onSnapshotChange(() => onStoreChange());
 }
 
-const isDocker = process.env.NEXT_PUBLIC_NEURALIS_DOCKER === 'true';
+/**
+ * Whether the server runs in a container — a RUNTIME fact the server reads
+ * from the kernel (`detectDocker`, the signal behind `stack.isDocker`) and
+ * hands the workspace page as a prop; never a build constant, because one
+ * build serves both an image and a native host. Unseeded (a test, a render
+ * before the page prop) it is `false`: the native answer shows no `/mounts`
+ * volume picker.
+ */
+let serverIsDocker = false;
+
+/** Seed the runtime facts from the server page's props; idempotent, synchronous (read at render). */
+export function seedHostRuntimeFacts(facts: { isDocker: boolean }): void {
+  serverIsDocker = facts.isDocker;
+}
 
 export const workspaceHostPort: WorkspaceHostPort = {
   useProjectId: () => useWorkspaceStore((s) => s.session.projectId),
@@ -237,7 +250,9 @@ export const workspaceHostPort: WorkspaceHostPort = {
   // `cleanAgentStore` is the W9 baseline this generalizes).
   onClientStateReset: (handler) => subscribeClientStateReset(handler),
 
-  isDocker,
+  get isDocker() {
+    return serverIsDocker;
+  },
 
   components: { UserAvatar, UserAvatarStack },
 };

@@ -22,11 +22,12 @@
 
 import { chmod, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { assertVolumeIdle, checkDisk, coldTar, mustExec, restoreTar, volumeBytes, type Exec } from '../qdrant-upgrade/upgrade.mts';
 import type { ComposeAnswer } from '../checkpoint.mts';
 import { qdrantVolumeName } from '../setup/qdrantVersion.mts';
 import { spell } from '../cli/spelling.mts';
+import { isPathInside } from '@neuralis/package-system/paths';
 
 export type QdrantMode = 'docker' | 'binary' | 'external' | 'skip';
 export type OfflineVerdict = { offline: true } | { offline: false; reason: string };
@@ -75,11 +76,6 @@ const EXCLUDED_HOME_DIRS = ['qdrant-backups'];
 
 export function defaultBackupRoot(neuralisHome: string): string {
   return join(dirname(neuralisHome), `${basename(neuralisHome)}-backups`);
-}
-
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** The nearest existing directory at or above `dir` — what free space is measured on. */
@@ -135,9 +131,9 @@ export async function runBackup(ports: BackupPorts, facts: InstallFacts, opts: B
   }
   const stamp = ports.now().toISOString().replace(/[:.]/g, '-');
   const dir = resolve(opts.outDir ?? join(defaultBackupRoot(home), stamp));
-  if (isInside(home, dir)) throw new Error(`Refusing to write the backup inside the home it copies (${dir}). Nothing was changed.`);
+  if (isPathInside(home, dir)) throw new Error(`Refusing to write the backup inside the home it copies (${dir}). Nothing was changed.`);
   for (const tree of [facts.configDir, facts.buildContext]) {
-    if (tree && isInside(resolve(tree), dir)) {
+    if (tree && isPathInside(resolve(tree), dir)) {
       throw new Error(`Refusing to write the backup inside ${tree}: it is a Docker build context or the compose folder, and the backup holds every secret. Nothing was changed.`);
     }
   }
@@ -154,7 +150,10 @@ export async function runBackup(ports: BackupPorts, facts: InstallFacts, opts: B
   await checkDisk(ports, total, existingAncestor(dir), 1, 'the backup');
 
   const compose = await ports.composeRunning(facts.configDir);
-  const stop = compose.kind === 'services' ? [compose.app, compose.vectorstore].filter((s): s is string => s !== null && compose.running.includes(s)) : [];
+  // `companions`: the desktop app's own Qdrant/Ollama compose file (no app service; the app's own check below).
+  const stop = compose.kind === 'services' || compose.kind === 'companions'
+    ? [compose.kind === 'services' ? compose.app : null, compose.vectorstore, compose.kind === 'companions' ? compose.embeddings : null].filter((s): s is string => s !== null && compose.running.includes(s))
+    : [];
   const parts: BackupPart[] = [];
   try {
     for (const service of stop) await mustExec(ports, ['compose', 'stop', service], `stop ${service}`, { cwd: facts.configDir });

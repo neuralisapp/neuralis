@@ -13,10 +13,11 @@
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { CliExit, MOVED_VERBS, OPS_COMMANDS, RESERVED_VERBS, dispatch, exitCodeFor, type CliContext } from '../cli/registry.mts';
+import { CLIENT_VERBS, CliExit, MOVED_VERBS, OPS_COMMANDS, RESERVED_VERBS, composeRunArgs, dispatch, exitCodeFor, imageRoute, upgradeDeviceBinds, type CliContext } from '../cli/registry.mts';
+import { existsSync, statSync } from 'node:fs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const scriptsDir = join(HERE, '..');
@@ -38,14 +39,26 @@ function context(): CliContext & { out: string[]; err: string[] } {
   };
 }
 
-const OPS = ['setup', 'rebuild', 'sync', 'update', 'upgrade', 'mount', 'pkg', 'user', 'checkpoint', 'backup', 'restore', 'qdrant-upgrade', 'reset-vector', 'convert'];
-const RESERVED = ['login', 'logout', 'whoami', 'device', 'mcp', 'plugin', 'skill', 'fs', 'agent', 'workflow', 'shells', 'git', 'source', 'connect', 'up', 'down', 'tunnel'];
+const OPS = ['setup', 'rebuild', 'sync', 'update', 'upgrade', 'mount', 'pkg', 'user', 'checkpoint', 'backup', 'restore', 'qdrant-upgrade', 'reset-vector', 'convert', 'up', 'down', 'status', 'start', 'tunnel'];
+const CLIENT = ['login', 'logout', 'whoami', 'request', 'skill', 'package', 'device', 'mcp', 'plugin', 'launch'];
+const RESERVED = ['fs', 'agent', 'workflow', 'shells', 'git', 'source', 'connect'];
 
 describe('the verbs', () => {
-  it('dispatches exactly the operator verbs and reserves exactly the later ones — two disjoint lists', () => {
+  it('dispatches exactly the operator verbs, names the client\'s and reserves exactly the later ones — three disjoint lists', () => {
     expect(OPS_COMMANDS.map((m) => m.name)).toEqual(OPS);
+    expect([...CLIENT_VERBS]).toEqual(CLIENT);
     expect([...RESERVED_VERBS]).toEqual(RESERVED);
-    expect(OPS.filter((v) => RESERVED.includes(v))).toEqual([]);
+    expect([...OPS, ...CLIENT, ...RESERVED].length).toBe(new Set([...OPS, ...CLIENT, ...RESERVED]).size);
+  });
+
+  it('a client verb (`package`, `device`, `login` …) answers that the Neuralis client runs it — never "a later release"', async () => {
+    for (const verb of CLIENT) {
+      const ctx = context();
+      expect(await dispatch([verb], ctx)).toBe(1);
+      expect(ctx.err.join('')).toContain(`"${verb}" is a command of the Neuralis client`);
+      expect(ctx.err.join('')).toContain('npm install -g @neuralis/cli');
+      expect(ctx.err.join('')).not.toContain('later release');
+    }
   });
 
   it('a reserved verb answers by name with the error exit, never "unknown"', async () => {
@@ -78,7 +91,7 @@ describe('the verbs', () => {
   it('every verb module loads with no side effect at import and exports the run the adapter calls', async () => {
     const registry = readFileSync(join(scriptsDir, 'cli', 'registry.mts'), 'utf-8');
     const targets = [...new Set([...registry.matchAll(/import\('(\.\.\/[a-z-]+\.mts)'\)/g)].map((m) => m[1]!))];
-    expect(targets.length).toBe(13); // `backup.mts` serves backup and restore
+    expect(targets.length).toBe(16); // `backup.mts` serves backup and restore; `up.mts` serves up, down and status
     for (const target of targets) {
       const mod = (await import(join(scriptsDir, 'cli', target))) as { run?: unknown };
       expect(typeof mod.run, target).toBe('function');
@@ -116,7 +129,7 @@ describe('one dispatch path', () => {
     expect(manifest.bin).toEqual({ neuralis: 'bin/neuralis.mjs' });
     expect(manifest.files).toContain('bin');
     const aliases = Object.entries(manifest.scripts).filter(([name]) => name.startsWith('neuralis:') || name === 'reset:vector');
-    expect(aliases.length).toBe(14);
+    expect(aliases.length).toBe(15);
     for (const [name, command] of aliases) {
       const verb = /^node --import tsx scripts\/cli\/registry\.mts ([a-z-]+)$/.exec(command)?.[1];
       expect(verb, `${name}: ${command}`).toBeDefined();
@@ -127,9 +140,9 @@ describe('one dispatch path', () => {
   });
 
   it('the bin reaches the same registry: a reserved verb through `bin/neuralis.mjs` exits 1 by name', () => {
-    const res = spawnSync(process.execPath, [join(hostRoot, 'bin', 'neuralis.mjs'), 'login'], { encoding: 'utf8', cwd: hostRoot });
+    const res = spawnSync(process.execPath, [join(hostRoot, 'bin', 'neuralis.mjs'), 'fs'], { encoding: 'utf8', cwd: hostRoot });
     expect(res.status).toBe(1);
-    expect(res.stderr).toContain('"login" is reserved for a later release');
+    expect(res.stderr).toContain('"fs" is reserved for a later release');
   });
 
   it('under node_modules (an npm install folder) the bin resolves the host `@/` alias for import and require alike; without its hook tsx does not', () => {
@@ -184,6 +197,8 @@ describe('one dispatch path', () => {
       expect((JSON.parse(readFileSync(manifest, 'utf-8')) as { engines?: { node?: string } }).engines?.node, manifest).toBe(`>=${floor}`);
     }
     expect(readFileSync(join(hostRoot, '..', 'create-neuralis', 'index.mjs'), 'utf-8')).toContain(`const NODE_MAJOR_FLOOR = ${floor};`);
+    // A clone's `npm install` refuses before it resolves or writes anything.
+    expect((JSON.parse(readFileSync(join(hostRoot, 'package.json'), 'utf-8')) as { devEngines?: unknown }).devEngines).toEqual({ runtime: { name: 'node', version: `>=${floor}`, onFail: 'error' } });
   });
 
   it('both Node-floor refusals name the installation help anchor and the issue form', () => {
@@ -194,4 +209,104 @@ describe('one dispatch path', () => {
     }
     expect(scaffolder).toMatch(/fail\(`Neuralis needs Node\.js [^\n]*\$\{HELP_LINE\}`\)/);
   });
+});
+
+describe('the image gate — one field on each verb row', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'neuralis-image-gate-'));
+  writeFileSync(join(folder, 'docker-compose.yml'), '# GENERATED by neuralis setup (2026-10-19, neuralis 0.3.2) — do not hand-edit.\n');
+  writeFileSync(join(folder, '.env'), 'NEURALIS_IMAGE_TAG=0.3.2\n');
+  const at = (installDir: string, env: Record<string, string> = {}): CliContext => ({ packageDir: hostRoot, installDir, cwd: installDir, env, stdin: process.stdin, stdout: () => {}, stderr: () => {} });
+  const route = (verb: string, argv: string[], ctx: CliContext) => imageRoute(OPS_COMMANDS.find((m) => m.name === verb)!, argv, ctx);
+  const INSIDE = { NEURALIS_DOCKER: 'true', NEURALIS_HOME: '/.neuralis', NEURALIS_HOST_HOME: '/home/op/.neuralis' };
+
+  it('every verb row declares how it runs on an image-only folder', () => {
+    for (const command of OPS_COMMANDS) expect(command.image?.onImage, command.name).toBeDefined();
+  });
+
+  it('build, sync, register and convert refuse by name — with what to do instead, never promising a verb that exists today', () => {
+    for (const verb of ['rebuild', 'sync', 'pkg', 'convert']) {
+      let refusal: unknown = null;
+      try { route(verb, [], at(folder)); } catch (error) { refusal = error; }
+      expect((refusal as CliExit).message, verb).toBe(`"${verb}" does not run on an image-only install folder`);
+    }
+    let pkg: unknown = null;
+    try { route('pkg', ['add', 'x'], at(folder, INSIDE)); } catch (error) { pkg = error; }
+    const detail = (pkg as CliExit).detail.join('\n');
+    expect(detail).toContain('`neuralis package install <name>`');
+    expect(detail).not.toContain('later release');
+    expect(detail).toContain('`docker compose up -d -V`');
+    expect(detail).toContain('`neuralis update --apply`');
+  });
+
+  it('on the host every other verb is handed to a container of the folder\'s image; backup and restore bind the home\'s parent', () => {
+    for (const verb of ['setup', 'update', 'upgrade', 'mount', 'user', 'checkpoint', 'qdrant-upgrade', 'reset-vector']) {
+      expect(route(verb, ['list'], at(folder)), verb).toEqual({ run: 'handoff', homeParent: false });
+    }
+    expect(route('backup', [], at(folder))).toEqual({ run: 'handoff', homeParent: true });
+    expect(route('restore', ['/b'], at(folder))).toEqual({ run: 'handoff', homeParent: true });
+  });
+
+  it('inside the one-shot: oneshot verbs run here, compose verbs as the app service, checkpoint by its subcommand', () => {
+    for (const verb of ['setup', 'update', 'mount', 'qdrant-upgrade']) expect(route(verb, [], at(folder, INSIDE)), verb).toEqual({ run: 'here' });
+    for (const verb of ['upgrade', 'user', 'reset-vector']) expect(route(verb, [], at(folder, INSIDE)), verb).toEqual({ run: 'compose' });
+    expect(route('checkpoint', ['list'], at(folder, INSIDE))).toEqual({ run: 'here' });
+    expect(route('checkpoint', ['restore', 'cp-1'], at(folder, INSIDE))).toEqual({ run: 'compose' });
+    // backup needs the home at its host path: handed on once more unless it already is.
+    expect(route('backup', [], at(folder, INSIDE))).toEqual({ run: 'handoff', homeParent: true });
+    expect(route('backup', [], at(folder, { ...INSIDE, NEURALIS_HOME: '/home/op/.neuralis' }))).toEqual({ run: 'here' });
+  });
+
+  it('PAIRED CONTROL — any other install, or none, runs every verb here', () => {
+    for (const verb of OPS) {
+      expect(route(verb, [], at(hostRoot, INSIDE)), verb).toEqual({ run: 'here' });
+      expect(route(verb, [], context()), verb).toEqual({ run: 'here' });
+    }
+  });
+
+  it('a compose verb runs as the app service: -T without a terminal, the operator\'s name passed on', () => {
+    expect(composeRunArgs({ project: 'p', app: 'neuralis' }, 'user', ['list'], { tty: false, operator: 'op' })).toEqual(['compose', '-p', 'p', 'run', '--rm', '--no-deps', '-T', '-e', 'NEURALIS_OPERATOR=op', 'neuralis', 'node', 'bin/neuralis.mjs', 'user', 'list']);
+    expect(composeRunArgs({ project: 'p', app: 'web' }, 'upgrade', ['--apply'], { tty: true, operator: undefined })).toEqual(['compose', '-p', 'p', 'run', '--rm', '--no-deps', 'web', 'node', 'bin/neuralis.mjs', 'upgrade', '--apply']);
+    expect(composeRunArgs({ project: 'p', app: 'web' }, 'upgrade', ['--apply'], { tty: false, operator: undefined, binds: ['-v', '/h/device:/.neuralis/device'] })).toEqual(['compose', '-p', 'p', 'run', '--rm', '--no-deps', '-T', '-v', '/h/device:/.neuralis/device', 'web', 'node', 'bin/neuralis.mjs', 'upgrade', '--apply']);
+  });
+
+  it('an upgrade run of the app service binds the broker secret (read-only) and the WHOLE device folder, at their HOST paths', () => {
+    const inside = { NEURALIS_DOCKER: 'true', NEURALIS_HOST_HOME: '/srv/op/.neuralis' };
+    const home = mkdtempSync(join(tmpdir(), 'nrs-upgrade-binds-'));
+    try {
+      // Nothing there: nothing bound, and no folder made (Docker would make it root-owned).
+      expect(upgradeDeviceBinds(inside, home)).toEqual([]);
+      expect(existsSync(join(home, 'device'))).toBe(false);
+      // A broker secret: the device folder is made (0700) so the identity the upgrade writes lands on the host.
+      mkdirSync(join(home, 'host-broker'));
+      expect(upgradeDeviceBinds(inside, home)).toEqual([
+        '-v', '/srv/op/.neuralis/host-broker:/.neuralis/host-broker:ro',
+        '-v', '/srv/op/.neuralis/device:/.neuralis/device',
+      ]);
+      expect(statSync(join(home, 'device')).mode & 0o777).toBe(0o700);
+      // A device folder alone (the per-host identities live below it): bound whole.
+      rmSync(join(home, 'host-broker'), { recursive: true });
+      expect(upgradeDeviceBinds(inside, home)).toEqual(['-v', '/srv/op/.neuralis/device:/.neuralis/device']);
+      // Outside the one-shot container, or with no host path: nothing.
+      expect(upgradeDeviceBinds({}, home)).toEqual([]);
+      expect(upgradeDeviceBinds({ NEURALIS_DOCKER: 'true' }, home)).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('--install names the install from anywhere, before or after the verb', () => {
+  it('the host bin takes it off the command line in either position', () => {
+    const home = mkdtempSync(join(tmpdir(), 'neuralis-install-flag-home-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'neuralis-install-flag-cwd-'));
+    for (const argv of [['--install', hostRoot, 'checkpoint', 'list'], ['checkpoint', 'list', '--install', hostRoot]]) {
+      const res = spawnSync(process.execPath, ['--import', pathToFileURL(join(hostRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs')).href, join(scriptsDir, 'cli', 'registry.mts'), ...argv], { cwd: elsewhere, encoding: 'utf-8', env: { ...process.env, NEURALIS_HOME: home } });
+      expect(res.status, `${argv.join(' ')}: ${res.stdout}${res.stderr}`).toBe(0);
+      expect(res.stdout).toContain('No checkpoints under');
+    }
+    // PAIRED CONTROL: without it, from there, the refusal names the flag.
+    const lost = spawnSync(process.execPath, ['--import', pathToFileURL(join(hostRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs')).href, join(scriptsDir, 'cli', 'registry.mts'), 'checkpoint', 'list'], { cwd: elsewhere, encoding: 'utf-8', env: { ...process.env, NEURALIS_HOME: home } });
+    expect(lost.status).toBe(1);
+    expect(lost.stderr).toContain('--install <folder>');
+  }, 60_000);
 });

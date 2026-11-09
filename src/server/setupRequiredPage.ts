@@ -28,16 +28,58 @@ const FOLDER_SETUP_COMMAND = 'npx neuralis setup';
 
 const HELP_URL = 'https://docs.neuralisapp.com/getting-started/installation#if-something-fails';
 
-const REASON_TEXT: Record<SetupIncompleteReason, string> = {
-  secret_missing: 'This Neuralis instance was started without its configuration: the session secret that setup writes is not set.',
+const UPDATING_URL = 'https://docs.neuralisapp.com/getting-started/updating';
+
+const REASON_TEXT: Record<Exclude<SetupIncompleteReason, 'secret_moved'>, string> = {
+  secret_missing: 'This Neuralis instance has no session secret: setup writes it into the data folder.',
   setup_incomplete: 'This Neuralis instance has no owner account yet, so nobody can sign in.',
 };
+
+const PAGE_STYLE = `body{margin:0;background:#0b0d10;color:#e6e8eb;font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem}
+h1{font-size:1.6rem;margin:0 0 .75rem}
+h2{font-size:1.05rem;margin:2rem 0 .5rem}
+p{margin:.5rem 0;color:#c4c8ce}
+pre{background:#14181d;border:1px solid #262c33;border-radius:6px;padding:.9rem 1rem;overflow-x:auto;color:#9be7c4;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#9be7c4}
+a{color:#7cc4ff}`;
+
+/**
+ * A home an earlier release set up (owner records, no session secret file): the
+ * one way on is the offline `upgrade --apply`, so this page names only that and
+ * never the first-install commands.
+ */
+function renderUpgradeRequiredPage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Neuralis needs an upgrade step</title>
+<style>
+${PAGE_STYLE}
+</style>
+</head>
+<body data-neuralis-state="upgrade-required">
+<main>
+<h1>Neuralis needs an upgrade step</h1>
+<p>This data folder was created by an earlier Neuralis release. Its session secret moves into the data folder once, with the app stopped. Nobody is signed out.</p>
+<p>Stop Neuralis, run this in its install folder, then start it again (<code>neuralis update --apply</code> runs it for you):</p>
+<pre>neuralis upgrade --apply</pre>
+<p>See <a href="${UPDATING_URL}">Updating</a>.</p>
+</main>
+</body>
+</html>
+`;
+}
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 export function renderSetupRequiredPage(reason: SetupIncompleteReason): string {
+  if (reason === 'secret_moved') return renderUpgradeRequiredPage();
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -46,14 +88,7 @@ export function renderSetupRequiredPage(reason: SetupIncompleteReason): string {
 <meta name="robots" content="noindex">
 <title>Neuralis is not set up yet</title>
 <style>
-body{margin:0;background:#0b0d10;color:#e6e8eb;font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem}
-h1{font-size:1.6rem;margin:0 0 .75rem}
-h2{font-size:1.05rem;margin:2rem 0 .5rem}
-p{margin:.5rem 0;color:#c4c8ce}
-pre{background:#14181d;border:1px solid #262c33;border-radius:6px;padding:.9rem 1rem;overflow-x:auto;color:#9be7c4;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#9be7c4}
-a{color:#7cc4ff}
+${PAGE_STYLE}
 </style>
 </head>
 <body data-neuralis-state="setup-required">

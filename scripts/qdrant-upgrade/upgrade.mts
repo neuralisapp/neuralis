@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
+  qdrantBinaryName,
   qdrantImageRef,
   qdrantStatePath,
   qdrantUpgradeChain,
@@ -46,6 +47,7 @@ import {
   writeQdrantState,
   type QdrantState,
 } from '../setup/qdrantVersion.mts';
+import { tarCommand } from '@neuralis/package-system/paths';
 import { spell } from '../cli/spelling.mts';
 
 // ── Ports ──────────────────────────────────────────────────────
@@ -67,7 +69,7 @@ export type Exec = (cmd: string, args: string[], opts?: ExecOptions) => Promise<
  */
 export const processExec: Exec = (cmd, args, opts = {}) =>
   new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let out = '';
     let err = '';
     let flushed: Promise<void> = Promise.resolve();
@@ -140,6 +142,14 @@ export type UpgradeContext = BaseContext & {
   /** The host package: its `bin/neuralis.mjs` regenerates compose through the one CLI. */
   packageDir: string;
   composeProject: string;
+  /**
+   * The app's compose service, stopped while the counts are recorded; null for
+   * the desktop app's own Qdrant (its compose file runs no app — the caller
+   * proved the app stopped).
+   */
+  appService: string | null;
+  /** Rewrites the compose file for the recorded version; null = setup's own `--compose-only`. */
+  regenerate: (() => Promise<void>) | null;
   /** Rehearsal: a CLONED volume; nothing live is touched. */
   rehearseVolume: string | null;
   /** A hop container, reached through `docker exec`. */
@@ -312,7 +322,8 @@ export async function readCollection(api: QdrantApi, name: string): Promise<Coll
 /** A hop container that exited: waiting longer cannot help. */
 export class HopDiedError extends Error {}
 
-async function waitReady(ctx: BaseContext, api: QdrantApi, label: string): Promise<void> {
+/** `/readyz` every `pollMs` until it answers 200 (the upgrade's hops, and the vector copy's two Qdrants); a `HopDiedError` from `api` ends it at once. */
+export async function waitReady(ctx: Pick<BaseContext, 'monotonicMs' | 'sleep'> & { timeouts: Pick<UpgradeTimeouts, 'readyMs' | 'pollMs'> }, api: QdrantApi, label: string): Promise<void> {
   const deadline = ctx.monotonicMs() + ctx.timeouts.readyMs;
   for (;;) {
     try {
@@ -405,6 +416,18 @@ async function verifyServer(
 }
 
 // ── Docker primitives ──────────────────────────────────────────
+
+/**
+ * The `tar` a host-side archive step runs: the kernel's one answer
+ * (`tarCommand` — on Windows the system bsdtar by absolute path, never a Git
+ * GNU tar that reads `C:\…` as a remote host). A Windows without `SystemRoot`
+ * is refused by name, never guessed.
+ */
+export function localTar(platform: NodeJS.Platform = process.platform, env: Readonly<Record<string, string | undefined>> = process.env): string {
+  const cmd = tarCommand(platform, env);
+  if (!cmd) throw new Error('No tar on this machine: SystemRoot is not set, so System32\\tar.exe cannot be found. Nothing was changed.');
+  return cmd;
+}
 
 export async function mustExec(ctx: Pick<BaseContext, 'exec'>, args: string[], what: string, opts?: ExecOptions, cmd = 'docker'): Promise<ExecResult> {
   const res = await ctx.exec(cmd, args, opts);
@@ -710,7 +733,7 @@ async function dockerUpgrade(ctx: UpgradeContext): Promise<UpgradeOutcome> {
     } else {
       const api = ctx.liveQdrant();
       const names = await checkSource(ctx, api);
-      await compose(ctx, ['stop', 'neuralis'], 'stop the app');
+      if (ctx.appService) await compose(ctx, ['stop', ctx.appService], 'stop the app');
       run.appStopped = true;
       await recordCounts(ctx, api, names, record);
       await snapshotOut(ctx, api, dir, record);
@@ -798,6 +821,7 @@ function nextState(version: string, previous: string, source: QdrantState['sourc
 
 async function regenerateCompose(ctx: UpgradeContext): Promise<void> {
   // Through setup's own generator — the compose file is never hand-edited.
+  if (ctx.regenerate) return ctx.regenerate();
   const res = await ctx.exec(process.execPath, [join(ctx.packageDir, 'bin', 'neuralis.mjs'), 'setup', '--compose-only'], { cwd: ctx.neuralisDir });
   if (res.code !== 0) throw new Error(`Regenerating compose failed: ${res.err.trim() || res.out.trim()}`);
 }
@@ -823,7 +847,7 @@ export async function rollbackDocker(ctx: UpgradeContext, record: UpgradeRecord,
     await withHopContainer(ctx, record.volume, record.from, (api) => verifyServer(ctx, api, record.from, record));
     return;
   }
-  await ctx.exec('docker', ['compose', 'stop', 'neuralis', 'qdrant'], { cwd: ctx.neuralisDir });
+  await ctx.exec('docker', ['compose', 'stop', ...(ctx.appService ? [ctx.appService] : []), 'qdrant'], { cwd: ctx.neuralisDir });
   await restoreTar(ctx, record.volume, fromImage, record.coldTar.file);
   if (stateAdvanced) {
     const statePath = qdrantStatePath(ctx.neuralisHome);
@@ -857,7 +881,7 @@ export type BinaryPorts = {
   download(version: string, destDir: string): Promise<string>;
   /** Start a hop server on the storage, loopback only, the key in its spawn env. */
   startHop(binaryPath: string, storageDir: string): Promise<{ stop(): Promise<void> }>;
-  /** Stop / start the managed server (`<bin>/qdrant`, its pid file). */
+  /** Stop / start the managed server (`<bin>/qdrant`, its pid file; on Windows never by pid — through the app's supervisor). */
   stopManaged(): Promise<void>;
   startManaged(): Promise<void>;
   /** The app runs natively or in compose; the CLI knows which. */
@@ -940,12 +964,12 @@ async function binaryUpgrade(ctx: BinaryContext): Promise<UpgradeOutcome> {
     await ctx.binary.stopManaged();
     await waitDown(ctx, ctx.liveQdrant());
     const tarFile = join(dir, 'qdrant-storage.tar');
-    await mustExec(ctx, ['-C', ctx.storageDir, '-cf', tarFile, '.'], 'cold backup of the storage dir', undefined, 'tar');
+    await mustExec(ctx, ['-C', ctx.storageDir, '-cf', tarFile, '.'], 'cold backup of the storage dir', undefined, localTar());
     await chmod(tarFile, 0o600);
     record.coldTar = { file: tarFile, bytes: (await stat(tarFile)).size };
     const previousBinary = join(dir, `qdrant-${ctx.from}`);
-    await copyFile(join(ctx.binDir, 'qdrant'), previousBinary);
-    await chmod(previousBinary, 0o700);
+    await copyFile(join(ctx.binDir, qdrantBinaryName()), previousBinary);
+    if (process.platform !== 'win32') await chmod(previousBinary, 0o700);
     await saveRecord(dir, record);
 
     run.phase = 'hops';
@@ -964,8 +988,8 @@ async function binaryUpgrade(ctx: BinaryContext): Promise<UpgradeOutcome> {
       }
       const staged = join(ctx.binDir, `qdrant.${version}.tmp`);
       await copyFile(binary, staged);
-      await chmod(staged, 0o755);
-      await rename(staged, join(ctx.binDir, 'qdrant'));
+      if (process.platform !== 'win32') await chmod(staged, 0o755);
+      await rename(staged, join(ctx.binDir, qdrantBinaryName()));
       const statePath = qdrantStatePath(ctx.neuralisHome);
       const before = await readQdrantState(statePath);
       run.phase = 'final';
@@ -1009,9 +1033,9 @@ export async function rollbackBinary(ctx: BinaryContext, record: UpgradeRecord, 
   await ctx.binary.stopManaged().catch(() => undefined);
   await waitDown(ctx, ctx.liveQdrant());
   for (const entry of await readdir(ctx.storageDir)) await rm(join(ctx.storageDir, entry), { recursive: true, force: true });
-  await mustExec(ctx, ['-C', ctx.storageDir, '-xf', record.coldTar.file], 'restore the storage dir', undefined, 'tar');
-  await copyFile(join(dir, `qdrant-${record.from}`), join(ctx.binDir, 'qdrant'));
-  await chmod(join(ctx.binDir, 'qdrant'), 0o755);
+  await mustExec(ctx, ['-C', ctx.storageDir, '-xf', record.coldTar.file], 'restore the storage dir', undefined, localTar());
+  await copyFile(join(dir, `qdrant-${record.from}`), join(ctx.binDir, qdrantBinaryName()));
+  if (process.platform !== 'win32') await chmod(join(ctx.binDir, qdrantBinaryName()), 0o755);
   if (stateAdvanced) {
     const statePath = qdrantStatePath(ctx.neuralisHome);
     const current = await readQdrantState(statePath);

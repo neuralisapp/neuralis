@@ -36,7 +36,7 @@ describe('a rejected bootstrap on /api/health', () => {
     const response = await GET();
     expect(response.status).toBe(503);
     const body: unknown = await response.json();
-    expect(body).toEqual({ status: 'error', error: 'bootstrap_failed', code });
+    expect(body).toEqual({ status: 'error', error: 'bootstrap_failed', code, instanceId: expect.any(String) });
     expect(JSON.stringify(body)).not.toMatch(/neuralis\/|cp-2026|\/srv|v7/);
   });
 });

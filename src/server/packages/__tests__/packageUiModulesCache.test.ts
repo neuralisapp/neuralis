@@ -21,7 +21,7 @@ const sheet = {
     compileStartedAt: 1, compileEndedAt: 4 },
 };
 function definition(): PackageDefinition {
-  return { id: '@acme/cache', name: 'cache', version: '1.0.0', access: { trust: 'first-party' } } as PackageDefinition;
+  return { id: '@acme/cache', name: 'cache', version: '1.0.0', access: { trust: 'native' } } as PackageDefinition;
 }
 beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for('neuralis.packageUi.attachments'));

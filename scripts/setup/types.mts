@@ -9,6 +9,7 @@
  */
 
 import type { EmbeddingEndpointEntry } from '@neuralis/package-system/contracts';
+import type { PublicOrigins } from './envFile.mts';
 
 export type VectorChoice = {
   /**
@@ -42,6 +43,8 @@ export type MachineChoice = {
   skipPrefetch: boolean;
   /** Run from the image's one-shot container: a pull started there dies with it, so the host pulls. */
   pullOnHost: boolean;
+  /** The virtual desktop (machine-core) is loaded; off writes `disabledBuiltinPackages` (setup never uninstalls it). */
+  enabled: boolean;
 };
 
 /**
@@ -88,14 +91,13 @@ export type SetupConfig = {
    * self-provisioned modes (`docker`/`binary`) it is always set — carried from
    * an existing .env or minted (never re-minted over a live value).
    */
-  /** `port`: the host port a docker-mode Qdrant is published on (`NEURALIS_QDRANT_PORT`). */
-  qdrant: { url: string; mode: 'docker' | 'binary' | 'external' | 'skip'; apiKey: string | null; port: number };
+  /** `port`: the REST port (docker: the loopback publish; binary: the listener); `grpcPort`: binary mode's gRPC listener. */
+  qdrant: { url: string; mode: 'docker' | 'binary' | 'external' | 'skip'; apiKey: string | null; port: number; grpcPort?: number };
   vector: VectorChoice;
   machine: MachineChoice;
   neuralisHome: string;
   projectId: string;
   projectName: string;
-  nextAuthSecret: string;
   /**
    * Where neuralis will actually run. `docker` means the app container is the
    * runtime — setup stores `host.docker.internal` in place of `127.0.0.1` so
@@ -134,10 +136,20 @@ export type SetupConfig = {
   endpointKeys: Record<string, string>;
   /**
    * The origin users will actually reach this deployment on — what
-   * `NEXTAUTH_URL`, `APP_URL` and the compose `environment:` block all get.
-   * Resolved once, from the existing value on a re-run.
+   * `NEXTAUTH_URL` and `APP_URL` get in `.env`, their one source (the compose
+   * file reads them through `env_file`). Resolved once, from the existing
+   * value on a re-run.
    */
   publicOrigin: string;
+  /** The tunnel domain a re-run keeps (`neuralis tunnel on`): its three origins replace the one `publicOrigin` names. */
+  tunnelDomain: string | null;
+  /** The origins that tunnel replaced (`NEURALIS_TUNNEL_RESTORE`), carried verbatim for `tunnel off`; null without one. */
+  tunnelRestore: string | null;
+  /**
+   * The origin block `.env` gets: the tunnel's three, or `publicOrigin`'s
+   * derivation with an MCP or sandbox origin the operator declared carried.
+   */
+  origins: PublicOrigins;
   /** Ports, read back from an existing install when there is one. */
   ports: { app: number; mcp: number; sandbox: number };
   /**

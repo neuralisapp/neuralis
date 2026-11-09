@@ -32,11 +32,21 @@ describe('mcp-sandbox route — reserved handshake + source/origin protocol', ()
     expect(shellHtml).toMatch(/window\.parent\.postMessage/);
   });
 
-  it('the shell accepts the reserved resource-ready reply only from a same-hostname origin', () => {
+  it('the shell accepts the reserved resource-ready reply only from the trusted APP origin, byte for byte', async () => {
     expect(shellHtml).toContain('ui/notifications/sandbox-resource-ready');
-    expect(shellHtml).toContain('sameHostname');
+    expect(shellHtml).not.toContain('sameHostname');
+    expect(shellHtml).toContain('e.origin !== APP_ORIGIN');
     // The reply must carry the template HTML in params.html.
     expect(shellHtml).toContain('params.html');
+    const saved = process.env.APP_URL;
+    try {
+      process.env.APP_URL = 'https://app.example.com/';
+      const pinned = await (await GET()).text();
+      expect(pinned).toContain('var APP_ORIGIN = "https://app.example.com";');
+    } finally {
+      if (saved === undefined) delete process.env.APP_URL;
+      else process.env.APP_URL = saved;
+    }
   });
 
   it('relays transparently with source-identity checks on BOTH legs', () => {

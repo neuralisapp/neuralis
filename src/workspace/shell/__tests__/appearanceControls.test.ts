@@ -1,19 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { installFakeDom, click } from './fakeDom';
+import { installFakeDom, click, FakeNode } from './fakeDom';
 const dom = installFakeDom();
 const values = new Map<string, string>();
 const writes = vi.fn((key: string, value: string) => values.set(key, value));
 Object.assign(window, { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: writes, removeItem: (key: string) => values.delete(key) } });
 vi.stubGlobal('localStorage', window.localStorage);
-vi.mock('../useDockItems', () => ({ usePackageDockItems: () => [{ id: 'allowed', packageId: 'pkg', label: 'Allowed', dock: 'primary', icon: 'Package', position: 1, onClick: { kind: 'openWidget', widgetType: 'allowed', widgetTitle: 'Allowed' } }] }));
+vi.mock('next-auth/react', () => ({ useSession: () => ({ data: { user: { id: 'u1', name: 'Ada' } }, status: 'authenticated' }) }));
+vi.mock('../useDockItems', () => ({ usePrimaryDockItems: () => [{ id: 'allowed', title: 'Allowed', prefKey: 'pkg:allowed', group: 'trust:native', icon: () => null, position: 1, onClick: () => undefined }], useSecondaryDockItems: () => [], useScopedSnapshotPending: () => false }));
 const { createElement, useContext, act } = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { ThemeProvider, ThemeContext, themeScopeStyle } = await import('../../theme/ThemeContext');
 const { LIGHT_THEME, GRAPHITE_THEME, FOCUS_THEME, THEMES } = await import('../../theme/themes');
 const { PanelChrome } = await import('../PanelChrome');
-const { resolveWidgetLevel, DIM_GLASS } = await import('../widgetSurface');
+const { resolveWidgetLevel, DIM_GLASS, surfaceStyle, surfaceBlurClass } = await import('../widgetSurface');
 const { useWorkspaceStore } = await import('../../store/workspaceStore');
 const { AppMenu } = await import('../AppMenu');
 const { LayoutSettingsPanel } = await import('../LayoutSettingsPanel');
@@ -55,7 +56,7 @@ describe('independent appearance and retained instance controls', () => {
     }
     const locked = { type: 'allowed', title: 'A', render: () => createElement('div'), trust: 'untrusted' as const };
     expect(resolveWidgetLevel({ instance, definition: locked, defaultTransparency: 'opaque' }).showCycle).toBe(false);
-    expect(resolveWidgetLevel({ instance, definition: { ...locked, trust: 'first-party', chrome: { userTransparency: false } }, defaultTransparency: 'opaque' }).showCycle).toBe(false);
+    expect(resolveWidgetLevel({ instance, definition: { ...locked, trust: 'native', chrome: { userTransparency: false } }, defaultTransparency: 'opaque' }).showCycle).toBe(false);
   });
   it('dock editing and cancel write no storage; Save stores once and exits in the same update', async () => {
     useWorkspaceStore.setState({ session: { projectId: 'p', agentId: null, workspaceView: 'default' }, dockEditing: { primary: false, secondary: false } });
@@ -135,10 +136,14 @@ describe('independent appearance and retained instance controls', () => {
     await render(createElement(AppMenu, { onClose: () => undefined }));
     const apps = dom.document.querySelectorAll('[aria-label="Apps"]')[0];
     expect(apps.getAttribute('role')).toBe('dialog');
-    expect(apps.textContent).toContain('Allowed');
     expect(apps.textContent).not.toContain('Unauthorized');
-    const pin = apps.querySelectorAll('[aria-label="Pin Allowed"]')[0];
-    expect(pin.getAttribute('disabled')).not.toBeNull();
+    expect(apps.querySelectorAll('[aria-label="Save dock order"]')).toHaveLength(0);
+    expect(useWorkspaceStore.getState().dockEditing.primary).toBe(true);
+    expect(apps.querySelectorAll('[aria-label="Search"]')[0].getAttribute('disabled')).toBeNull();
+    await act(async () => useWorkspaceStore.getState().setDockEditing('both', false));
+    await act(async () => click(apps.querySelectorAll('[aria-label="Actions for Allowed"]')[0]));
+    expect(dom.document.querySelectorAll('[aria-label="Pin Allowed"]')).toHaveLength(1);
+    expect(apps.textContent).toContain('Allowed');
     expect(useWorkspaceStore.getState().projectStateById.p.dock?.primary?.hidden).toEqual(['pkg:allowed']);
     expect(apps.querySelectorAll('[aria-pressed="true"]')[0].textContent).toBe('Apps');
   });
@@ -218,8 +223,8 @@ describe('complete material projection through same mounted chrome', () => {
   });
 });
 
-describe('the Apps/Layout panel surface is fixed', () => {
-  it('Dark, fully opaque, no backdrop filter — the same in all 4 themes × 3 materials', async () => {
+describe('the Apps/Layout panel has its panel-only Dim material', () => {
+  it('Dark Dim uses the existing material pair across all4themes×3preferences', async () => {
     const seen = new Set<string>();
     for (const material of ['opaque', 'dim', 'transparent'] as const) {
       await render(createElement(ThemeProvider, null, createElement(Probe),
@@ -228,12 +233,13 @@ describe('the Apps/Layout panel surface is fixed', () => {
         await act(async () => { context.setThemeId(id); context.setDockThemeId(id); context.setBackgroundThemeId(id); });
         const panel = dom.document.querySelectorAll('[aria-label="Apps"]')[0];
         expect(panel.getAttribute('data-theme-id')).toBe('dark');
-        expect(String(panel.getAttribute('class'))).not.toContain('backdrop');
+        expect(String(panel.getAttribute('class'))).toContain(surfaceBlurClass('dim'));
+        expect(panel.style.backgroundColor).toBe(surfaceStyle('dim').backgroundColor);
         seen.add(`${panel.style.backgroundColor}|${panel.style['--w-bg-rgb']}|${panel.style.colorScheme}`);
       }
       await act(async () => root!.unmount()); root = null;
     }
-    expect([...seen]).toEqual([`rgb(var(--w-bg-rgb))|${DARK_THEME.colors.widgetBg}|dark`]);
+    expect([...seen]).toEqual([`${surfaceStyle('dim').backgroundColor}|${DARK_THEME.colors.widgetBg}|dark`]);
   });
 
   it('each surface row sets its own theme; "Same theme everywhere" copies the Widgets theme, on the same stored keys', async () => {
@@ -276,5 +282,89 @@ describe('the Apps/Layout panel surface is fixed', () => {
       expect(node.querySelectorAll('BUTTON').length + node.querySelectorAll('INPUT').length).toBeGreaterThan(0);
     }
     expect(dom.container.querySelectorAll('[aria-label="Stage mode"]')[0].textContent).toContain('Phone');
+  });
+});
+
+describe('phone shares the existing Dock appearance', () => {
+  it('all palettes × materials × backgrounds reach normal and edited bodies plus original-material navigation, with no setting writes', async () => {
+    const { PhoneDockBand, DockItemButton } = await import('../Dock');
+    const { dockSurface, dockNavigationSurface } = await import('../dockSurface');
+    const { UserInfo } = await import('../UserInfo'); const { ProjectSwitcher } = await import('../ProjectSwitcher');
+    const Glyph = ({ style }: { style?: import('react').CSSProperties }) => createElement('svg', { style, 'data-content-glyph': '' });
+    const items: import('../Dock').DockItem[] = [
+      { id: 'user', title: 'User', position: 0, phoneSection: 'apps', section: 'header', icon: Glyph, onClick: () => undefined, renderCustom: (p) => createElement(UserInfo, { phoneNavigation: p?.phoneNavigation }) },
+      { id: 'project', title: 'Project', position: 0, phoneSection: 'agents', section: 'header', icon: Glyph, onClick: () => undefined, renderCustom: (p) => createElement(ProjectSwitcher, { phoneNavigation: p?.phoneNavigation }) },
+      { id: 'app', title: 'App', position: 1, phoneSection: 'apps', prefKey: 'p:app', group: 'trust:native', icon: Glyph, onClick: () => undefined },
+    ];
+    const network = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    useWorkspaceStore.setState({ session: { projectId: 'palette-p', agentId: null, workspaceView: 'default' }, dockEditing: { primary: false, secondary: false, phone: false } });
+    await render(createElement(ThemeProvider, null, createElement(Probe)));
+    try {
+      for (const theme of THEMES) for (const material of ['opaque', 'dim', 'transparent'] as const) for (const background of ['classic', 'toolbar'] as const) {
+        await act(async () => context.setDockThemeId(theme.id));
+        writes.mockClear();
+        await act(async () => root!.render(createElement(ThemeProvider, null, createElement(Probe), createElement(PhoneDockBand, { items, headers: true, transparency: material, background, launcher: createElement('button', { title: 'Apps' }) }))));
+        const band = dom.container.querySelectorAll('[data-phone-launcher-row]')[0];
+        expect(band.style['--w-bg-rgb']).toBe(theme.colors.widgetBg);
+        expect(band.style.backdropFilter || '').toBe(material === 'dim' ? 'blur(6px)' : '');
+        const app = band.querySelectorAll('[title="App"]')[0];
+        expect(app.getAttribute('class')).toContain(dockSurface(background === 'toolbar' ? 'transparent' : material, 'default').bg);
+        for (const side of ['apps', 'agents']) {
+          const header = band.querySelectorAll(`[data-phone-header="${side}"]`)[0];
+          expect(header.querySelectorAll('BUTTON')[0].getAttribute('class')).toContain('w-10 h-10');
+          expect(header.querySelectorAll('BUTTON')[0].getAttribute('class')).toContain(dockNavigationSurface(material).bg);
+        }
+        expect(band.querySelectorAll('[data-phone-center]')[0].getAttribute('class')?.includes(dockNavigationSurface(material).bg)).toBe(background === 'toolbar');
+        expect(writes).not.toHaveBeenCalled();
+      }
+      const headerGlyph = dom.container.querySelectorAll('[data-phone-header="agents"]')[0].querySelectorAll('SVG')[0];
+      expect(headerGlyph.getAttribute('class')).toContain('w-8 h-8');
+      await act(async () => useWorkspaceStore.setState({ projects: { byId: { 'palette-p': { id: 'palette-p', name: 'Palette', description: '', ownerId: 'owner', members: {}, roles: {}, agentOwnership: {}, limits: { spend: { projectTotal: null, byRole: {}, byUser: {}, byAgent: {} } }, createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z', appearance: { iconName: 'Folder', color: '#8899aa' } } }, ids: ['palette-p'], status: 'success', error: null } }));
+      const projectAvatar = dom.container.querySelectorAll('[data-phone-header="agents"]')[0].querySelectorAll('SPAN').find((node) => node.getAttribute('title') === 'Palette')!;
+      expect(projectAvatar.style.width).toBe('32px'); expect(projectAvatar.style.height).toBe('32px');
+      await act(async () => useWorkspaceStore.getState().setDockEditing('phone', true));
+      await act(async () => root!.render(createElement(ThemeProvider, null, createElement(Probe), createElement(PhoneDockBand, { items, headers: false, transparency: 'dim', background: 'toolbar', launcher: 'Apps' }))));
+      const edited = dom.container.querySelectorAll('[data-phone-launcher-row]')[0];
+      expect(edited.style['--w-bg-rgb']).toBe(context.dockTheme.colors.widgetBg);
+      expect(edited.style.backdropFilter).toBe('blur(6px)');
+      expect(edited.querySelectorAll('[data-phone-header]').map((node) => node.style.visibility)).toEqual(['hidden', 'hidden']);
+      expect(dom.document.querySelectorAll('[data-phone-edit-bar]')).toHaveLength(1);
+    } finally { network.mockRestore(); useWorkspaceStore.getState().setDockEditing('phone', false); }
+  });
+
+  it('resolves desktop and Phone sizing in normal and actual editable outlets', async () => {
+    const { DockItemButton, DockEditor } = await import('../Dock');
+    const Glyph = ({ style }: { style?: import('react').CSSProperties }) => createElement('svg', { style, 'data-context-glyph': '' });
+    for (const phone of [false, true]) for (const horizontal of [false, true]) {
+      const item = { id: 'sized', title: 'Sized', position: 1, prefKey: 'p:sized', group: 'trust:native', icon: Glyph, onClick: () => undefined, ...(phone ? { phoneSection: 'apps' as const } : {}) };
+      await render(createElement(DockItemButton, { item, horizontal, hasLabels: !horizontal, pinned: true }));
+      expect(dom.container.querySelectorAll('[data-context-glyph]')[0].style.width).toBe(phone ? '32px' : '26px');
+      await act(async () => root!.render(createElement(DockEditor, { dockId: phone ? 'phone' : 'primary', items: [item], horizontal, hasLabels: !horizontal, pinned: true, cornerReverse: false, modeSwitch: null })));
+      expect(dom.container.querySelectorAll('[data-context-glyph]')[0].style.width).toBe(phone ? '32px' : '26px');
+      await act(async () => root!.render(createElement(DockItemButton, { item: { ...item, section: 'footer' }, horizontal, hasLabels: false, pinned: true })));
+      expect(dom.container.querySelectorAll('[data-context-glyph]')[0].style.width).toBe(phone ? '32px' : '28px');
+    }
+  });
+
+  it('desktop26px fallback remains identical before an image mint, after decode failure, and without a declared image', async () => {
+    const { DockItemButton } = await import('../Dock');
+    const { __resetPackageAssetScopeForTests } = await import('../../packages/packageAssetScope');
+    Object.defineProperty(FakeNode.prototype, 'closest', { configurable: true, value: () => null });
+    let finish: ((response: Response) => void) | undefined;
+    const network = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => init?.method === 'POST' ? new Promise<Response>((resolve) => { finish = resolve; }) : new Response('{}'));
+    const Glyph = ({ style }: { style?: import('react').CSSProperties }) => createElement('svg', { style, 'data-size-fallback': '' });
+    const item = { id: 'image', title: 'Image', position: 1, icon: Glyph, onClick: () => undefined, image: { packageId: 'third-party', dockId: 'dock', declaration: 'app/shared/icon.png' } };
+    useWorkspaceStore.setState({ session: { projectId: 'image-p', agentId: null, workspaceView: 'default' } });
+    try {
+      await render(createElement(DockItemButton, { item, horizontal: true, hasLabels: true, pinned: true }));
+      expect(dom.container.querySelectorAll('[data-size-fallback]')[0].style.width).toBe('26px');
+      await act(async () => { finish!(new Response(JSON.stringify({ handle: 'image-test', url: '/api/package-app/_scope/image-test/shared/icon.png' }), { status: 200 })); });
+      const image = dom.container.querySelectorAll('IMG')[0]; expect(image.style.width).toBe('26px'); expect(image.style.height).toBe('26px');
+      const props = image[Object.keys(image).find((key) => key.startsWith('__reactProps$'))!] as { onError: () => void };
+      await act(async () => props.onError());
+      expect(dom.container.querySelectorAll('[data-size-fallback]')[0].style.height).toBe('26px');
+      await act(async () => root!.render(createElement(DockItemButton, { item: { ...item, image: undefined }, horizontal: false, hasLabels: false, pinned: true })));
+      expect(dom.container.querySelectorAll('[data-size-fallback]')[0].style.width).toBe('26px');
+    } finally { if (root) { await act(async () => root!.unmount()); root = null; } __resetPackageAssetScopeForTests(); network.mockRestore(); }
   });
 });

@@ -87,6 +87,12 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: '4mb',
     },
+    // The IDLE timeout of every request `src/proxy.ts` forwards to the companion
+    // server (Next's default is 30 s; `0` also means 30 s). A forwarded MCP SSE
+    // stream stays open while its keep-alive frames arrive, so this stays ≥ 4 ×
+    // the max of agent-core's `mcpSseKeepaliveMs` (`proxyTimeout.test.ts`).
+    // WebSockets are not subject to it.
+    proxyTimeout: 120_000,
   },
   // The security-header rule set (incl. the CARD1 3B `/api/package-app/*`
   // path-scoped override) lives in `./src/server/config/securityHeaders.ts` so

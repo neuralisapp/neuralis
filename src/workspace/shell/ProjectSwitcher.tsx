@@ -1,13 +1,13 @@
 'use client';
 
 import { FolderOpen, ChevronDown, Check, BrushCleaning, Pencil } from 'lucide-react';
-import { useContext, useCallback, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useContext, useEffect, useCallback, useMemo, useRef, useState, type ComponentType } from 'react';
 import { createPortal } from 'react-dom';
 import { useSession } from 'next-auth/react';
 import { cn } from '@/lib/cn';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { usePresentation, useProjectGroups, useProjectsState, useProjectsWithStore, useWorkspaceSession } from '../store/selectors';
-import { dockSurface, useDockTransparency } from './dockSurface';
+import { dockSurface, dockNavigationSurface, useDockTransparency } from './dockSurface';
 import { ProjectUnreadCount, UnreadDot } from './DockBadge';
 import { useOtherProjectsUnread } from '../notifications/notificationsClient';
 import { ProjectAvatar, ProjectEditPopup, canEditProjectIdentity } from './ProjectEditPopup';
@@ -17,15 +17,20 @@ import type { DockEdge } from './dockPlacement';
 import { ThemeContext, themeScopeStyle } from '../theme/ThemeContext';
 import { DEFAULT_THEME } from '../theme/themes';
 
+import type { TransparencyLevel } from '../store/types';
+
 type Props = {
   expanded?: boolean;
   align?: 'left' | 'right';
   disabled?: boolean;
   pinned?: boolean;
   edge?: DockEdge;
+  launcher?: boolean;
+  phoneNavigation?: TransparencyLevel;
+  iconSize?: number;
 };
 
-export function ProjectSwitcher({ expanded = false, align = 'right', disabled = false, pinned = true, edge = 'right' }: Props) {
+export function ProjectSwitcher({ expanded = false, align = 'right', disabled = false, pinned = true, edge = 'right', launcher = false, phoneNavigation, iconSize = 32 }: Props) {
   const dockTheme = useContext(ThemeContext)?.dockTheme ?? DEFAULT_THEME;
   const { projectId } = useWorkspaceSession();
   const elsewhereUnread = useOtherProjectsUnread(projectId);
@@ -37,6 +42,7 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
   const selectGroup = useWorkspaceStore((s) => s.selectGroup);
   const { presentation, groupId, groupName, available: groupsAvailable } = usePresentation();
   const groups = useProjectGroups();
+  const editing = useWorkspaceStore((s) => Boolean(s.dockEditing.primary || s.dockEditing.secondary || s.dockEditing.phone));
   // "Project settings" is a slot: the package that owns the settings surface
   // fills it and opens its own widget. Empty slot ⇒ no row.
   const ProjectSettings = useHostSlot(HOST_SLOTS.projectSettings) as ComponentType<ProjectSettingsSlotProps> | null;
@@ -59,7 +65,7 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
   const activeProject = projectId ? byId[projectId] : null;
   const canEditProject = canEditProjectIdentity(activeProject, userId);
   const dockLevel = useDockTransparency();
-  const dockSurf = dockSurface(dockLevel, 'default');
+  const dockSurf = phoneNavigation ? dockNavigationSurface(phoneNavigation) : dockSurface(dockLevel, 'default');
 
   const close = useCallback(() => { setIsOpen(false); }, []);
   // In a Group the same trigger names `project · Group` (the full text in the
@@ -80,16 +86,24 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
     });
   }, [disabled, edge]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); setIsOpen(false); btnRef.current?.focus(); } };
+    document.addEventListener('keydown', escape, true);
+    return () => document.removeEventListener('keydown', escape, true);
+  }, [isOpen]);
+
   const popup = isOpen ? createPortal(
     <>
       <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={close} />
       <div
+        data-launcher-popover=""
         data-theme-id={dockTheme.id}
-        className="fixed backdrop-blur-xl rounded-xl overflow-hidden min-w-[11rem]"
+        className={cn('fixed backdrop-blur-xl rounded-xl min-w-[11rem]', launcher ? 'overflow-y-auto' : 'overflow-hidden')}
         style={{
           ...themeScopeStyle(dockTheme), backgroundColor: 'rgba(var(--w-bg-rgb), 0.96)',
           zIndex: 9999,
-          ...(edge === 'bottom'
+          ...(launcher ? { top: Math.max(8, Math.min(pos.top, window.innerHeight - 400)), left: Math.max(8, Math.min(pos.left, window.innerWidth - 320)), maxWidth: 'calc(100vw - 16px)', maxHeight: 'calc(100dvh - 16px)' } : edge === 'bottom'
             ? { bottom: window.innerHeight - pos.top, left: pos.left }
             : edge === 'right'
               ? { top: pos.top, right: window.innerWidth - pos.left }
@@ -162,6 +176,7 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
                   key={value}
                   type="button"
                   role="radio"
+                  disabled={editing}
                   aria-checked={presentation === value}
                   onClick={() => setPresentation(value)}
                   className={cn(
@@ -180,6 +195,7 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
                     key={g.id}
                     type="button"
                     role="radio"
+                    disabled={editing}
                     aria-checked={g.id === groupId}
                     onClick={() => selectGroup(g.id)}
                     title={g.name}
@@ -199,7 +215,8 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
               // The Groups are edited in the agent dock's edit draft (names, members, new, delete).
               <button
                 type="button"
-                onClick={() => { useWorkspaceStore.getState().setDockEditing('secondary', true); setIsOpen(false); }}
+                disabled={editing}
+                onClick={() => { useWorkspaceStore.getState().setDockEditing(launcher && edge === 'bottom' ? 'phone' : 'secondary', true); setIsOpen(false); }}
                 className="mt-1 w-full text-left px-3 py-1 text-xs flex items-center gap-2 text-white/55 hover:text-white hover:bg-white/5 rounded-lg transition"
               >
                 <Pencil className="w-3 h-3 shrink-0" />
@@ -239,21 +256,21 @@ export function ProjectSwitcher({ expanded = false, align = 'right', disabled = 
         onClick={toggle}
         disabled={disabled}
         className={cn(
-          'rounded-xl transition flex items-center shrink-0 overflow-hidden w-full',
+          'rounded-xl transition flex items-center shrink-0 overflow-hidden',
           dockSurf.bg,
-          expanded ? 'h-11 px-0' : 'w-12 h-11 justify-center',
+          phoneNavigation ? 'w-10 h-10 justify-center' : expanded ? 'w-full h-11 px-0' : 'w-12 h-11 justify-center',
           align === 'right' ? 'flex-row-reverse' : 'flex-row',
           'disabled:opacity-40 disabled:cursor-not-allowed',
         )}
         title={elsewhereUnread ? `${triggerName} — unread in another project` : triggerName}
         aria-label={triggerName}
       >
-        <div className="relative w-12 h-full flex items-center justify-center shrink-0">
+        <div className={cn('relative h-full flex items-center justify-center shrink-0', phoneNavigation ? 'w-10' : 'w-12')}>
           {elsewhereUnread ? <UnreadDot className="absolute top-2 right-2.5" /> : null}
           {activeProject?.appearance ? (
-            <ProjectAvatar project={activeProject} size={30} />
+            <ProjectAvatar project={activeProject} size={iconSize} />
           ) : (
-            <FolderOpen className="w-7 h-7" style={{ color: 'var(--dock-icon-project, #34d399)' }} />
+            <FolderOpen className="w-8 h-8" style={{ color: 'var(--dock-icon-project, #34d399)', width: iconSize, height: iconSize }} />
           )}
         </div>
         {expanded ? (

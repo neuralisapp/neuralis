@@ -37,12 +37,13 @@ function audit(): Array<Record<string, unknown>> {
   return readFileSync(path, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-function run(args: string[], input = ''): { status: number | null; out: string } {
+function run(args: string[], input = '', env: Record<string, string> = {}): { status: number | null; out: string } {
   const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/cli/registry.mts', 'user', ...args], {
     cwd: hostRoot,
     input,
     encoding: 'utf-8',
-    env: { ...process.env, NEURALIS_HOME: home, NEXTAUTH_SECRET: 'test-secret' },
+    // No session secret in the environment: the user command never reads it (the host reads its file).
+    env: { ...process.env, NEURALIS_HOME: home, NEXTAUTH_SECRET: '', ...env },
     timeout: 60_000,
   });
   return { status: result.status, out: `${result.stdout}${result.stderr}` };
@@ -71,6 +72,19 @@ describe('neuralis:user', () => {
     expect(out).toContain('2 user(s); 1 deleted record(s) not shown.');
   }, 60_000);
 
+  it('typed in a folder outside the host tree, the builtin set is still the code that runs (never `<cwd>/package.json`)', () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), 'nrs-user-cwd-'));
+    homes.push(elsewhere);
+    // The bin, as an operator types it: `tsx` is found next to the code, never in the working directory.
+    const result = spawnSync(process.execPath, [join(hostRoot, 'bin', 'neuralis.mjs'), 'user', 'list', '--install', hostRoot], {
+      cwd: elsewhere, encoding: 'utf-8', env: { ...process.env, NEURALIS_HOME: home, NEXTAUTH_SECRET: '' }, timeout: 60_000,
+    });
+    const out = `${result.stdout}${result.stderr}`;
+    expect(out).not.toContain('ENOENT');
+    expect(result.status).toBe(0);
+    expect(out).toContain('2 user(s); 1 deleted record(s) not shown.');
+  }, 60_000);
+
   it('enable with the address typed again: active, no epoch bump, one audit row naming the operator', () => {
     const { status } = run(['enable', 'off@x.co'], 'OFF@x.co\n');
     expect(status).toBe(0);
@@ -82,6 +96,14 @@ describe('neuralis:user', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ action: 'user.enable', userId: null, target: 'off', details: { via: 'cli' } });
     expect(typeof (rows[0]!.details as Record<string, unknown>).operator).toBe('string');
+  }, 60_000);
+
+  it('a run handed in from the host names the HOST user (NEURALIS_OPERATOR); a uid with no passwd entry is named by its number', async () => {
+    expect(run(['enable', 'off@x.co'], 'off@x.co\n', { NEURALIS_OPERATOR: 'op-on-the-host' }).status).toBe(0);
+    expect((audit()[0]!.details as Record<string, unknown>).operator).toBe('op-on-the-host');
+    const { operatorName } = await import('../user.mts');
+    expect(operatorName({}, () => { throw new Error('no passwd entry'); })).toBe(`uid:${process.getuid!()}`);
+    expect(operatorName({}, () => 'local')).toBe('local');
   }, 60_000);
 
   it('paired control: a wrong confirmation changes nothing and audits nothing', () => {

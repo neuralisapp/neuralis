@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { qdrantImageRef, qdrantStatePath, readQdrantState, writeQdrantState } from '../setup/qdrantVersion.mts';
 import { qdrantBinarySpawn } from '../setup/services.mts';
@@ -19,6 +19,7 @@ import {
   cleanupOnExit,
   containerQdrantApi,
   liveHops,
+  localTar,
   parseRawHttp,
   pruneBackups,
   runDockerRollback,
@@ -28,6 +29,7 @@ import {
   type QdrantApi,
   type UpgradeContext,
 } from '../qdrant-upgrade/upgrade.mts';
+import { desktopBinaryRefusal } from '../qdrant-upgrade.mts';
 
 const KEY = 'test-key-4f1c9a';
 
@@ -218,6 +220,8 @@ function setup(opts: SetupOpts = {}) {
     neuralisDir: home,
     packageDir: home,
     composeProject: 'neuralis',
+    appService: 'neuralis',
+    regenerate: null,
     apiKey: KEY,
     from: opts.stateVersion ?? '1.13.6',
     target: '1.19.1',
@@ -284,6 +288,20 @@ describe('the real run (docker mode)', () => {
     expect(statSync(tar).mode & 0o777).toBe(0o600);
     expect(statSync(out.backupDir).mode & 0o777).toBe(0o700);
     expect(statSync(out.record.snapshots[0].file).mode & 0o777).toBe(0o600);
+  });
+
+  it('the desktop app\'s own Qdrant (no app service): no app is stopped, and its compose file is rewritten through the given writer, not setup --compose-only', async () => {
+    const { home, world, ctx } = setup();
+    await writeQdrantState(qdrantStatePath(home), { version: '1.18.3', previous: null, source: 'detected', recordedAt: 'x' });
+    // The caller proved the desktop app stopped; nothing writes.
+    world.app.running = false;
+    const rewrites: string[] = [];
+    const out = await runDockerUpgrade({ ...ctx, appService: null, regenerate: async () => { rewrites.push((await readQdrantState(qdrantStatePath(home)))!.version); } });
+    expect(out.result).toBe('upgraded');
+    expect(world.calls.some((c) => c.includes('neuralis') && c[1] === 'compose')).toBe(false);
+    expect(world.calls.some((c) => c[0] === process.execPath && c.includes('--compose-only'))).toBe(false);
+    expect(rewrites).toEqual(['1.19.1']);
+    expect(world.calls.findIndex((c) => c.join(' ') === 'docker compose stop qdrant')).toBeGreaterThan(-1);
   });
 
   it('an app that writes while it runs cannot move the recorded counts — they are taken after it stops', async () => {
@@ -528,17 +546,40 @@ describe('an interrupted run (signal → exit hook)', () => {
 });
 
 describe('the native binary is started through its config env, never an unknown flag', () => {
-  it('the storage path rides QDRANT__STORAGE__STORAGE_PATH and the argv is empty', () => {
-    const spec = qdrantBinarySpawn('/srv/q', KEY, { QDRANT__SERVICE__HOST: '127.0.0.1' });
+  const PORTS = { http: 6433, grpc: 6434 };
+  const BASE = { PATH: '/usr/bin:/bin', HOME: '/home/op' };
+
+  it('the storage path rides QDRANT__STORAGE__STORAGE_PATH, the argv is empty, the cwd is the storage dir', () => {
+    const spec = qdrantBinarySpawn('/srv/q', KEY, PORTS, BASE);
     expect(spec.args).toEqual([]);
+    expect(spec.cwd).toBe('/srv/q');
     expect(spec.env.QDRANT__STORAGE__STORAGE_PATH).toBe('/srv/q');
     expect(spec.env.QDRANT__SERVICE__API_KEY).toBe(KEY);
-    expect(spec.env.QDRANT__SERVICE__HOST).toBe('127.0.0.1');
   });
 
-  it('telemetry is off on every native start — setup\'s (no extra env) and the upgrade hop alike', () => {
-    expect(qdrantBinarySpawn('/srv/q', KEY).env.QDRANT__TELEMETRY_DISABLED).toBe('true');
-    expect(qdrantBinarySpawn('/srv/q', undefined, { QDRANT__SERVICE__HOST: '127.0.0.1' }).env.QDRANT__TELEMETRY_DISABLED).toBe('true');
+  it('the environment is AUTHORED: exactly PATH, HOME and these QDRANT__ keys — loopback, the install\'s two ports — nothing of the caller\'s', () => {
+    vi.stubEnv('NEXTAUTH_SECRET', 'caller-session-secret');
+    vi.stubEnv('OPENAI_API_KEY', 'caller-provider-key');
+    const spec = qdrantBinarySpawn('/srv/q', KEY, PORTS, BASE);
+    expect(spec.env).toEqual({
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/op',
+      QDRANT__SERVICE__HOST: '127.0.0.1',
+      QDRANT__SERVICE__HTTP_PORT: '6433',
+      QDRANT__SERVICE__GRPC_PORT: '6434',
+      QDRANT__STORAGE__STORAGE_PATH: '/srv/q',
+      QDRANT__SERVICE__API_KEY: KEY,
+      QDRANT__TELEMETRY_DISABLED: 'true',
+    });
+    // Nothing is guessed: a base with no PATH (an empty parent on Windows) gives the child none.
+    const bare = qdrantBinarySpawn('/srv/q', KEY, PORTS, { PATH: '', HOME: '/home/op' });
+    expect(Object.keys(bare.env).filter((k) => !k.startsWith('QDRANT__')).sort()).toEqual(['HOME']);
+    expect(JSON.stringify(bare.env)).not.toMatch(/caller-session-secret|caller-provider-key/);
+  });
+
+  it('telemetry is off on every native start — setup\'s and the upgrade hop alike', () => {
+    expect(qdrantBinarySpawn('/srv/q', KEY, PORTS, BASE).env.QDRANT__TELEMETRY_DISABLED).toBe('true');
+    expect(qdrantBinarySpawn('/srv/q', undefined, PORTS, BASE).env.QDRANT__TELEMETRY_DISABLED).toBe('true');
   });
 
   it('no spawn site in the scripts passes --storage-path (it exists in no release of the chain)', () => {
@@ -617,5 +658,24 @@ describe('a signal mid-run (the exit hook calls abortActiveRun)', () => {
     await runDockerUpgrade(ctx).catch(() => undefined);
     expect(seen).toEqual(['record.json']);
     expect(abortActiveRun()).toBeNull();
+  });
+});
+
+describe('localTar — the host-side archive step runs the kernel\'s tar', () => {
+  it('Windows: System32\\tar.exe by absolute path, never a bare `tar` a Git GNU tar could answer', () => {
+    expect(localTar('win32', { SystemRoot: 'C:\\Windows' })).toBe('C:\\Windows\\System32\\tar.exe');
+    expect(localTar('linux', {})).toBe('tar');
+  });
+
+  it('a Windows without SystemRoot is refused by name, never guessed', () => {
+    expect(() => localTar('win32', {})).toThrow(/SystemRoot is not set.*Nothing was changed/);
+  });
+});
+
+describe('the desktop app\'s own Qdrant binary', () => {
+  it('moves only with the app\'s update: binary mode on the desktop bundle refuses before anything runs; Docker mode and every other install proceed', () => {
+    expect(desktopBinaryRefusal(true, 'binary')).toMatch(/app's update.*Nothing was changed/);
+    expect(desktopBinaryRefusal(true, 'docker')).toBeNull();
+    expect(desktopBinaryRefusal(false, 'binary')).toBeNull();
   });
 });

@@ -1,11 +1,18 @@
 import { providedFeatureIds, type PackageRegistry, type PackageRuntime, type SnapshotInvalidationReason } from '@neuralis/package-system';
-import type { PackageDefinition, SourceScope, RuntimeLoaderPort, RuntimePackageStatus } from '@neuralis/package-system/contracts';
+import type { PackageDefinition, PackageLoadOptions, ScopeOrigin, SourceScope, RuntimeLoaderPort, RuntimePackageStatus } from '@neuralis/package-system/contracts';
 import { canReceivePackageGrant } from '../projects/access';
 import { getRuntime } from '../host/bootstrap';
 import { BUILTIN_PACKAGE_IDS } from '../host/bootstrap';
 import type { ResolvedPackageRecord } from './packageRecords';
 import { applyGrantsPatch } from './reconcileBuiltinGrantChanges';
 import { getProjectById, updateProject, removeDeletedPackageReferences } from '../store/ProjectStore';
+
+/** A loaded package's owning source: its scope and, when recorded, its plane. */
+type OwnerEntry = { scope: SourceScope; origin?: ScopeOrigin };
+
+function ownerEntryOf(record: ResolvedPackageRecord): OwnerEntry {
+  return { scope: record.ownerScope ?? { kind: 'project' }, ...(record.ownerOrigin ? { origin: record.ownerOrigin } : {}) };
+}
 
 type RuntimeManagerState = {
   loader: RuntimeLoaderPort;
@@ -44,7 +51,43 @@ export type PackageSyncResult = {
  * per sync.
  */
 function inputKeyOf(record: ResolvedPackageRecord): string {
-  return `${JSON.stringify(record.definition)}\0${record.artifactStamp ?? ''}`;
+  return `${JSON.stringify(record.definition)}\0${record.artifactStamp ?? ''}\0${record.unavailable ?? ''}`;
+}
+
+/** What `NOT_AVAILABLE` says, to the model (`<packages>`) and to a person (the Packages panel). */
+const DEVICE_OFFLINE_TEXT = 'Not available — the device that holds this package is offline. It returns when the device reconnects.';
+
+/**
+ * The loader's three inputs for a record. An UNAVAILABLE device package loads
+ * as a stub — its name, version and access only, nothing to run or advertise
+ * (no skill whose body cannot be read, no grant to apply) — with no root and no
+ * read at all; a device package otherwise loads through its own reader, so its
+ * root is never opened on this disk.
+ */
+function loaderInputsOf(record: ResolvedPackageRecord): { definition: PackageDefinition; packageRoot?: string; options?: PackageLoadOptions } {
+  if (record.unavailable) {
+    const { id, name, version, icon, source, access, requires } = record.definition;
+    // The base-access gate and the provided features stay (who may see it, what
+    // it names); its default grants do not.
+    const gates = requires
+      ? { ...(requires.accessFeature ? { accessFeature: requires.accessFeature } : {}), ...(requires.providesFeatures ? { providesFeatures: requires.providesFeatures } : {}) }
+      : {};
+    return {
+      definition: {
+        id,
+        name,
+        ...(version !== undefined ? { version } : {}),
+        ...(icon !== undefined ? { icon } : {}),
+        ...(source !== undefined ? { source } : {}),
+        ...(access !== undefined ? { access } : {}),
+        ...(Object.keys(gates).length > 0 ? { requires: gates } : {}),
+        description: DEVICE_OFFLINE_TEXT,
+        descriptionForModel: DEVICE_OFFLINE_TEXT,
+      },
+      options: { unavailable: record.unavailable },
+    };
+  }
+  return { definition: record.definition, packageRoot: record.packageRoot, ...(record.reader ? { options: { reader: record.reader } } : {}) };
 }
 
 export class PackageRuntimeManager {
@@ -59,9 +102,11 @@ export class PackageRuntimeManager {
    * `#projectPackageIds` (kept a plain `Set` so membership readers + tests are
    * untouched). A package absent from this map (builtins, default `_packages/`)
    * is treated as `{ kind: 'project' }` ⇒ never scope-hidden. Consumers read it
-   * via `getPackageOwnerScope` and feed `canAccessScope` for advertise isolation.
+   * via `getPackageOwnerScope` + `getPackageOwnerOrigin` and feed `canAccessScope`
+   * for advertise isolation; the origin (the source's plane) rides beside the
+   * scope so a user-scope DEVICE folder's packages serve their owner alone.
    */
-  readonly #packageOwnerScope = new Map<string, Map<string, SourceScope>>();
+  readonly #packageOwnerScope = new Map<string, Map<string, OwnerEntry>>();
 
   /** Runtime instance ID → authored npm name, retained for manifest/display metadata. */
   readonly #packageManifestId = new Map<string, Map<string, string>>();
@@ -88,20 +133,23 @@ export class PackageRuntimeManager {
   ): Promise<void> {
     const state = await this.#ensureCoreState();
     const existing = state.loader.getStatus(record.packageId);
+    const inputs = loaderInputsOf(record);
 
     if (existing) {
       await state.loader.reload(
-        record.definition,
-        record.packageRoot,
+        inputs.definition,
+        inputs.packageRoot,
         record.manifestId,
         record.ownerProjectId,
+        inputs.options,
       );
     } else {
       await state.loader.load(
-        record.definition,
-        record.packageRoot,
+        inputs.definition,
+        inputs.packageRoot,
         record.manifestId,
         record.ownerProjectId,
+        inputs.options,
       );
       this.#assertActive(state.loader.getStatus(record.packageId), record.packageId);
       await state.loader.start(record.packageId);
@@ -239,14 +287,15 @@ export class PackageRuntimeManager {
       if (current.status !== 'error' && this.#inputKey.get(packageId) === key) continue;
       // Prevent trust escalation on reload
       const currentTrust = current.definition.access?.trust ?? 'untrusted';
-      const nextTrust = record.definition.access?.trust ?? 'untrusted';
-      const TRUST_RANK: Record<string, number> = { untrusted: 0, trusted: 1, 'first-party': 2 };
+      const inputs = loaderInputsOf(record);
+      const nextTrust = inputs.definition.access?.trust ?? 'untrusted';
+      const TRUST_RANK: Record<string, number> = { untrusted: 0, trusted: 1, 'native': 2 };
       if ((TRUST_RANK[nextTrust] ?? 0) > (TRUST_RANK[currentTrust] ?? 0)) {
         console.warn(`[PackageRuntimeManager] Trust escalation rejected on reload`, { packageId, currentTrust, nextTrust });
         continue;
       }
       try {
-        await state.loader.reload(record.definition, record.packageRoot, record.manifestId, record.ownerProjectId);
+        await state.loader.reload(inputs.definition, inputs.packageRoot, record.manifestId, record.ownerProjectId, inputs.options);
         this.#inputKey.set(packageId, key);
         affected.add(packageId);
       } catch (err) {
@@ -263,10 +312,10 @@ export class PackageRuntimeManager {
     // R2b — rebuild the per-project owning-scope map from the desired set. A
     // package without a recorded `ownerScope` defaults to project scope (never
     // scope-hidden). Rebuilt fresh each sync so a removed id drops out.
-    const scopeMap = new Map<string, SourceScope>();
+    const scopeMap = new Map<string, OwnerEntry>();
     const manifestMap = new Map<string, string>();
     for (const [packageId, record] of desired) {
-      scopeMap.set(packageId, record.ownerScope ?? { kind: 'project' });
+      scopeMap.set(packageId, ownerEntryOf(record));
       manifestMap.set(packageId, record.manifestId);
     }
     this.#packageOwnerScope.set(projectId, scopeMap);
@@ -296,27 +345,29 @@ export class PackageRuntimeManager {
     const state = await this.#ensureCoreState();
 
     const runtimeId = resolved.packageId;
-    const nextDefinition = resolved.definition;
+    const inputs = loaderInputsOf(resolved);
     // `trusted` is the CEILING here — an admin override can never reach
-    // `first-party`, which is host-assigned by source. That is what keeps the
-    // first-party-only code runtimes (`node`, `mcp`) out of reach of a project
+    // `native`, which is host-assigned by source. That is what keeps the
+    // native-only code runtimes (`node`, `mcp`) out of reach of a project
     // drop no matter how far an admin promotes it. The reload path itself is
     // also the teardown: `loader.reload` unloads first, and `stopPackage`
     // closes a live MCP child even when the package never started.
     const current = state.loader.getStatus(runtimeId);
     if (current) {
       await state.loader.reload(
-        nextDefinition,
-        resolved.packageRoot,
+        inputs.definition,
+        inputs.packageRoot,
         resolved.manifestId,
         resolved.ownerProjectId,
+        inputs.options,
       );
     } else {
       await state.loader.load(
-        nextDefinition,
-        resolved.packageRoot,
+        inputs.definition,
+        inputs.packageRoot,
         resolved.manifestId,
         resolved.ownerProjectId,
+        inputs.options,
       );
       await state.loader.start(runtimeId);
     }
@@ -329,8 +380,8 @@ export class PackageRuntimeManager {
     this.#projectPackageIds.set(projectId, ids);
 
     // Preserve the original source scope and authored name on an exact-instance reload.
-    const scopeMap = this.#packageOwnerScope.get(projectId) ?? new Map<string, SourceScope>();
-    scopeMap.set(runtimeId, resolved.ownerScope ?? { kind: 'project' });
+    const scopeMap = this.#packageOwnerScope.get(projectId) ?? new Map<string, OwnerEntry>();
+    scopeMap.set(runtimeId, ownerEntryOf(resolved));
     this.#packageOwnerScope.set(projectId, scopeMap);
     const manifestMap = this.#packageManifestId.get(projectId) ?? new Map<string, string>();
     manifestMap.set(runtimeId, resolved.manifestId);
@@ -366,7 +417,17 @@ export class PackageRuntimeManager {
    * `_packages/` drop-zone) ⇒ the caller treats it as project-scope (visible).
    */
   getPackageOwnerScope(projectId: string, packageId: string): SourceScope | undefined {
-    return this.#packageOwnerScope.get(projectId)?.get(packageId);
+    return this.#packageOwnerScope.get(projectId)?.get(packageId)?.scope;
+  }
+
+  /**
+   * The plane of the source that contributed a loaded package — the 4th
+   * `canAccessScope` argument beside `getPackageOwnerScope` — or `undefined`
+   * when none was recorded (builtins, the default `_packages/` drop-zone: both
+   * project scope, which the plane never narrows).
+   */
+  getPackageOwnerOrigin(projectId: string, packageId: string): ScopeOrigin | undefined {
+    return this.#packageOwnerScope.get(projectId)?.get(packageId)?.origin;
   }
 
   /** The project that currently owns a namespaced loader id, or undefined. */
@@ -403,16 +464,19 @@ export class PackageRuntimeManager {
   }
 
   async #activateRecord(state: RuntimeManagerState, record: ResolvedPackageRecord): Promise<void> {
+    const inputs = loaderInputsOf(record);
     await state.loader.load(
-      record.definition,
-      record.packageRoot,
+      inputs.definition,
+      inputs.packageRoot,
       record.manifestId,
       record.ownerProjectId,
+      inputs.options,
     );
     this.#assertActive(state.loader.getStatus(record.packageId), record.packageId);
     await state.loader.start(record.packageId);
     // Feature-gate inheritance: merge package's defaultRoleGrants into project roles
-    await this.#applyFeatureGrants(record);
+    // (never from a stub: an unreachable package grants nothing).
+    if (!record.unavailable) await this.#applyFeatureGrants(record);
   }
 
   /**
@@ -424,7 +488,7 @@ export class PackageRuntimeManager {
    * re-added every boot. Project-level overrides always win.
    *
    * Only a PROJECT-scope package grants — a `_packages/` drop or a project-scope
-   * `recognizesPackages` source. A user- or agent-scoped source's package is
+   * source with `packageFolders`. A user- or agent-scoped source's package is
    * advertised to its owner alone; writing its grants onto the project's roles
    * would hand it to every member. Builtins grant at project creation and
    * through the operator's grant-change record (`reconcileBuiltinGrantChanges`).

@@ -6,7 +6,7 @@
  * produces a `SKILL_NOT_FOUND` only at stream time, and a `packageId` written
  * in the WRONG NAMESPACE resolves to nothing at all — no error, no log, the
  * button simply never renders. This suite derives every declared skill id from
- * the first-party packages' `skills/<name>/SKILL.md` bundles, derives the
+ * the native packages' `skills/<name>/SKILL.md` bundles, derives the
  * registry-id → package-directory map from the manifests themselves, and fails
  * loud on any literal pair that does not resolve.
  *
@@ -58,8 +58,8 @@ function readManifest(name: string): DepManifest {
   return JSON.parse(readFileSync(join(HOST_ROOT, 'node_modules', name, 'package.json'), 'utf-8')) as DepManifest;
 }
 
-/** First-party (loaded) builtin-class deps: a `neuralis` block, not reference-only. */
-function firstPartyDeps(): string[] {
+/** Native (loaded) builtin-class deps: a `neuralis` block, not reference-only. */
+function nativeDeps(): string[] {
   return readHostDependencies().filter((name) => {
     const m = readManifest(name);
     return !!m.neuralis && m.neuralis.referenceOnly !== true;
@@ -111,7 +111,7 @@ function frontmatterId(content: string): string | undefined {
   return name?.trim().replace(/^["']|["']$/g, '') || undefined;
 }
 
-/** Every feature id any first-party manifest declares (mixed string|object form). */
+/** Every feature id any native manifest declares (mixed string|object form). */
 function declaredFeatureIds(deps: string[]): Set<string> {
   const out = new Set<string>();
   for (const name of deps) {
@@ -251,7 +251,7 @@ function collectRefs(appDir: string): { refs: LauncherRef[]; unmatchedElements: 
 // ── Suite ───────────────────────────────────────────────────────────────────
 
 describe('skill-launcher (packageId, skill) drift-guard', () => {
-  const deps = firstPartyDeps();
+  const deps = nativeDeps();
   const featureIds = declaredFeatureIds(deps);
 
   /** registry id (`@neuralis/admin`) → package root on disk. */
@@ -275,7 +275,7 @@ describe('skill-launcher (packageId, skill) drift-guard', () => {
     return s;
   };
 
-  it('finds first-party deps, registry ids and declared features to check', () => {
+  it('finds native deps, registry ids and declared features to check', () => {
     expect(deps.length).toBeGreaterThan(0);
     expect(byRegistryId.size).toBeGreaterThan(0);
     expect(featureIds.size).toBeGreaterThan(0);
@@ -341,7 +341,7 @@ describe('skill-launcher (packageId, skill) drift-guard', () => {
         for (const feature of ref.alsoRequires as string[]) {
           expect(
             featureIds.has(feature),
-            `${name}: alsoRequires={["${feature}"]} (${ref.file.slice(pkgRoot.length)}) is not declared by any first-party manifest's requires.providesFeatures — a typo here hides the launcher with no error`,
+            `${name}: alsoRequires={["${feature}"]} (${ref.file.slice(pkgRoot.length)}) is not declared by any native manifest's requires.providesFeatures — a typo here hides the launcher with no error`,
           ).toBe(true);
         }
       }

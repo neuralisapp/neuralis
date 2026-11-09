@@ -72,8 +72,22 @@ export type ResolvedMember = {
   session: SessionContext & { priority: number };
 };
 
+/** Longest display name a session carries. */
+const SESSION_DISPLAY_NAME_MAX_CHARS = 80;
+
+/**
+ * The `SessionContext.displayName` of a user record — the ONE copy every session
+ * builder calls (display only: never read by a gate). `undefined` for a blank name.
+ */
+export function sessionDisplayName(record: Pick<UserRecord, 'name'>): string | undefined {
+  const name = typeof record.name === 'string' ? record.name.trim().slice(0, SESSION_DISPLAY_NAME_MAX_CHARS) : '';
+  return name || undefined;
+}
+
 export async function resolveMember(userId: string, projectId: string): Promise<ResolvedMember | null> {
-  if (!(await resolveActiveUser(userId))) return null;
+  const record = await resolveActiveUser(userId);
+  if (!record) return null;
+  const displayName = sessionDisplayName(record);
   const project = await getProjectById(projectId);
   // An archived project is disabled: its scheduled work must not fire, its
   // package routes must not answer, and its `:3101` sessions must not resolve.
@@ -100,6 +114,7 @@ export async function resolveMember(userId: string, projectId: string): Promise<
       ...(roleCtx.agentOwnership ? { agentOwnership: roleCtx.agentOwnership } : {}),
       ...(roleCtx.spendLimits ? { spendLimits: roleCtx.spendLimits } : {}),
       ...(roleCtx.llmRateLimitRpm != null ? { llmRateLimitRpm: roleCtx.llmRateLimitRpm } : {}),
+      ...(displayName ? { displayName } : {}),
     },
   };
 }

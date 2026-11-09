@@ -15,7 +15,7 @@ import { createSourceDeviceUpgrade, DEVICE_OWNER_ENV } from '../source-device-v1
 import { runUpgrade, UPGRADES_DIR } from '../../upgrade.mts';
 // The app's registry reader and the CLI's identity reader — the two consumers this module writes for.
 import { DeviceRegistry } from '../../../../packages/agent-core/src/hostBroker/devices/registry.ts';
-import { devicePaths, readIdentity } from '../../../../packages/cli/src/device/paths.ts';
+import { devicePaths, moveLegacyLayout, moveSingleHostLayout, readPairedHosts } from '../../../../packages/cli/src/device/paths.ts';
 
 const dirs: string[] = [];
 afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
@@ -88,7 +88,7 @@ function files(root: string): Map<string, string> {
 
 const json = (path: string): Record<string, unknown> => JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 
-describe('source-device-v1 — the host plane onto paired devices', () => {
+describe("source-device-v1 — the server's host access onto paired devices", () => {
   it('dry run names every file and writes nothing; apply registers, stamps, raises; a re-run writes nothing', async () => {
     const f = home();
     const upgrade = createSourceDeviceUpgrade({});
@@ -116,9 +116,11 @@ describe('source-device-v1 — the host plane onto paired devices', () => {
     expect(json(join(f.projectsRoot, 'main', 'data', 'agent-core', 'a1', 'conversations', 'c1', 'shells', 's1', 'meta.json')).device).toBe(device!.id);
     expect(json(join(f.projectsRoot, 'main', 'data', 'agent-core', 'a1', 'conversations', 'c1', 'shells', 's2', 'meta.json')).device).toBeUndefined();
 
-    // The CLI's own reader adopts the identity — `neuralis device install` links without pairing.
-    const identity = readIdentity(devicePaths({ NEURALIS_HOME: f.home }, '/nowhere', 'linux'));
-    expect(identity).toEqual({ host: expect.any(String), link: 'ws://127.0.0.1:3101/ws/device-link', deviceId: device!.id, name: 'Neuralis server' });
+    // The CLI adopts the identity — `neuralis device install`'s two moves, then its reader: it links without pairing.
+    const paths = devicePaths({ NEURALIS_HOME: f.home }, '/nowhere', 'linux');
+    moveLegacyLayout(paths);
+    moveSingleHostLayout(paths, 'linux');
+    expect(readPairedHosts(paths).hosts.map((h) => h.device)).toEqual([{ host: expect.any(String), link: 'ws://127.0.0.1:3101/ws/device-link', deviceId: device!.id, name: 'Neuralis server' }]);
 
     const project = json(join(f.appRoot, 'projects', 'main.json'));
     expect(project).toMatchObject({ roleGrantVersion: 20, formatVersion: 3 });
@@ -178,7 +180,7 @@ describe('source-device-v1 — the host plane onto paired devices', () => {
   it('a running app refuses before any module runs', async () => {
     const f = home();
     const before = files(f.home);
-    await expect(runUpgrade({ apply: true, modulesDir: UPGRADES_DIR, roots: f, offline: async () => ({ offline: false, reason: 'the app answers' }), log: () => {} }))
+    await expect(runUpgrade({ apply: true, modulesDir: UPGRADES_DIR, roots: f, offline: async () => ({ offline: false, reason: 'the app answers' }), log: () => {}, appRuns: 'docker' }))
       .rejects.toThrow(/Refusing to upgrade: the app answers/);
     expect(files(f.home)).toEqual(before);
   });

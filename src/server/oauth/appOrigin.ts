@@ -1,6 +1,6 @@
 /**
  * The ONE trusted app origin every outbound-OAuth route derives its redirect
- * from — and, handed to first-party packages as `hostPorts.appOrigin`, the one
+ * from — and, handed to native packages as `hostPorts.appOrigin`, the one
  * every package-built redirect and its `assertNeuralisOrigin` check use too.
  * Before that single source the host resolved `APP_URL || NEXTAUTH_URL` while
  * the package resolved `NEXTAUTH_URL ?? APP_URL`, so a deployment that declared
@@ -11,7 +11,8 @@
  *   1. `APP_URL` — the operator's declared public origin;
  *   2. `NEXTAUTH_URL` — a working login already requires it;
  *   3. the REQUEST's origin, but ONLY when it is loopback;
- *   4. the dev default `http://localhost:3100`.
+ *   4. the loopback default on the port this app listens on
+ *      (`http://localhost:<NEURALIS_APP_PORT>`, 3100 when unset).
  *
  * A declared value that is not a valid absolute http(s) URL is IGNORED rather
  * than thrown on: an unparseable `APP_URL` used to make every callback answer
@@ -24,8 +25,15 @@
  * redirect target or a banner destination.
  */
 
-/** The dev default — the only non-declared, non-loopback answer. */
-export const DEFAULT_APP_ORIGIN = 'http://localhost:3100';
+/**
+ * The undeclared default — loopback on the port this app LISTENS on, so a host
+ * started on another port (a second home, the desktop app's own port) never
+ * names somebody else's `:3100`. The only non-declared, non-loopback answer.
+ */
+export function defaultAppOrigin(env: Readonly<Record<string, string | undefined>> = process.env): string {
+  const port = Number(env.NEURALIS_APP_PORT);
+  return `http://localhost:${Number.isInteger(port) && port > 0 && port < 65536 ? port : 3100}`;
+}
 
 function parseOrigin(value: string | undefined): string | null {
   if (!value?.trim()) return null;
@@ -40,6 +48,11 @@ function parseOrigin(value: string | undefined): string | null {
 
 /** `URL.hostname` keeps the brackets on an IPv6 literal — match both spellings. */
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/** Is this a loopback hostname (`URL.hostname` spelling, brackets for IPv6 included)? */
+export function isLoopbackHostname(hostname: string): boolean {
+  return LOOPBACK_HOSTNAMES.has(hostname);
+}
 
 function isLoopbackOrigin(origin: string): boolean {
   try {
@@ -69,7 +82,7 @@ export function resolveTrustedAppOrigin(requestUrl?: string): string {
     const origin = parseOrigin(requestUrl);
     if (origin && isLoopbackOrigin(origin)) return origin;
   }
-  return DEFAULT_APP_ORIGIN;
+  return defaultAppOrigin();
 }
 
 /**

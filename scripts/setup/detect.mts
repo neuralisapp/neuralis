@@ -6,16 +6,18 @@
  */
 
 import { execSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { hostname, platform as osPlatform } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import http from 'node:http';
-import { resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { detectDocker as runsInContainer, IMAGE_DATA_HOME, INSTALL_KINDS, installConfigDir, installRecordsPath, nativeConfigDir, readInstallRecords, resolveNeuralisHome, type InstallKind } from '@neuralis/package-system/paths';
 import { CliExit } from '../cli/registry.mts';
-import { imageSetupCommand, installLayout, spell, spellOn, type InstallLayout } from '../cli/spelling.mts';
-import { hostQdrantUrl, readEnvFile, type CarriedOverEnv, type PortTriple } from './envFile.mts';
+import { imageSetupCommand, insideImage, installLayout, spell, spellOn, type InstallLayout } from '../cli/spelling.mts';
+import { composeProjectFromEnv } from '../host-broker/helper.mts';
+import { hostQdrantUrl, parseEnvContent, qdrantHostPort, readEnvFile, type CarriedOverEnv, type NativeQdrant, type PortTriple } from './envFile.mts';
+import { qdrantVolumeName } from './qdrantVersion.mts';
 
 /**
  * Stat /var/run/docker.sock and return its owning GID.
@@ -180,21 +182,25 @@ export async function detectIsClone(cwd: string): Promise<boolean> {
 
 /**
  * Where `.env` and `docker-compose.yml` live: `--output` when given,
- * `NEURALIS_HOME` in the image's own tree (the `container` layout), and the
- * install folder in every other layout — an npm folder, a clone or the
- * development checkout, inside a container or not (`npm run start` /
- * `next start` loads `.env` from there). The layout is `installLayout`'s,
- * never a second detector; the install folder is its own package dir in every
- * layout but a folder, which its manifest decides first. Every operator
- * command that reads them asks this, never its own copy.
+ * `NEURALIS_HOME` in the image's own tree (the `container` layout),
+ * `<NEURALIS_HOME>/app/config` for the desktop bundle (the kernel's
+ * `nativeConfigDir` — the bundle is read-only), and the install folder in
+ * every other layout — an npm folder, an image-only folder,
+ * a clone or the development checkout, inside a container or not (`npm run
+ * start` / `next start` loads `.env` from there). The layout is
+ * `installLayout`'s, never a second detector. This is the ONE place
+ * `container` and `image` differ; every operator command that reads them asks
+ * this, never its own copy.
  */
 export function resolveConfigDir(
   env: Pick<DetectedEnv, 'projectRoot' | 'neuralisHome'>,
   outputOverride: string | null,
-  inContainer = existsSync('/.dockerenv'),
+  inContainer = runsInContainer(),
 ): string {
   if (outputOverride) return outputOverride;
-  return installLayout(env.projectRoot, env.projectRoot, inContainer) === 'container' ? env.neuralisHome : env.projectRoot;
+  const layout = installLayout(env.projectRoot, env.projectRoot, inContainer);
+  if (layout === 'native') return nativeConfigDir(env.neuralisHome);
+  return layout === 'container' ? env.neuralisHome : env.projectRoot;
 }
 
 /**
@@ -262,18 +268,42 @@ export function holderOf(row: PublishedPort): string {
   return row.project ? `Compose project "${row.project}"` : `container ${row.container}`;
 }
 
-/**
- * The host plane's probe: one `listen` per claim, on the address the compose
- * file publishes, in parallel. It sees this machine's network namespace — under
- * Docker Desktop the daemon binds on the other side of the VM, where a holder
- * stays invisible until `docker compose up`.
- */
-export const listenProbe: PortProbe = async (claims) => {
-  const busy = await Promise.all(claims.map((claim) => new Promise<boolean>((resolve) => {
+/** The IPv6 twin of a claim's address: a holder there answers the same `localhost` / any-address name. */
+const IPV6_TWIN: Record<PortClaim['address'], string> = { '127.0.0.1': '::1', '0.0.0.0': '::' };
+
+function listenRefused(port: number, host: string, ipv6Only: boolean): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     const server = createServer();
     server.once('error', (error: NodeJS.ErrnoException) => resolve(error.code === 'EADDRINUSE' || error.code === 'EACCES'));
-    server.listen({ port: claim.port, host: claim.address, exclusive: true }, () => server.close(() => resolve(false)));
-  })));
+    server.listen({ port, host, exclusive: true, ipv6Only }, () => server.close(() => resolve(false)));
+  });
+}
+
+/**
+ * The machine-side probe: one `listen` per claim, on the address the compose
+ * file publishes, in parallel — exactly the bind the listener will make (what
+ * `up` checks before it starts). It sees this machine's network namespace —
+ * under Docker Desktop the daemon binds on the other side of the VM, where a
+ * holder stays invisible until `docker compose up`.
+ */
+export const listenProbe: PortProbe = async (claims) => {
+  const busy = await Promise.all(claims.map((claim) => listenRefused(claim.port, claim.address, false)));
+  return claims.filter((_, i) => busy[i]);
+};
+
+/**
+ * The probe a port PICK uses: the bind itself AND its IPv6 twin (`::1` / `::`,
+ * IPv6-only), either refused ⇒ busy. A holder on the twin alone answers the
+ * same name first — Windows' wslrelay holds `[::1]`/`[::]` for the WSL stack,
+ * not 127.0.0.1, and `localhost` resolves `::1` first — so setup moves past it;
+ * a machine without IPv6 refuses the twin with no "in use" code, which counts
+ * as free. `up` keeps `listenProbe`: a host already settled there still starts.
+ */
+export const pickPortProbe: PortProbe = async (claims) => {
+  const busy = await Promise.all(claims.map(async (claim) => {
+    const [own, twin] = await Promise.all([listenRefused(claim.port, claim.address, false), listenRefused(claim.port, IPV6_TWIN[claim.address], true)]);
+    return own || twin;
+  }));
   return claims.filter((_, i) => busy[i]);
 };
 
@@ -419,6 +449,7 @@ export const PORT_ROLES: Record<string, { envKey: string; label: string }> = {
   mcp: { envKey: 'MCP_HTTP_PORT', label: 'MCP' },
   sandbox: { envKey: 'NEURALIS_MCP_SANDBOX_PORT', label: 'the MCP Apps sandbox origin' },
   qdrant: { envKey: 'NEURALIS_QDRANT_PORT', label: 'Qdrant' },
+  qdrantGrpc: { envKey: 'NEURALIS_QDRANT_GRPC_PORT', label: 'Qdrant gRPC' },
   codex: { envKey: 'NEURALIS_CODEX_LOOPBACK', label: 'the ChatGPT sign-in callback' },
 };
 
@@ -433,13 +464,28 @@ export function portClaims(input: { ports: PortTriple; qdrantPort: number | null
   ];
 }
 
+/**
+ * Ports a process on THIS machine will bind on its own loopback (the native
+ * install's app, MCP, sandbox origin and Qdrant): each claim's port when free,
+ * else the next free one above it — one listen probe per candidate, no Docker.
+ * `reserved` ports count as taken even when nothing listens on them now (a
+ * Docker install's published Qdrant port while that Qdrant is stopped).
+ */
+export async function settleLoopbackPorts(claims: PortClaim[], probe: PortProbe = pickPortProbe, reserved: number[] = []): Promise<Map<string, number>> {
+  const busy = [...claims.filter((claim) => reserved.includes(claim.port)), ...(await probe(claims.filter((claim) => !reserved.includes(claim.port))))];
+  const busyKeys = new Set(busy.map((claim) => claim.key));
+  const settled = new Map(claims.filter((claim) => !busyKeys.has(claim.key)).map((claim) => [claim.key, claim.port] as const));
+  const moved = busy.length > 0 ? await nextFreePorts(busy, [...settled.values(), ...reserved], { probe, published: null }) : new Map<string, number>();
+  return new Map(claims.map((claim) => [claim.key, settled.get(claim.key) ?? moved.get(claim.key)!] as const));
+}
+
 /** How this layout checks ports: a listen on the host; a throwaway `docker run -p` in the image. Docker's table is read once. */
 export type PortCheck = { probe: PortProbe; probeFirst: boolean; published: () => Promise<PublishedPort[] | null> };
 
 export function portCheck(layout: InstallLayout, docker: boolean): PortCheck {
   let table: Promise<PublishedPort[] | null> | null = null;
   const published = () => (table ??= docker ? listPublishedPorts() : Promise.resolve(null));
-  if (layout !== 'container') return { probe: listenProbe, probeFirst: true, published };
+  if (!insideImage(layout)) return { probe: pickPortProbe, probeFirst: true, published };
   let probe: Promise<PortProbe> | null = null;
   return { probe: async (claims) => (await (probe ??= dockerRunProbe()))(claims), probeFirst: false, published };
 }
@@ -502,8 +548,9 @@ export function bindMountOf(dir: string, mountinfo: string): string | null {
 }
 
 /**
- * Fill `process.env` from the deployment's `.env` for a host-plane operator
- * command (the stores read their roots and the session secret through it). A
+ * Fill `process.env` from the deployment's `.env` for an operator on the machine
+ * command (the stores read their roots through it; the session secret is the
+ * data home's own file, never this environment). A
  * value already in the environment — the container's — wins.
  */
 export async function loadHostEnv(neuralisDir: string): Promise<void> {
@@ -514,7 +561,89 @@ export async function loadHostEnv(neuralisDir: string): Promise<void> {
   }
 }
 
-async function detectExistingSetup(neuralisHome: string): Promise<boolean> {
+/** The data home's other install (the Docker one) and the Qdrant the desktop app's host uses from it. */
+export type RecordedQdrant =
+  | {
+    ok: true;
+    install: { kind: InstallKind; dir: string; project: string };
+    /** That install's own `QDRANT_MODE`. */
+    mode: 'docker' | 'external' | 'skip';
+    /** What the native `.env` carries for it. */
+    qdrant: NativeQdrant;
+    /** docker mode: the named volume its vectors live in. */
+    volume: string | null;
+  }
+  | { ok: false; reason: string };
+
+const OWN_QDRANT = 'or give this app its own Qdrant: `neuralis setup --native --yes --qdrant binary` (add `--copy-vectors` to copy the Docker vectors)';
+
+/**
+ * The Qdrant of the install this data home records beside the desktop bundle
+ * (`<home>/app/config/installs.json` → that folder's `.env`, read only) — the
+ * ONE place the adopt reads outside the home. By that install's
+ * `QDRANT_MODE`: `docker` → its loopback port and key, its folder (`neuralis
+ * up` starts the vector store there); `external` → its URL and key; `skip` →
+ * none. Refused by name: no such install, several, a stale row, no `.env`, a
+ * `binary` one (its store is `<home>/qdrant-storage` — this app's own binary
+ * would open the same files), an unknown mode, a docker mode with no key.
+ */
+export function recordedDockerQdrant(home: string): RecordedQdrant {
+  const installs: { kind: InstallKind; dir: string }[] = [];
+  const stale: string[] = [];
+  for (const record of readInstallRecords(home)) {
+    if (record.kind === 'native') continue;
+    const row = INSTALL_KINDS.find((r) => r.kind === record.kind);
+    const dir = record.dir;
+    if (!row || dir === undefined || !isAbsolute(dir) || !row.matches({ dir, record })) {
+      stale.push(dir ?? record.kind);
+      continue;
+    }
+    if (!installs.some((i) => i.dir === dir)) installs.push({ kind: row.kind, dir });
+  }
+  const records = installRecordsPath(home);
+  if (installs.length === 0) {
+    return {
+      ok: false,
+      reason: `${records} records no Docker install of this data home${stale.length > 0 ? ` (no install is at ${stale.join(', ')} any more)` : ''}: run \`neuralis setup --compose-only\` once in its install folder (it records it), ${OWN_QDRANT}`,
+    };
+  }
+  if (installs.length > 1) {
+    return { ok: false, reason: `${records} records several installs of this data home (${installs.map((i) => i.dir).join(', ')}): remove the ones you no longer run from it, ${OWN_QDRANT}` };
+  }
+  const { kind, dir } = installs[0]!;
+  const envPath = join(installConfigDir(kind, dir, home), '.env');
+  let text: string;
+  try {
+    text = readFileSync(envPath, 'utf-8');
+  } catch {
+    return { ok: false, reason: `the Docker install in ${dir} has no readable .env (${envPath}), ${OWN_QDRANT}` };
+  }
+  const env = parseEnvContent(text);
+  const project = composeProjectFromEnv(text);
+  const install = { kind, dir, project };
+  const mode = env.QDRANT_MODE?.trim() ?? '';
+  if (mode === 'docker') {
+    const apiKey = env.QDRANT_API_KEY?.trim();
+    if (!apiKey) return { ok: false, reason: `${envPath} runs Qdrant in Docker but carries no QDRANT_API_KEY: run \`neuralis setup\` there first` };
+    return { ok: true, install, mode, qdrant: { mode: 'external', url: `http://127.0.0.1:${qdrantHostPort(env)}`, apiKey, composeDir: dir }, volume: qdrantVolumeName(project) };
+  }
+  if (mode === 'external') {
+    const url = env.QDRANT_URL?.trim();
+    if (!url) return { ok: false, reason: `${envPath} names an external Qdrant but no QDRANT_URL, ${OWN_QDRANT}` };
+    return { ok: true, install, mode, qdrant: { mode: 'external', url, apiKey: env.QDRANT_API_KEY?.trim() || null, composeDir: null }, volume: null };
+  }
+  if (mode === 'skip') return { ok: true, install, mode, qdrant: { mode: 'skip' }, volume: null };
+  if (mode === 'binary') {
+    return { ok: false, reason: `the install in ${dir} runs Qdrant from its binary on ${join(home, 'qdrant-storage')} — the files this app's own Qdrant would open; stop it and run it from Docker, or keep using it there` };
+  }
+  return { ok: false, reason: `${envPath} names no Qdrant mode this app knows (QDRANT_MODE="${mode}"), ${OWN_QDRANT}` };
+}
+
+/** The refusal for a home whose session secret is still in an older Docker install's `.env` (`neuralis up` and `setup --native` alike). */
+export const UPGRADE_DOCKER_FIRST = 'run `neuralis upgrade --apply` from the Docker install first';
+
+/** A user record exists under the data home — the same "set up" fact the host's `getSetupState` reads. */
+export async function detectExistingSetup(neuralisHome: string): Promise<boolean> {
   // Check if users/ directory has any JSON files
   try {
     const usersDir = join(neuralisHome, 'app', 'users');
@@ -565,9 +694,6 @@ export async function detectEnvironment(projectRoot: string): Promise<DetectedEn
 
 // ── Preflight refusals and the answering Qdrant (pure; setup.mts asks the questions) ──
 
-/** The image's own data home (`ENV NEURALIS_HOME` in the Dockerfile): a bind target, never a host path. */
-const IMAGE_DATA_HOME = '/.neuralis';
-
 /** The one-line installer: it runs the first-install command with every flag derived. */
 export const INSTALLER_COMMAND = 'curl -fsSL https://neuralisapp.com/install.sh | sh';
 
@@ -588,7 +714,7 @@ export const INSTALL_HELP = 'https://docs.neuralisapp.com/getting-started/instal
  * Every wall setup can see before any prompt or write, by layout. Null when
  * nothing is missing.
  *
- * - **container** — the image writes an install folder for the HOST, so it needs
+ * - **container** / **image** — the image writes an install folder for the HOST, so it needs
  *   what the host alone can say: where the data home is on the host (an absolute
  *   `NEURALIS_HOST_HOME`, unless the home is bound at its own host path), a
  *   reachable Docker (the socket), and the install folder (`--output`) on a bind
@@ -620,7 +746,7 @@ export function setupRefusal(input: {
       'Nothing was written.',
     ]);
   }
-  if (input.layout !== 'container') return null;
+  if (!insideImage(input.layout)) return null;
   const fix = imageFix(input.version, input.composeOnly, input.composeOnly ? input.output.dir : null);
   if (input.hostHome && !isAbsolute(input.hostHome)) {
     return new CliExit(1, `NEURALIS_HOST_HOME must be the absolute host path of the data home, not "${input.hostHome}".`, fix);

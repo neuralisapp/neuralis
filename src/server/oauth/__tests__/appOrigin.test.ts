@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  DEFAULT_APP_ORIGIN,
+  defaultAppOrigin,
   declaredAppOrigin,
   isLoopbackAppOrigin,
   resolveTrustedAppOrigin,
 } from '../appOrigin';
 
-const saved = { APP_URL: process.env.APP_URL, NEXTAUTH_URL: process.env.NEXTAUTH_URL };
+const saved = { APP_URL: process.env.APP_URL, NEXTAUTH_URL: process.env.NEXTAUTH_URL, NEURALIS_APP_PORT: process.env.NEURALIS_APP_PORT };
 afterEach(() => {
-  for (const k of ['APP_URL', 'NEXTAUTH_URL'] as const) {
+  for (const k of ['APP_URL', 'NEXTAUTH_URL', 'NEURALIS_APP_PORT'] as const) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
@@ -37,9 +37,18 @@ describe('resolveTrustedAppOrigin — the ONE origin every OAuth redirect is bui
   it('answers WITHOUT a request — the shape the package port publishes', () => {
     delete process.env.APP_URL;
     delete process.env.NEXTAUTH_URL;
-    expect(resolveTrustedAppOrigin()).toBe(DEFAULT_APP_ORIGIN);
+    expect(resolveTrustedAppOrigin()).toBe(defaultAppOrigin());
     process.env.APP_URL = 'https://neuralis.example.com';
     expect(resolveTrustedAppOrigin()).toBe('https://neuralis.example.com');
+  });
+
+  it('the undeclared default is loopback on the port this app LISTENS on, never a fixed 3100', () => {
+    delete process.env.APP_URL;
+    delete process.env.NEXTAUTH_URL;
+    process.env.NEURALIS_APP_PORT = '3104';
+    expect(resolveTrustedAppOrigin()).toBe('http://localhost:3104');
+    expect(defaultAppOrigin({ NEURALIS_APP_PORT: 'junk' })).toBe('http://localhost:3100');
+    expect(defaultAppOrigin({})).toBe('http://localhost:3100');
   });
 
   it('an UNUSABLE declared value is ignored, not thrown on', () => {
@@ -48,7 +57,7 @@ describe('resolveTrustedAppOrigin — the ONE origin every OAuth redirect is bui
     process.env.APP_URL = 'not a url';
     delete process.env.NEXTAUTH_URL;
     expect(declaredAppOrigin()).toBeNull();
-    expect(resolveTrustedAppOrigin('http://0.0.0.0:3100/x')).toBe(DEFAULT_APP_ORIGIN);
+    expect(resolveTrustedAppOrigin('http://0.0.0.0:3100/x')).toBe(defaultAppOrigin());
 
     process.env.APP_URL = 'file:///etc/passwd';
     expect(declaredAppOrigin()).toBeNull();

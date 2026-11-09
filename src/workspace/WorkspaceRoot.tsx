@@ -6,7 +6,7 @@ import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts'
 import { useWorkspaceStore } from './store/workspaceStore';
 import { useWorkspaceSession } from './store/selectors';
 import {
-  fetchPackageSnapshot,
+  loadScopedSnapshot,
   seedSnapshotCache,
   onSnapshotChange,
   subscribeToRuntimeEvents,
@@ -20,11 +20,12 @@ import { StageHost } from './shell/StageHost';
 import { NeuralisHostProvider } from './NeuralisHostProvider';
 import { subscribeProjectRecordChanges } from './realtime/eventHub';
 import { useNotificationsFeed } from './notifications/notificationsClient';
+import { resyncSession } from '@/app/providers';
 
 /**
- * How long the workspace waits on its first snapshot or its UI modules before
- * it shows the shell anyway. A late snapshot still applies; a late module
- * still attaches, its surfaces showing their own "Loading…" until it lands.
+ * How long the workspace waits on its first snapshot, its UI modules or each
+ * scoped-snapshot attempt before it moves on. A late snapshot still applies; a
+ * late module still attaches, its surfaces showing "Loading…" until it lands.
  */
 const LOADING_FALLBACK_MS = 6000;
 
@@ -140,19 +141,19 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
     // invalidation happened to arrive. Surfaces that treat snapshot membership
     // as a visibility PROOF (the derived skill launcher, via `getScopedSnapshot`)
     // stay empty until this lands — fail-closed, and it lands on every load.
-    void fetchPackageSnapshot(scope)
-      .then((snapshot) => {
-        // Only the runtime ROUTE attaches `ui`; the unscoped seeds carry none.
-        if (mounted) void ensureUiModules(readUiAttachments(snapshot));
-        if (!mounted || !snapshot?.surfaces?.length) return;
-        applySnapshot(snapshot, scope);
-        setCardSnapshot(snapshot);
-        if (!resolved) {
-          resolved = true;
-          setReady(true);
-        }
-      })
-      .catch(() => { /* ignore — the seed/Server-Action paths still apply */ });
+    // The primary dock shows its loading state for exactly that wait, which is
+    // bounded: one retry after LOADING_FALLBACK_MS, then it stops and logs.
+    const stopScopedLoad = loadScopedSnapshot(scope, LOADING_FALLBACK_MS, (snapshot) => {
+      // Only the runtime ROUTE attaches `ui`; the unscoped seeds carry none.
+      if (mounted) void ensureUiModules(readUiAttachments(snapshot));
+      if (!mounted || !snapshot?.surfaces?.length) return;
+      applySnapshot(snapshot, scope);
+      setCardSnapshot(snapshot);
+      if (!resolved) {
+        resolved = true;
+        setReady(true);
+      }
+    });
 
     // If SSR snapshot was already applied, skip the remaining fallbacks
     if (!resolved) {
@@ -175,6 +176,7 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
       return () => {
         mounted = false;
         window.clearTimeout(timeout);
+        stopScopedLoad();
         stopListening();
         stopStreaming();
       };
@@ -182,6 +184,7 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
 
     return () => {
       mounted = false;
+      stopScopedLoad();
       stopListening();
       stopStreaming();
     };
@@ -189,11 +192,12 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
 
   // Agents not resolved yet for the active project (idle covers the first
   // paint before selectProject's merged set() lands; loading covers the fetch
-  // window). 'error' deliberately falls through to today's behavior.
-  const agentsPending = agentsStatus === 'idle' || agentsStatus === 'loading';
-  const isBootstrapping = !projectId || projectsStatus === 'idle' || projectsStatus === 'loading';
+  // window; unavailable waits for the host to answer — the hub connect loads it
+  // again). A refusal ('error') deliberately falls through to today's behavior.
+  const agentsPending = agentsStatus === 'idle' || agentsStatus === 'loading' || agentsStatus === 'unavailable';
+  const isBootstrapping = !projectId || projectsStatus === 'idle' || projectsStatus === 'loading' || projectsStatus === 'unavailable';
   const hasAgent = Boolean(agentId);
-  // First-party UI modules attach behind the loading branch, so a later
+  // Native UI modules attach behind the loading branch, so a later
   // registration has no rendered shell to disturb. Once the shell has shown, a
   // module attaching later (another project's snapshot) never flips it back.
   // The wait is bounded by the same fallback as the snapshot: a module whose
@@ -209,10 +213,28 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
   // project it is keyed on — or the hub came back after a drop. Re-read the
   // LIST only: `refreshProjects` keeps the layout and session, where
   // `reload()` would wipe them.
+  //
+  // The same subscription carries the workspace's ONE recovery arm: on every
+  // hub connect (the host answers again — `/api/events` opens only once its
+  // runtime is ready), what failed to load runs once more: a project or agent
+  // list the host did not answer, and a session that read signed out. The
+  // package snapshot needs no call here: the hub sends `runtime:snapshot` on
+  // every connect and its refetch (`subscribeToRuntimeEvents`) delivers the
+  // snapshot the dock still waits on, and its `ui` view re-imports a module
+  // whose `import()` was rejected. The presence cache keeps its own connect rule.
   const refreshProjects = useWorkspaceStore((s) => s.refreshProjects);
+  const authStatusRef = useRef(authStatus);
+  authStatusRef.current = authStatus;
   useEffect(() => {
     if (!projectId) return;
-    return subscribeProjectRecordChanges({ projectId, onChange: () => { void refreshProjects(); } });
+    return subscribeProjectRecordChanges({
+      projectId,
+      onChange: () => { void refreshProjects(); },
+      onConnected: () => {
+        void useWorkspaceStore.getState().reloadUnavailable();
+        if (authStatusRef.current === 'unauthenticated') resyncSession();
+      },
+    });
   }, [projectId, refreshProjects]);
 
   const loading = (

@@ -193,6 +193,21 @@ describe('neuralis:backup', () => {
     expect(s.logs.join('\n')).toContain('not included (add with --include-volume <name>): neuralis_qdrant-snapshots');
   });
 
+  it('the desktop app\'s own Qdrant (a compose file with a vector store and no app): its Qdrant stops for the copy and starts again', async () => {
+    const s = setup();
+    s.world.running = new Set(['qdrant']);
+    s.ports.composeRunning = async () => ({ kind: 'companions', project: 'neuralis', vectorstore: 'qdrant', embeddings: null, running: [...s.world.running] });
+    const out = join(tempDir('neuralis-out-'), 'b1');
+    const result = await runBackup(s.ports, s.facts, { outDir: out, includeVolumes: [] });
+    const stopAt = s.world.calls.findIndex((c) => c.join(' ') === 'docker compose stop qdrant');
+    const volumeTarAt = s.world.calls.findIndex((c) => c[0] === 'docker' && c[1] === 'run' && c.includes('tar'));
+    expect(stopAt).toBeGreaterThan(-1);
+    expect(volumeTarAt).toBeGreaterThan(stopAt);
+    expect(s.world.calls.at(-1)!.join(' ')).toBe('docker compose start qdrant');
+    expect(s.world.running).toEqual(new Set(['qdrant']));
+    expect(result.manifest.parts.map((p) => p.kind)).toContain('volume');
+  });
+
   it('the folder is 0700 and every file in it 0600 — it holds every secret', async () => {
     const s = setup();
     const out = join(tempDir('neuralis-out-'), 'b1');
@@ -246,6 +261,8 @@ describe('neuralis:backup', () => {
   it('refuses a folder inside the home it copies', async () => {
     const s = setup();
     await expect(runBackup(s.ports, s.facts, { outDir: join(s.home, 'backups', 'b1'), includeVolumes: [] })).rejects.toThrow(/inside the home/);
+    // A folder whose name only starts with dots is still inside the home.
+    await expect(runBackup(s.ports, s.facts, { outDir: join(s.home, '..backups', 'b1'), includeVolumes: [] })).rejects.toThrow(/inside the home/);
   });
 
   it('refuses while something else holds the volume, writes no manifest, and starts the stack again', async () => {

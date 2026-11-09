@@ -83,7 +83,7 @@ describe('parsePersistedWorkspace (the persisted-state reader)', () => {
 
   it('a payload that is not an object reads as an empty workspace, never a crash', () => {
     for (const raw of [undefined, null, 'x', 7, []]) {
-      expect(parsePersistedWorkspace(raw)).toEqual({ runtimeByAgentId: {}, session: { projectId: null, agentId: null, workspaceView: 'default' }, projectStateById: {}, groupStateByScope: {} });
+      expect(parsePersistedWorkspace(raw)).toEqual({ runtimeByAgentId: {}, session: { projectId: null, agentId: null, workspaceView: 'default' }, projectStateById: {}, groupStateByScope: {}, phoneDockPrefsByScope: {} });
     }
   });
 });

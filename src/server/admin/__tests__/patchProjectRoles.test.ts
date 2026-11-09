@@ -26,12 +26,9 @@ import { BUILTIN_ROLE_PRIORITY } from '@neuralis/package-system/access';
 const appRoot = await mkdtemp(join(tmpdir(), 'nrs-patch-roles-'));
 
 vi.mock('../../config/env', () => ({
-  // `auth.secret` is here because `resolveProjectRoleContext` lives beside the
-  // NextAuth options module, which reads it at import time.
   getEnv: () => ({
     appRoot,
     projectsRoot: join(appRoot, 'projects-data'),
-    auth: { secret: 'test-secret' },
   }),
 }));
 

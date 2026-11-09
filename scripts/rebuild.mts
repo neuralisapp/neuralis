@@ -75,6 +75,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sha256Dir } from './build/treeDigest.mjs';
 import { homedir } from 'node:os';
+import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { dockerExec, parseSha256sum, readComposeStack, sha256File, SANDBOXER_CONTAINER_PATH } from './host-broker/helper.mts';
 import { CliExit, type CliContext } from './cli/registry.mts';
 import { spell } from './cli/spelling.mts';
@@ -337,7 +338,7 @@ async function collectBuildReport(installDir: string): Promise<void> {
     const lock = join(scratch, 'pnpm-lock.yaml');
     const tracked = join(scratch, 'tracked-lock.sha256');
     if (existsSync(lock) && existsSync(tracked)) {
-      const home = process.env.NEURALIS_HOME?.trim() || join(homedir(), '.neuralis');
+      const home = resolveNeuralisHome().home;
       const dir = join(home, 'build');
       mkdirSync(dir, { recursive: true });
       // Lock first, hash last, each through a rename: a reader never pairs a new
@@ -442,7 +443,20 @@ const regenerateWithSetup: RegenerateCompose = async (ctx) => {
  * setup runs in-process); the suite passes a recorder, so a test never reads
  * the live .env nor rewrites the live docker-compose.yml.
  */
-export async function run(args: string[], ctx: CliContext, regenerate: RegenerateCompose = regenerateWithSetup): Promise<number> {
+/** What the next build's app will refuse to start on — `upgrade --check`'s answer, read from the code that runs. */
+export async function livePendingUpgrades(ctx: CliContext): Promise<string[]> {
+  // Loaded on use: the upgrade closure reaches the host's `src/`, which the
+  // rebuild itself never needs; its builtin set is the code that runs (`builtinSlots.ts`).
+  const { pendingUpgrades, UPGRADES_DIR } = await import('./upgrade.mts');
+  return pendingUpgrades(UPGRADES_DIR, resolveNeuralisHome().appRoot);
+}
+
+export async function run(
+  args: string[],
+  ctx: CliContext,
+  regenerate: RegenerateCompose = regenerateWithSetup,
+  pendingCheck: (ctx: CliContext) => Promise<string[]> = livePendingUpgrades,
+): Promise<number> {
   const dirs: Dirs = { packageDir: ctx.packageDir, installDir: ctx.installDir };
   const noPrune = args.includes('--no-prune');
   const noSidecar = args.includes('--no-sidecar');
@@ -482,12 +496,23 @@ export async function run(args: string[], ctx: CliContext, regenerate: Regenerat
   // names — a vanished folder, a bad `.npmrc` — stops here, before Docker.
   const composeCode = await regenerate(ctx).catch((err: unknown) => {
     console.log(`  ${fail} ${err instanceof Error ? err.message : String(err)}`);
+    // The refusal's own lines name what to change (which port, which `.env` key).
+    if (err instanceof CliExit) for (const line of err.detail) console.log(`      ${line}`);
     return 1;
   });
   if (composeCode !== 0) {
     console.log();
     console.log(`  ${fail} compose regeneration failed (exit ${composeCode}) — nothing was built.`);
     return composeCode;
+  }
+
+  // The new build's pending offline data formats: its app answers 503 until
+  // they are raised with the app stopped — said here, before anything starts.
+  const pending = await pendingCheck(ctx).catch(() => []);
+  if (pending.length > 0) {
+    console.log(`  ${warn} pending offline upgrade — the rebuilt app answers 503 until it is applied:`);
+    for (const line of pending) console.log(`      ${line}`);
+    console.log(`      then: \`docker compose stop neuralis\` → \`${spell('upgrade --apply')}\` → \`docker compose up -d -V\``);
   }
 
   // The installed arm: say what this build produces before Docker starts.

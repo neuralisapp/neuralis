@@ -8,7 +8,7 @@ Most product widgets are contributed by packages and rendered through `src/works
 
 - Define `WidgetDefinition` and render context types.
 - Keep the host widget registry small and explicit.
-- Provide compatibility for first-party widgets that need host bridges.
+- Provide compatibility for native widgets that need host bridges.
 - Avoid placing package business logic in the host.
 
 ## Rule
@@ -23,7 +23,9 @@ and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.ts
 
 - **Stage modes (tiled / canvas / grid / phone)** — `StageHost` picks the renderer from the
   shared `effectiveStageMode`: transient per-runtime manual choice, then enabled
-  automatic Phone, then saved `layout.stageMode` (default `tiled`). Automatic Phone
+  automatic Phone, then saved `layout.stageMode` (default `tiled`). An active dock
+  draft retains its desktop/Phone presentation until Save/Cancel, while responsive
+  eligibility continues updating; manual mode/Auto changes are guarded. Automatic Phone
   uses layout width≤600, or coarse primary input with the minimum screen dimension≤600;
   keyboard viewport height and pinch scale do not select a mode. Auto clears the
   active manual choice without rewriting saved desktop geometry; Phone is never
@@ -45,21 +47,23 @@ and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.ts
   mode. The Layout "Mode" row toggles it (`setStageMode`); all of it persists per
   agent. Phone shows ONE foreground window at a time in the same `PanelChrome` /
   `WidgetControls` as the desktop. The edge docks are not rendered there: one small
-  "Docks" launcher in its own row under the stage (it never covers the composer)
-  opens the dock sheet on the fixed control material — the open windows as a row of
-  tiles (tap = bring to front, × = minimize) and each dock as a four-column icon grid
-  with the desktop item visuals and a one-line label. An app or agent tap acts and
-  closes the sheet (an agent tap brings that agent's chat to the front); the account
-  and project tiles keep it open for their popups. Tap outside, a drag down, Escape
-  or the launcher closes it — the sheet ends above the launcher row, so the launcher
-  stays tappable; dock editing opens it. A horizontal swipe (>= 64 px, at least twice
+  combined dock in its own row under the stage (it never covers the composer)
+  fixes account left and project right, with Apps at the geometric center,
+  apps in the left half and agents in the right half. Two existing `DockScrollContainer` instances
+  scroll the halves independently. Apps opens the same `AppMenu` used on desktop,
+  above that row on Dark-scoped Dim glass: compact view selection and window chips
+  (tap = bring to front, × = minimize), Apps/Agents grids and inline Layout.
+  An app or agent tap acts and closes the panel (an agent tap brings its chat forward);
+  account/project popups keep it open. Header controls are shown once while it is open.
+  Tap outside, drag the top handle down, Escape or Apps closes it without discarding
+  an edit at the real dock. A horizontal swipe (>= 64 px, at least twice
   as wide as tall) on the foreground window brings the previous/next open window
   forward in the sheet's tile order, with no wrap-around; a touch that starts in an
   input, an editor, a frame, a canvas, the terminal or anything that scrolls sideways
   — or while text is selected — stays with that content. A frameless window's control
   strip is always visible on Phone and on any touch screen (no hover to reveal it). Desktop dock modes, anchors,
-  materials and preferences are untouched by Phone, and the foreground choice is
-  transient, excluded from persistence.
+  and ordering are not changed by Phone arrangement; Dock appearance settings are shared.
+  The foreground choice is transient, excluded from persistence.
 - **Keep-alive across BOTH minimize AND mode-switch** — the reverse-portal machinery
   (one detached "outlet" DOM node per instance, each rendered ONCE via a portal and
   moved with `appendChild`) lives in **`StageHost`**, NOT in a stage. Because the
@@ -108,8 +112,8 @@ and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.ts
   item's window chooser (each row brings its window forward; its broom is
   "Clean this window", which resets that ONE window's package view state through
   the `instance` reset scope and keeps it open; "New window" adds one). The Apps
-  launcher offers "New window" on a repeatable app that is already open; on Phone
-  the chooser is a row of tiles in the dock sheet. The chat slot has no dock item:
+  launcher offers "New window" on a repeatable app that is already open; its
+  chooser is a row of tiles in the shared launcher. The chat slot has no dock item:
   its chooser is the agent tile's — a click on the SELECTED agent (rows of that
   agent's chat windows + "New window"; `opensWindowChooser` in `../shell/Dock.tsx`,
   `chooserWhenActive`; on Phone only once that chat is in front — the first tap
@@ -192,12 +196,20 @@ and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.ts
   frame raises it. Clicking it lists the item's notifications (marked read as
   shown); the inbox (per-app groups with a two-click Clear) and the settings
   live in the account popup, a row opens only its own package's widget through
-  `openWidget`.
-- **Apps menu** — the fixed dock entry opens a centered, searchable launcher on the
-  fixed control material (opaque Dark whatever the theme or material) with
-  every authorized app, including apps hidden from the dock. It is a dialog,
+  `openWidget`. The account popup's **People** view (`../shell/PeoplePanel.tsx`)
+  lists the project's members online first with the clients they are on, as far
+  as the caller's features reach (`GET /api/presence`): one read on open, one
+  debounced re-read per burst of host-only `members` frames and one on hub
+  reconnect — no poll.
+- **Apps menu** — the fixed dock entry opens the shared responsive launcher on the
+  existing Dim material scoped to Dark, with
+  every authorized app and agent, including entries hidden from the dock. App and
+  custom-agent glyphs share40px Phone/44px desktop presentation in56px launcher tiles. Apps and
+  Agents share the open-window strip; search opens only from its magnifier. It is a dialog,
   never a widget instance, so the entry has no highlight or broom. Its Layout button
-  opens settings. Pins use the existing dock preferences writer and are disabled
+  opens settings in the same panel. Pin/New actions live in each item's accessible
+  overflow menu rather than under the logo. Pins seed their draft with authorized live keys
+  before using the existing dock preferences writer and are disabled
   until an active dock draft is saved or cancelled. Empty projects retain Apps
   and Layout access without a synthetic agent.
 - **Edit docks** (Layout panel) — the docks enter edit mode (a dock already
@@ -205,9 +217,21 @@ and `../shell/{StageHost,TiledStage,CanvasStage,PhoneStage,Dock,useDockItems}.ts
   discards both): drag or the arrow
   keys reorder INSIDE a group (a trust tier, own vs other agents — separators
   stay), the trash hides, the dashed tile brings hidden items back; the account,
-  project, Layout and Create-agent items are fixed. The draft lives in `Dock`
+  project, Apps and Create-agent items are fixed. The shared `DockEditor` lives at the actual dock
   until Save writes `projectStateById[projectId].dock` once (per project, per
-  browser; `../shell/dockOrder.ts`).
+  browser; `../shell/dockOrder.ts`). Phone uses the same editor/writer with
+  `phoneDockPrefsByScope`, keyed by live user and project, independently of desktop
+  preferences. The Phone band fixes User left, Apps centrally and Project right,
+  with independently scrolling apps/agents. It shares Dock theme/material/background;
+  User/Project retain separator tiles and Apps gets one only in Toolbar. Desktop
+  content glyphs are26px and navigation28px; Phone keeps32px within unchanged tracks.
+  Phone header buttons are40×40. The editor preserves
+  outer appearance and header visibility when Apps opens, without duplicating controls.
+  The editor captures its target, scope and Group-edit intent at entry;
+  view/Group/stage switching is guarded while editing, scope changes discard the old draft,
+  and Group plus dock Save publishes atomically. The map uses the existing persistence
+  blob and bounded normalizer; every store set serializes the map, including geometry
+  writes, even when the storage adapter elides an identical disk write.
 - **Agent identity** — the right-side agent tiles resolve
   `config.appearance.{icon,color}` through the package-system client
   `resolveAgentIcon` / `resolveAgentColor` authority. Users and projects

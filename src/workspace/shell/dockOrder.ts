@@ -186,3 +186,8 @@ export function dropPlacement(
     ? (pointer.x < rect.left + rect.width / 2 ? 'before' : 'after')
     : (pointer.y < rect.top + rect.height / 2 ? 'before' : 'after');
 }
+
+/** Combined phone slots preserve each source dock's group boundaries and fixed actions. */
+export function combineDockItems<T extends ArrangeableItem>(primary: readonly T[], secondary: readonly T[]): T[] {
+  return [primary, secondary].flatMap((items, dock) => [...items].sort((a, b) => a.position - b.position).map((item, index) => ({ ...item, id: item.prefKey ?? `${dock}:${item.id}`, position: dock * 10000 + index })));
+}

@@ -1,18 +1,21 @@
 /**
  * Decode NextAuth session cookie from an Express-like request.
  *
- * The MCP server on port 3101 runs in the same Node process as the Next.js
- * app on port 3100 (started via instrumentation). Browsers send cookies
- * across ports on the same hostname, so the `next-auth.session-token`
- * cookie is available here.
+ * The MCP server (`MCP_HTTP_PORT`) runs in the same Node process as the Next.js
+ * app (started via instrumentation). A browser's cookie surfaces reach it
+ * FORWARDED from the app origin (the consent, the terminal sockets), so the
+ * cookie arrives on every shape; a same-hostname port split also sends it
+ * directly (cookies ignore ports) — the desktop stream relies on that.
  *
- * We decode the JWT using `next-auth/jwt` decode() with the shared
- * NEXTAUTH_SECRET — the same secret NextAuth uses to encrypt the token.
+ * We decode the JWT using `next-auth/jwt` decode() with the shared session
+ * secret (`sessionSecret`, the data home's key file) — the same secret NextAuth
+ * uses to encrypt the token.
  */
 
 import { decode } from 'next-auth/jwt';
-import { getEnv } from '../config/env';
+import { SessionSecretMissingError, sessionSecret } from '../config/env';
 import { resolveActiveUser } from '../auth/memberSession';
+import { SESSION_COOKIE_NAMES } from '../auth/sessionCookieNames';
 import { resolveTrustedAppOrigin } from '../oauth/appOrigin';
 import { appearanceImageUrl } from '../../lib/appearanceImageUrl';
 import type { StoredAppearance } from '../appearance/appearanceImageStore';
@@ -22,7 +25,7 @@ export type ConsentAppearance = {
   iconName?: string;
   color?: string;
   background?: 'filled' | 'transparent';
-  /** ABSOLUTE `<app origin>/api/appearance/…` URL — the page is served from `:3101`. */
+  /** ABSOLUTE `<app origin>/api/appearance/…` URL — the image origin the consent page's CSP names. */
   imageUrl?: string;
 };
 
@@ -75,8 +78,14 @@ export async function resolveSessionUser(req: RequestLike): Promise<SessionUser 
   const raw = extractSessionToken(cookieHeader);
   if (!raw) return null;
 
-  const secret = getEnv().auth.secret;
-  if (!secret) return null;
+  let secret: string;
+  try {
+    secret = sessionSecret();
+  } catch (error) {
+    // No secret on disk = not set up: no cookie can be valid.
+    if (error instanceof SessionSecretMissingError) return null;
+    throw error;
+  }
 
   try {
     const token = await decode({ token: raw, secret });
@@ -110,9 +119,8 @@ export async function resolveSessionUser(req: RequestLike): Promise<SessionUser 
 function extractSessionToken(cookieHeader: string): string | null {
   const cookies = parseCookies(cookieHeader);
   // Try secure cookie first (production), then dev cookie
-  return cookies['__Secure-next-auth.session-token']
-    ?? cookies['next-auth.session-token']
-    ?? null;
+  for (const name of SESSION_COOKIE_NAMES) if (cookies[name]) return cookies[name];
+  return null;
 }
 
 /**

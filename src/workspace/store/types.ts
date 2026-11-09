@@ -1,4 +1,10 @@
-export type LoadStatus = 'idle' | 'loading' | 'success' | 'error';
+/**
+ * `unavailable` — the host did not answer the load (no response, or a 5xx while
+ * it restarts or boots): the list is still to come, the workspace shows its
+ * loading state, and the next hub connect loads it again. `error` is a refusal
+ * (a 4xx) and is final.
+ */
+export type LoadStatus = 'idle' | 'loading' | 'success' | 'unavailable' | 'error';
 
 export type EntityState<T> = {
   byId: Record<string, T>;
@@ -65,6 +71,8 @@ export type RuntimeLocator =
   | { kind: 'group'; userId: string; projectId: string; groupId: string };
 
 /** One dock's arrangement: keys in display order, and the keys it hides. */
+export type DockPrefsId = 'primary' | 'secondary' | 'phone';
+
 export type DockPrefs = { order: string[]; hidden: string[] };
 
 export type DockPrefsById = { primary?: DockPrefs; secondary?: DockPrefs };

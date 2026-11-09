@@ -10,7 +10,7 @@
  * exist in lucide-react at all.) The kernel now WARNS at load and the
  * authoring preflight ERRORS; this guard holds the shipped manifests to it.
  *
- * Scope: every `icon` value in a first-party manifest's `neuralis` block, plus
+ * Scope: every `icon` value in a native manifest's `neuralis` block, plus
  * every literal `icon="…"` on a skill launcher. Data-driven icons
  * (`icon={row.icon}`) are out of reach and stay a runtime fallback.
  */
@@ -107,7 +107,7 @@ function launcherIcons(appDir: string): Array<{ icon: string; file: string }> {
 describe('icon-name drift-guard', () => {
   const deps = readHostDependencies().filter((n) => !!readNeuralisBlock(n));
 
-  it('finds first-party manifests and the icon library', () => {
+  it('finds native manifests and the icon library', () => {
     expect(deps.length).toBeGreaterThan(0);
     expect(ICON_LIBRARY.length).toBeGreaterThan(200);
   });

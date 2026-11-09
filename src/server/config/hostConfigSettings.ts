@@ -2,7 +2,7 @@ import type { PackageConfigSetting } from '@neuralis/package-system/contracts';
 
 /**
  * The HOST's own platform-config declarations — registered through the SAME
- * `registerSettings` mechanism every first-party package uses (declarer
+ * `registerSettings` mechanism every native package uses (declarer
  * `'host'`), so the store carries ZERO hardcoded schema. Only genuinely
  * host-owned keys belong here (project capacity, host logging); every
  * agent/brain/machine tunable is declared by its owning package's manifest
@@ -138,11 +138,33 @@ export const HOST_CONFIG_SETTINGS: PackageConfigSetting[] = [
     key: 'sseHeartbeatMs',
     label: 'SSE Heartbeat (ms)',
     description:
-      'Keepalive comment-frame interval on the multiplexed /api/events SSE hub and the project presence stream; keeps HTTP/1.1 intermediaries and the browser from idling out the connection. Applies to newly opened connections.',
+      'Keepalive frame interval on the multiplexed /api/events SSE hub; keeps HTTP/1.1 intermediaries and the browser\'s staleness watchdog (60 s) from dropping an idle connection. Applies to newly opened connections.',
     type: 'number',
     default: 25_000,
     min: 5_000,
     max: 55_000,
+    category: 'runtime',
+  },
+  {
+    key: 'presenceActiveWindowMs',
+    label: 'Presence Active Window (ms)',
+    description:
+      'How long a client that called the API with an access token (the neuralis CLI, an MCP client) still counts as online after its last request. An open workspace window counts as online for as long as it is connected. Presence is kept in memory only. Applies live.',
+    type: 'number',
+    default: 300_000,
+    min: 30_000,
+    max: 3_600_000,
+    category: 'runtime',
+  },
+  {
+    key: 'presenceSignalCooldownMs',
+    label: 'Presence Signal Cooldown (ms)',
+    description:
+      'The shortest gap between two "who is online changed" signals for one project on the live event hub. A change inside the gap is sent once when it ends. Applies live.',
+    type: 'number',
+    default: 5_000,
+    min: 1_000,
+    max: 60_000,
     category: 'runtime',
   },
   {
@@ -179,6 +201,17 @@ export const HOST_CONFIG_SETTINGS: PackageConfigSetting[] = [
     category: 'enterprise',
   },
   {
+    key: 'inviteLinkTtlHours',
+    label: 'Invite Link Lifetime (hours)',
+    description:
+      'How long an invite link (Admin → Users → Copy invite link, or an agent with the invite skill) can be used. A link works once, only for the email it was made for, and only while the person who made it may still invite into that role. Applies to links made after the change.',
+    type: 'number',
+    default: 168,
+    min: 1,
+    max: 720,
+    category: 'enterprise',
+  },
+  {
     key: 'dataCheckpointKeep',
     label: 'Data Checkpoints Kept',
     description:
@@ -212,6 +245,15 @@ export const HOST_CONFIG_SETTINGS: PackageConfigSetting[] = [
     category: 'runtime',
   },
   {
+    key: 'disabledBuiltinPackages',
+    label: 'Turned-off Core Packages',
+    description:
+      'Core packages this deployment does not load, as a JSON list. Only a package whose manifest says the platform runs without it can be turned off — today "@neuralis/machine-core" (the virtual desktop); any other entry is ignored and named in the log, and a value that is no list of names turns nothing off. Turned off, it leaves out the virtual desktop, machine_use, the shell inside desktops, sidecar MCP servers and the desktop sources (they stay stored and come back when it is on again); the package stays installed. Applies on restart. Setup writes it for a new install without Docker; the setting covers every install on this data folder.',
+    type: 'json',
+    default: [],
+    category: 'runtime',
+  },
+  {
     key: 'sourcePackageScanMaxFiles',
     label: 'Source Package Scan Max Files',
     description:
@@ -231,6 +273,81 @@ export const HOST_CONFIG_SETTINGS: PackageConfigSetting[] = [
     default: 64,
     min: 4,
     max: 256,
+    category: 'runtime',
+  },
+  {
+    key: 'packageRegistryUrl',
+    label: 'Package Registry',
+    description:
+      'The npm registry a package installed while the host runs comes from (Admin → Packages, `neuralis package install`): an https URL, or http on this machine only, with no user name or password in it. A private registry\'s token is never read from here; a scope this machine has installed from a private registry is refused at runtime. Applies to the next install.',
+    type: 'string',
+    default: 'https://registry.npmjs.org/',
+    category: 'runtime',
+  },
+  {
+    key: 'packageInstallTimeoutMs',
+    label: 'Package Install Timeout (ms)',
+    description:
+      'How long one npm run of a package install, update or fetch may take before it is stopped and the install is undone. Applies to the next install.',
+    type: 'number',
+    default: 900_000,
+    min: 30_000,
+    max: 1_800_000,
+    category: 'runtime',
+  },
+  {
+    key: 'packageUploadMaxMb',
+    label: 'Package Upload Max (MB)',
+    description:
+      'The largest package tarball (.tgz) a person may upload to install. Applies to the next upload.',
+    type: 'number',
+    default: 25,
+    min: 1,
+    max: 200,
+    category: 'runtime',
+  },
+  {
+    key: 'passwordHashWorkers',
+    label: 'Password Hash Workers',
+    description:
+      'Most worker threads that hash and check passwords (login, password change, invites) beside the request thread — never more than the CPU cores minus one. Each holds ~10 MB while alive. Applies to the next login.',
+    type: 'number',
+    default: 2,
+    min: 1,
+    max: 16,
+    category: 'runtime',
+  },
+  {
+    key: 'passwordHashQueueMax',
+    label: 'Password Hash Queue',
+    description:
+      'Most password checks waiting for a worker; one more is refused (the login fails, nothing is counted against the account). Applies to the next login.',
+    type: 'number',
+    default: 32,
+    min: 1,
+    max: 1_024,
+    category: 'runtime',
+  },
+  {
+    key: 'passwordHashTimeoutMs',
+    label: 'Password Hash Timeout (ms)',
+    description:
+      'How long one password check may take, waiting included; past it the login is refused and the worker replaced. Applies to the next login.',
+    type: 'number',
+    default: 15_000,
+    min: 1_000,
+    max: 120_000,
+    category: 'runtime',
+  },
+  {
+    key: 'passwordHashWorkerIdleMs',
+    label: 'Password Hash Worker Idle (ms)',
+    description:
+      'An idle password worker exits after this long; the next login starts a new one (~50 ms). Applies to the next login.',
+    type: 'number',
+    default: 60_000,
+    min: 1_000,
+    max: 3_600_000,
     category: 'runtime',
   },
 ];

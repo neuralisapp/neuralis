@@ -72,6 +72,14 @@ describe('resolveCallbackTarget', () => {
     }
   });
 
+  it('the MCP consent continuation is RELATIVE and admitted as-is; a separate MCP hostname is refused (the guard is never widened)', () => {
+    const consent = '/oauth/authorize?client_id=neuralis-cli&redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2Fcb&state=s';
+    expect(resolveCallbackTarget(consent, 'app.example.com')).toEqual({ kind: 'relative', url: consent });
+    for (const raw of ['https://mcp.example.com/oauth/authorize?client_id=x', 'https://sandbox.example.com/mcp-sandbox']) {
+      expect(resolveCallbackTarget(raw, 'app.example.com'), raw).toEqual({ kind: 'relative', url: DEFAULT_CALLBACK_URL });
+    }
+  });
+
   it('falls back to the default for empty, blank and missing input', () => {
     for (const raw of [null, undefined, '', '   ']) {
       expect(resolveCallbackTarget(raw, HOST)).toEqual({ kind: 'relative', url: DEFAULT_CALLBACK_URL });

@@ -97,6 +97,7 @@ describe('project-scoped snapshots', () => {
       },
       // R2b — no owning source scope ⇒ implicit project scope ⇒ never hidden.
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       // Loader accessor — snapshot enriches package status from here.
       getLoader: () => ({
         getStatus: () => undefined,
@@ -225,6 +226,7 @@ describe('base-access feature gate on the CLIENT snapshot — the exact instance
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set([INSTANCE_ID]),
       getPackageOwnerScope: () => undefined, // project scope ⇒ not scope-hidden
+      getPackageOwnerOrigin: () => undefined,
       getPackageManifestId: (_p: string, id: string) => (id === INSTANCE_ID ? MANIFEST_ID : undefined),
       getLoader: () => ({ getStatus: () => undefined }),
     });
@@ -259,7 +261,7 @@ describe('base-access feature gate on the CLIENT snapshot — the exact instance
 describe('widget URL normalization', () => {
   type WidgetSetup = {
     packageId: string;
-    trust: 'first-party' | 'trusted' | 'untrusted';
+    trust: 'native' | 'trusted' | 'untrusted';
     renderer?: 'direct' | 'iframe';
     url?: string;
   };
@@ -317,6 +319,7 @@ describe('widget URL normalization', () => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
   });
@@ -348,7 +351,7 @@ describe('widget URL normalization', () => {
   });
 
   it('passes widgets without a URL through unchanged', () => {
-    setupWidget({ packageId: 'no-url-pkg', renderer: 'direct', trust: 'first-party' });
+    setupWidget({ packageId: 'no-url-pkg', renderer: 'direct', trust: 'native' });
     const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
     expect(widgets).toHaveLength(1);
     expect(widgets[0]!.component.url).toBeUndefined();
@@ -359,6 +362,7 @@ describe('widget URL normalization', () => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(['relative-pkg']),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
     const widgets = getWidgetSnapshot({ host: 'neuralis-workspace', projectId: 'main' });
@@ -370,7 +374,7 @@ describe('widget URL normalization', () => {
 describe('card URL normalization (CARD1 3C — widget parity)', () => {
   type CardSetup = {
     packageId: string;
-    trust: 'first-party' | 'trusted' | 'untrusted';
+    trust: 'native' | 'trusted' | 'untrusted';
     renderer?: 'direct' | 'iframe';
     url?: string;
   };
@@ -426,6 +430,7 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
   });
@@ -458,7 +463,7 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
   });
 
   it('passes a `direct` card (no url) through unchanged', () => {
-    setupCard({ packageId: 'direct-card-pkg', renderer: 'direct', trust: 'first-party' });
+    setupCard({ packageId: 'direct-card-pkg', renderer: 'direct', trust: 'native' });
     const cards = getCardSnapshot({ host: 'neuralis-workspace' });
     expect(cards).toHaveLength(1);
     expect(cards[0]!.render!.url).toBeUndefined();
@@ -473,6 +478,7 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(['relative-card-pkg']),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
     const cards = getCardSnapshot({ host: 'neuralis-workspace', projectId: 'main' });
@@ -532,6 +538,7 @@ describe('feature-filtered snapshots', () => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(['feature-pkg']),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
     vi.mocked(PackageSnapshotService).mockImplementation(function () { return ({
@@ -602,6 +609,7 @@ describe('dock entries — the ONE dock rule, its missing-target semantics and t
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
       getProjectPackageIds: () => new Set(['dock-pkg']),
       getPackageOwnerScope: () => undefined,
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
     vi.mocked(PackageSnapshotService).mockImplementation(function () { return ({
@@ -661,6 +669,7 @@ describe('R2b — scope-isolated snapshots (scope-guarding-magpie)', () => {
         if (packageId === 'pkg-shared') return { kind: 'project' };
         return undefined;
       },
+      getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
   });

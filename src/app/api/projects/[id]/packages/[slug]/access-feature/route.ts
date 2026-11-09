@@ -1,96 +1,38 @@
 /**
- * PUT /api/projects/:id/packages/:slug/access-feature
+ * PUT /api/projects/:id/packages/:package/access-feature
  *
- * R2b (scope-guarding-magpie) — set or clear the owner/admin base-access feature
- * OVERRIDE for a package. Storage lives in the platform zone
- * (`ProjectRecord.packageAccessFeature`) so agents cannot self-elevate via
- * `fs_write`. RESTRICT-ONLY: the override only ATTACHES a required feature to an
- * already-loaded package (e.g. isolate a first-party package that declared no
- * `requires.accessFeature`); it never grants access, so it can never weaken a
- * floor or create a trust tier.
+ * Attach the feature a caller needs to see a package, or clear it —
+ * RESTRICT-ONLY: it never grants access, so it can never weaken a floor or
+ * create a trust tier. `:package` is the exact runtime id (a project package's
+ * instance URI, a native package's `@scope/name`). The body — the FRESH
+ * `canManagePackages` floor, the package checked to exist and to sit in the
+ * caller's write reach, the grantable-feature check, the platform-zone write
+ * (`ProjectRecord.packageAccessFeature`) and the audit row — is the ONE shared
+ * `setProjectPackageAccessFeature`, which the admin `project-packages` route
+ * reaches for the CLI and an agent's session. This route is its cookie door.
  *
- * The `:slug` param is the package id the Packages tab sends — the exact runtime
- * id from the snapshot (`pkg.id`): the host-stamped instance URI
- * `packages://<slug>?project=…&scope=…` for a project package, `@neuralis/*` for
- * a builtin. The override is STORED keyed by that id, and both readers (bootstrap
- * Axis-2 `resolveScopeHiddenIds` for the stream, `resolveOverrideFeature` for the
- * client snapshot) read ONLY that exact key — never the authored manifest id,
- * which two installations can share — so it applies with no reload.
- *
- * Body: { featureId: string | null }
- *   - non-empty string — attach the required feature
- *   - null / ''        — clear the override
+ * Body: { featureId: string | null }   (null or '' clears it)
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/server/auth/session';
-import { getProjectById, setPackageAccessFeature } from '@/server/store/ProjectStore';
-import { writeAuditLog } from '@/server/store/AuditStore';
-import { canManagePackages, resolveProjectAccess } from '@/server/projects/access';
-import { getCommunityPackageRegistry } from '@/server/packages/runtime';
-import { collectAllFeatures } from '@neuralis/package-system';
+import { setProjectPackageAccessFeature } from '@/server/packages/rescanProjectPackages';
+import { packageOpResponse } from '@/server/packages/packageOpResponse';
 
 type Params = { params: Promise<{ id: string; slug: string }> };
 
 export async function PUT(req: NextRequest, { params }: Params): Promise<NextResponse> {
   const session = await requireSession().catch(() => null);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const { id: projectId, slug: packageId } = await params;
-  const project = await getProjectById(projectId);
-  if (!project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-
-  const access = await resolveProjectAccess(session.id, projectId);
-  if (!access || !canManagePackages(access)) {
-    return NextResponse.json(
-      { error: 'Forbidden: package management permission required' },
-      { status: 403 },
-    );
-  }
-
-  const body = await req.json().catch(() => null);
+  const body = (await req.json().catch(() => null)) as { featureId?: unknown } | null;
   if (!body || !('featureId' in body)) {
-    return NextResponse.json(
-      { error: 'Invalid body: { featureId: string | null } required' },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: 'Invalid body: { featureId: string | null } required' }, { status: 400 });
   }
-  const raw = body.featureId as unknown;
-  if (raw !== null && typeof raw !== 'string') {
-    return NextResponse.json(
-      { error: 'Invalid featureId: must be a non-empty string or null' },
-      { status: 400 },
-    );
+  try {
+    const result = await setProjectPackageAccessFeature(session.id, projectId, packageId, body.featureId, { interactive: true });
+    return NextResponse.json({ ok: true, featureId: result.featureId });
+  } catch (err) {
+    return packageOpResponse(err, 'Failed to set the access feature');
   }
-  // Empty/whitespace string clears the override (parity with `null`).
-  const featureId = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
-
-  // R2b — restrict-only is preserved, but a SET must name a GRANTABLE feature
-  // (one in the project's feature catalog, or an already-set override id), so the
-  // owner can actually grant it to a role. Reject an unknown id (the UI floor).
-  // Clearing (null) is always allowed.
-  if (featureId !== null) {
-    const grantable = new Set(collectAllFeatures(getCommunityPackageRegistry().listPackages()));
-    for (const existing of Object.values(project.packageAccessFeature ?? {})) grantable.add(existing);
-    if (!grantable.has(featureId)) {
-      return NextResponse.json(
-        { error: `Unknown feature id: ${featureId}. Declare it (providesFeatures / accessFeature) or pick an existing feature.` },
-        { status: 400 },
-      );
-    }
-  }
-
-  const updated = await setPackageAccessFeature(projectId, packageId, featureId);
-  if (!updated) {
-    return NextResponse.json({ error: 'Failed to persist access-feature override' }, { status: 500 });
-  }
-
-  await writeAuditLog({
-    userId: session.id,
-    action: 'package.access_feature.change',
-    target: `${projectId}/${packageId}`,
-    details: { featureId, packageId },
-  });
-
-  return NextResponse.json({ ok: true, featureId });
 }

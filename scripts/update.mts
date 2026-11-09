@@ -28,11 +28,17 @@
  *     `git fetch --tags && git checkout v<v>`, which this command PRINTS and
  *     never runs — a checkout is the operator's working tree.
  *   - the development checkout: refused; the update there is `git pull`.
- *   - inside the container: refused; an image-only folder has no package to
- *     move — its update is two `.env` lines, then the new image's
- *     `setup --compose-only` and the stack steps, all printed.
+ *   - an image-only folder: the image IS the code. The installed version is
+ *     `.env` NEURALIS_IMAGE_TAG; the target image is used when present
+ *     (`docker image inspect` — a version tag never changes) or pulled (a
+ *     failed pull moves nothing); then the post-move steps and the stack run in
+ *     a one-shot container of the TARGET image (`--host-swapped`, the manifest
+ *     written into the bound folder) — or in this process when it already is
+ *     that image.
+ *   - the image's own tree (`container`): refused; the update runs from the
+ *     install folder on the host.
  *
- * THE STACK (an npm install folder, `--apply`): after the moves below the
+ * THE STACK (an npm install folder or an image-only folder, `--apply`): after the moves below the
  * command runs the rest itself — regenerate compose, stop THIS install's app
  * (compose project and service read from the folder, `update/stack.mts`),
  * `upgrade --apply` with the vector store running, recreate (`up -d -V`, or
@@ -56,18 +62,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-import { resolveNeuralisHome } from '@neuralis/package-system/paths';
+import { IMAGE_HOST_BIN, predatesImageKind, readImageTag, resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { compareReleaseVersions, MANIFEST_VERSION, parseReleaseManifest, type ReleaseManifest } from '@neuralis/package-system/contracts';
 import { appPort } from './checkpoint.mts';
-import { CliExit, type CliContext } from './cli/registry.mts';
-import { imageSetupCommand, installLayout, spellOn, type InstallLayout } from './cli/spelling.mts';
+import { CliExit, HOST_IMAGE, imageRunCommand, upgradeDeviceBinds, type CliContext } from './cli/registry.mts';
+import { installLayout, spellOn, type InstallLayout } from './cli/spelling.mts';
 import { composeProjectOf } from './host-broker/helper.mts';
 import { operatorDependencies } from './setup/compose.mts';
 import { loadHostEnv, resolveConfigDir } from './setup/detect.mts';
 import { discoverBuiltinDeps } from './setup/discoverPackages.mts';
-import { imageTagAfterUpdate, readEnvFile, upsertEnvValue } from './setup/envFile.mts';
+import { dropEnvKey, imageTagAfterUpdate, readEnvFile, upsertEnvValue } from './setup/envFile.mts';
+import { readSessionSecretFile } from '../src/server/config/sessionSecretFile.ts';
+import { recordInstall } from './setup/installRecord.mts';
 import { readPlatformConfig, writeMergedPlatformConfig } from './setup/platformConfig.mts';
-import { applyStack, outsideComposeRefusal, PROCESS_PORTS, stackCommands, stackOf, type ComposeStack, type StackPorts } from './update/stack.mts';
+import { applyStack, IMAGE_PORTS, outsideComposeRefusal, PROCESS_PORTS, stackCommands, stackOf, type ComposeStack, type StackPorts } from './update/stack.mts';
 
 const c = {
   reset: '\x1b[0m',
@@ -291,13 +299,22 @@ async function resolveManifest(source: string): Promise<ReleaseManifest> {
   }
 }
 
+/** The version an install runs: an npm folder's installed host, an image-only folder's `.env` tag, else the running code. */
+function installedHost(layout: InstallLayout, installDir: string, packageDir: string): string | null {
+  if (layout === 'folder') return installedVersion(installDir, HOST_PACKAGE);
+  if (layout === 'image') return readImageTag(installDir);
+  return hostVersion(packageDir);
+}
+
 /**
  * The line plan: the host package itself, then every `@neuralis/*` package the
  * line names that this install carries (they move WITH the host — it pins them).
+ * An image-only folder's one row is its image tag: the packages are inside it.
  */
 export function planLine(input: { target: string; manifest: ReleaseManifest | null; installDir: string; packageDir: string; layout: InstallLayout }): PlanRow[] {
-  const current = input.layout === 'folder' ? installedVersion(input.installDir, HOST_PACKAGE) : hostVersion(input.packageDir) ?? '(unknown)';
-  const rows: PlanRow[] = [{ name: HOST_PACKAGE, current, target: input.target, unchanged: current === input.target }];
+  const current = installedHost(input.layout, input.installDir, input.packageDir) ?? '(unknown)';
+  const rows: PlanRow[] = [{ name: input.layout === 'image' ? HOST_IMAGE : HOST_PACKAGE, current, target: input.target, unchanged: current === input.target }];
+  if (input.layout === 'image') return rows;
   const pinned = (readJson(join(input.packageDir, 'package.json'))?.dependencies ?? {}) as Record<string, unknown>;
   for (const name of Object.keys(pinned).filter((n) => n.startsWith('@neuralis/')).sort()) {
     const target = input.manifest ? input.manifest.packages[name] : input.target;
@@ -309,7 +326,6 @@ export function planLine(input: { target: string; manifest: ReleaseManifest | nu
   return rows;
 }
 
-const HOST_IMAGE = 'neuralisapp/neuralis';
 const WEBTOP_IMAGE = 'neuralisapp/webtop-ubuntu-xfce';
 const SIDECAR_IMAGE = 'neuralisapp/mcp-sidecar';
 
@@ -421,16 +437,15 @@ export function refuseLayout(layout: InstallLayout, args: UpdateArgs, ownVersion
       'and `pnpm neuralis:rebuild`.',
     ]);
   }
+  if (layout === 'native') {
+    throw new CliExit(1, 'this is the desktop app\'s own bundle — it is updated through the app, not by this command', [
+      'The app checks for a new release at start (the tray: "Check for updates…"); a new build then raises the stored data formats itself (`neuralis upgrade --apply`, offline).',
+    ]);
+  }
   if (layout === 'container') {
-    const version = args.targetVersion ?? ownVersion;
-    const [tagLine, , ...regenerate] = imageSetupCommand(version, true);
-    throw new CliExit(1, 'this runs inside the container — an image-only folder has no package to move', [
-      `On the host, in the folder that holds .env and docker-compose.yml: set NEURALIS_IMAGE_TAG=${version}`,
-      `and NEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:${version} in .env (a pinned`,
-      'mcpSidecarImage is an Admin → Config edit), then regenerate the compose file from the new image:',
-      ...[tagLine!, ...regenerate].map((line) => `  ${line}`),
-      'then `docker compose stop neuralis`,',
-      '`docker compose run --rm --no-deps neuralis node bin/neuralis.mjs upgrade --apply`, `docker compose up -d -V`.',
+    throw new CliExit(1, 'this runs in the image\'s own tree, not in an install folder', [
+      `Run it on the host for the folder that holds .env and docker-compose.yml: ${spellOn('image', `update${args.targetVersion ? ` --version ${args.targetVersion}` : ''} --apply`)}`,
+      '(in that folder, or from anywhere with --install <folder>).',
     ]);
   }
   throw new CliExit(1, 'this folder is the host package itself, not an npm install folder or a git clone', [
@@ -472,7 +487,7 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   }
   const packageDir = ctx.packageDir;
   const layout = installLayout(ctx.installDir, packageDir);
-  if (layout !== 'folder' && layout !== 'clone') refuseLayout(layout, args, hostVersion(packageDir) ?? 'latest');
+  if (layout !== 'folder' && layout !== 'clone' && layout !== 'image') refuseLayout(layout, args, hostVersion(packageDir) ?? 'latest');
   // The folder's `.env` (NEURALIS_HOME among it) is this command's environment, as for every other verb.
   await loadHostEnv(ctx.installDir);
   if (args.positional.length > 0) {
@@ -495,24 +510,26 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   // Decided BEFORE anything moves, so a version Docker cannot tag fails with nothing changed.
   const tag = imageTagAfterUpdate({ targetVersion: args.targetVersion, onePackage: false, manifest: manifest ? { image: manifest.images[HOST_IMAGE] ?? null } : null });
 
-  const plan = planLine({ target, manifest, installDir, packageDir, layout });
+  if (layout === 'image' && !tag.move) throw new CliExit(1, `${tag.reason} — an image-only folder moves only with its image`);
+  const plan = planLine({ target: layout === 'image' && tag.move ? tag.tag : target, manifest, installDir, packageDir, layout });
   if (args.hostSwapped) return afterHostSwap({ args, ctx, layout, manifest, tag, previous: null });
 
-  const refusal = downgradeRefusal(manifest?.version ?? target, hostVersion(packageDir), args.manifestExplicit || args.manifestSource === null);
+  const refusal = downgradeRefusal(manifest?.version ?? target, installedHost(layout, installDir, packageDir), args.manifestExplicit || args.manifestSource === null);
   if (refusal) throw new CliExit(1, refusal, [`To move to an older line on purpose, name it: ${spellOn(layout, 'update --manifest <url|file> --apply')}`]);
 
   const host = plan[0]!;
   // The image the container runs is install state of its own: a folder already
   // on the line's code (a fresh `convert`, an interrupted update) still moves it.
-  const image = await imageRow(ctx.installDir, tag);
-  const stack = layout === 'folder' ? await stackPlan(installDir, PROCESS_PORTS) : null;
+  // On an image-only folder the tag IS the plan's one row.
+  const image = layout === 'image' ? null : await imageRow(ctx.installDir, tag);
+  const stack = layout === 'folder' || layout === 'image' ? await stackPlan(installDir, PROCESS_PORTS) : null;
   if (args.asJson) {
     console.log(JSON.stringify({ layout, plan, image, ...(stack ? { stack: stackJson(stack) } : {}), apply: args.apply }, null, 2));
     if (!args.apply) return 0;
   } else {
     console.log('');
     console.log(`  ${c.cyan}${c.bold}── neuralis update ${'─'.repeat(35)}${c.reset}`);
-    console.log(`  ${dot} layout         : ${c.bold}${layout === 'folder' ? 'npm install folder' : 'git clone'}${c.reset}`);
+    console.log(`  ${dot} layout         : ${c.bold}${layout === 'folder' ? 'npm install folder' : layout === 'image' ? 'image-only folder' : 'git clone'}${c.reset}`);
     console.log(`  ${dot} line           : ${c.bold}${manifest ? manifest.version : target}${c.reset}${manifest ? '' : c.dim + ' (--version)' + c.reset}`);
     console.log('');
     for (const row of plan) {
@@ -525,7 +542,18 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
     console.log('');
     if (stack) printStackPlan(stack, layout);
   }
-  if (host.unchanged && (!image || image.unchanged)) {
+  // An image-only folder is on the line only when its stack is too: an update that stopped mid-stack
+  // moved `.env` but left the compose file pinning the old tag — that run resumes, it is no no-op.
+  // The compose file can already be regenerated while the container still runs the old image (a
+  // stop after the regeneration), so the running app's image is read too.
+  const pinned = layout === 'image' ? composeImageTag(installDir) : null;
+  const running = layout === 'image' && host.unchanged && pinned === host.target && stack ? await runningImageTag(stack, PROCESS_PORTS) : undefined;
+  const behind = pinned !== host.target
+    ? `the compose file pins ${pinned ?? 'no release image'}`
+    : running !== undefined && running !== host.target ? (running === null ? 'the app is not running' : `the app container runs ${running}`) : null;
+  const resume = layout === 'image' && host.unchanged && behind !== null;
+  if (resume) console.log(`  ${warn} .env is on ${host.target}, ${behind} — the stack steps run again (an earlier update may have stopped mid-stack).`);
+  if (host.unchanged && (!image || image.unchanged) && !resume) {
     console.log(`  ${ok} already on ${host.target}.\n`);
     return 0;
   }
@@ -534,12 +562,17 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
     return 0;
   }
   // Decided before anything moves: a process outside compose would keep serving the old code.
-  const outside = stack && typeof stack.stack !== 'string' ? await outsideComposeRefusal(stack.stack, stack.appPort, PROCESS_PORTS) : null;
+  // Not on an image-only folder: this command runs in a container whose loopback is its own, so it
+  // cannot see a host process on the port — and a daemon may then start the app without publishing
+  // it, `up -d` succeeding (measured on Docker Desktop). The success line says where readiness was
+  // proved (inside the stack), never the host URL it could not reach.
+  const outside = layout !== 'image' && stack && typeof stack.stack !== 'string' ? await outsideComposeRefusal(stack.stack, stack.appPort, PROCESS_PORTS, installDir) : null;
   if (outside) {
     throw new CliExit(1, `${outside} — nothing was changed`, [
       'Stop that process, run this update again, then start it the way you started it before.',
     ]);
   }
+  if (layout === 'image') return moveImage({ args, ctx, manifest, tag, target: host.target, previous: resume ? (pinned !== host.target ? pinned : running) ?? host.current : host.current });
   // The code is already the line's: only the post-install steps remain, in this process.
   if (host.unchanged) return afterHostSwap({ args, ctx, layout, manifest, tag, previous: null });
 
@@ -584,6 +617,71 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   }
 }
 
+/**
+ * An image-only folder moves with its image: the target is used when present
+ * (`docker image inspect` — a version tag never changes) or pulled, and a
+ * failed pull moves nothing. The post-move steps run in the target image: in
+ * this process when it already is that image, else in a one-shot container of
+ * it with the same mounts — the manifest written into the bound folder (this
+ * container's /tmp is invisible there) and removed once it returns.
+ */
+async function moveImage(input: { args: UpdateArgs; ctx: CliContext; manifest: ReleaseManifest | null; tag: ReturnType<typeof imageTagAfterUpdate>; target: string; previous: string }): Promise<number> {
+  const { args, ctx, manifest, tag, target, previous } = input;
+  const image = `${HOST_IMAGE}:${target}`;
+  if (spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { stdio: 'ignore' }).status !== 0) {
+    console.log(`  ${dot} pulling        : ${c.bold}${image}${c.reset}`);
+    const pull = spawnSync('docker', ['pull', image], { stdio: 'inherit' });
+    if (pull.status !== 0) throw new CliExit(1, `docker pull ${image} failed (${pull.error?.message ?? `exit ${pull.status}`})`, ['The installation is unchanged.']);
+  }
+  const layout: InstallLayout = 'image';
+  if (hostVersion(ctx.packageDir) === target) return afterHostSwap({ args, ctx, layout, manifest, tag, previous });
+  if (predatesImageKind(target)) {
+    // That release's host bin cannot run in an image-only folder (it moves the line DOWN): the steps run
+    // in this code, and only the compose file comes from the target — its own-tree form, as that release documents.
+    const regenerate = imageRunCommand(ctx, { installDir: ctx.installDir, image, homeParent: false, env: [], workdir: null, command: ['node', 'bin/neuralis.mjs', 'setup', '--compose-only', '--output', ctx.installDir] });
+    return afterHostSwap({ args, ctx, layout, manifest, tag, previous, regenerate: { file: 'docker', args: regenerate } });
+  }
+  const manifestFile = join(ctx.installDir, `.neuralis-update-${process.pid}.json`);
+  try {
+    const swapped = ['update', '--apply', '--host-swapped', ...(args.asJson ? ['--json'] : [])];
+    if (manifest) {
+      writeFileSync(manifestFile, JSON.stringify(manifest));
+      swapped.push('--manifest', manifestFile);
+    } else {
+      swapped.push('--version', args.targetVersion!);
+    }
+    const run = imageRunCommand(ctx, { installDir: ctx.installDir, image, homeParent: false, env: [['NEURALIS_UPDATE_PREVIOUS', previous]], command: ['node', IMAGE_HOST_BIN, ...swapped] });
+    const next = spawnSync('docker', run, { cwd: ctx.installDir, stdio: 'inherit' });
+    return next.status ?? 1;
+  } finally {
+    rmSync(manifestFile, { force: true });
+  }
+}
+
+/** The release tag the folder's generated compose file pins for the app image, or null (none, or a derived/custom image). */
+export function composeImageTag(installDir: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(installDir, 'docker-compose.yml'), 'utf-8');
+  } catch {
+    return null;
+  }
+  return new RegExp(`^ +image: ${HOST_IMAGE.replace('/', '\\/')}:(\\S+)$`, 'm').exec(text)?.[1] ?? null;
+}
+
+/**
+ * The release tag the folder's app container was created from (the image reference itself when it
+ * is not a release image); null when the app is not running; undefined when Docker cannot say.
+ */
+async function runningImageTag(plan: StackPlan, ports: Pick<StackPorts, 'exec'>): Promise<string | null | undefined> {
+  if (typeof plan.stack === 'string') return undefined;
+  if (!plan.stack.running.includes(plan.stack.app)) return null;
+  const ps = await ports.exec('docker', ['compose', '-p', plan.project, 'ps', '--format', '{{.Image}}', plan.stack.app], { cwd: plan.folder, tee: false }).catch(() => null);
+  const image = ps?.code === 0 ? ps.stdout.trim().split('\n')[0]?.trim() ?? '' : '';
+  if (!image) return undefined;
+  return image.startsWith(`${HOST_IMAGE}:`) ? image.slice(HOST_IMAGE.length + 1) : image;
+}
+
 /** The `.env` image tag against the line's, when the line moves it. */
 async function imageRow(installDir: string, tag: ReturnType<typeof imageTagAfterUpdate>): Promise<{ current: string; target: string; unchanged: boolean } | null> {
   if (!tag.move) return null;
@@ -600,8 +698,12 @@ async function afterHostSwap(input: {
   manifest: ReleaseManifest | null;
   tag: ReturnType<typeof imageTagAfterUpdate>;
   previous: string | null;
+  /** The compose regeneration in another image (`moveImage`, a target that predates the image kind). */
+  regenerate?: { file: string; args: readonly string[] };
 }): Promise<number> {
   const { args, ctx, layout, manifest, tag } = input;
+  /** What moved before the stack steps — a failed step reports it, never "nothing". */
+  const moved: string[] = [];
   const previous = input.previous ?? ctx.env.NEURALIS_UPDATE_PREVIOUS ?? '<previous version>';
   const version = manifest ? manifest.packages[HOST_PACKAGE]! : args.targetVersion!;
   // First, so a failure here leaves the tag unmoved and a re-run comes back through this step.
@@ -611,6 +713,7 @@ async function afterHostSwap(input: {
   if (tag.move) {
     try {
       const { previous: was } = await upsertEnvValue(configDir, 'NEURALIS_IMAGE_TAG', tag.tag);
+      if (was !== tag.tag) moved.push(`.env NEURALIS_IMAGE_TAG ${was ?? '(none)'} → ${tag.tag}`);
       console.log(`  ${ok} image tag      : ${was ?? '(none)'} → ${c.bold}${tag.tag}${c.reset} ${c.dim}(${configDir}/.env NEURALIS_IMAGE_TAG)${c.reset}`);
     } catch (err) {
       throw new CliExit(1, `the image tag in ${configDir}/.env could not be moved`, [
@@ -623,8 +726,12 @@ async function afterHostSwap(input: {
     console.log(`  ${warn} image tag unchanged: ${tag.reason}`);
   }
   const images = companionVersionsFor({ manifest, targetVersion: args.targetVersion, onePackage: false });
-  if (images) await moveCompanionImages(images, configDir, neuralisHome);
-  if (layout === 'folder') return runStack({ ctx, layout, previous }, PROCESS_PORTS);
+  if (images) moved.push(...(await moveCompanionImages(images, configDir, neuralisHome)));
+  if (layout === 'folder' || layout === 'image') {
+    const code = await runStack({ ctx, layout, previous, moved, ...(input.regenerate ? { regenerate: input.regenerate } : {}) }, layout === 'image' ? IMAGE_PORTS : PROCESS_PORTS);
+    if (code === 0) await retireEnvSessionSecret(configDir, neuralisHome);
+    return code;
+  }
   const steps: string[] = [
     `git fetch --tags && git checkout v${version} && npm install ${c.dim}(the code of this clone moves with the tag)${c.reset}`,
     `${spellOn(layout, 'setup --compose-only')} ${c.dim}(regenerate compose)${c.reset}`,
@@ -639,23 +746,46 @@ async function afterHostSwap(input: {
 }
 
 /**
+ * The `.env` `NEXTAUTH_SECRET` line, once the data home's session secret file
+ * holds the same value (the `session-secret-v1` upgrade this run applied wrote
+ * it): no build reads the line any more, so it goes. Kept while the file is
+ * missing (the upgrade reads it) or differs (the upgrade's dry run names the
+ * conflict, and the operator decides).
+ */
+export async function retireEnvSessionSecret(configDir: string, neuralisHome: string): Promise<boolean> {
+  const line = (await readEnvFile(configDir)).NEXTAUTH_SECRET?.trim();
+  if (!line || readSessionSecretFile(join(neuralisHome, 'app')) !== line) return false;
+  const dropped = await dropEnvKey(configDir, 'NEXTAUTH_SECRET');
+  if (dropped) console.log(`  ${ok} session secret : ${c.dim}${configDir}/.env no longer carries it (the data home's app/config/session-secret.key does)${c.reset}`);
+  return dropped;
+}
+
+/**
  * Data first: an older build refuses to boot on data a newer one raised, and
  * the code line restarts the app. On a folder the code + images line is the
  * update itself — an explicit `--version` may move down, it moves the images and
  * writes that release's install policy back into the folder.
  */
-function printWayBack(layout: InstallLayout, previous: string, checkpoint: string | null): void {
-  const data = `${spellOn(layout, `checkpoint restore ${checkpoint ?? '<id>'}`)} ${c.dim}(${checkpoint ? 'the checkpoint this upgrade took' : `no new checkpoint this run — a resumed upgrade keeps its first run's; \`${spellOn(layout, 'checkpoint list')}\` names it`})${c.reset}`;
+/** A build from before the session secret moved into the data home reads it from `.env` only. */
+const SESSION_SECRET_WAY_BACK = `${c.dim}a build that predates app/config/session-secret.key reads the secret from .env: put NEXTAUTH_SECRET=<that file's line> back there first${c.reset}`;
+
+/** `upgradeRan`: false when this run raised no data format (none ran), undefined when the steps are the operator's. */
+function printWayBack(layout: InstallLayout, previous: string, checkpoint: string | null, upgradeRan?: boolean): void {
+  const data = upgradeRan === false
+    ? `nothing to put back — no upgrade ran this time, the data is as it was`
+    : `${spellOn(layout, `checkpoint restore ${checkpoint ?? '<id>'}`)} ${c.dim}(${checkpoint ? 'the checkpoint this upgrade took' : `no new checkpoint this run — a resumed upgrade keeps its first run's; \`${spellOn(layout, 'checkpoint list')}\` names it`})${c.reset}`;
   if (layout === 'clone') {
     console.log(`  ${dot} going back (app stopped):`);
     console.log(`  ${dot}   data   : ${data}`);
     console.log(`  ${dot}   code   : git checkout v${previous} && npm install`);
     console.log(`  ${dot}   images : ${spellOn(layout, `update --manifest <the ${previous} release-manifest.json> --apply`)} ${c.dim}(or write the previous NEURALIS_IMAGE_TAG / NEURALIS_MACHINE_IMAGE back into .env)${c.reset}`);
+    console.log(`  ${dot}   ${SESSION_SECRET_WAY_BACK}`);
   } else {
     console.log(`  ${dot} going back (the update stops and restarts the app itself):`);
     // `checkpoint restore` is offline-only: it refuses while the app the update restarted is running.
-    console.log(`  ${dot}   data           : docker compose stop neuralis && ${data}`);
+    console.log(`  ${dot}   data           : ${upgradeRan === false ? data : `docker compose stop neuralis && ${data}`}`);
     console.log(`  ${dot}   code + images  : ${spellOn(layout, `update --version ${previous} --apply`)}`);
+    console.log(`  ${dot}   ${SESSION_SECRET_WAY_BACK}`);
   }
   console.log('');
 }
@@ -703,29 +833,40 @@ function printStackPlan(plan: StackPlan, layout: InstallLayout): void {
 }
 
 /** The stack half on a folder, in the code just installed. Exit 1 at the first failed step. */
-export async function runStack(input: { ctx: CliContext; layout: InstallLayout; previous: string }, ports: StackPorts): Promise<number> {
+export async function runStack(input: { ctx: CliContext; layout: InstallLayout; previous: string; moved?: readonly string[]; regenerate?: { file: string; args: readonly string[] } }, ports: StackPorts): Promise<number> {
   const { ctx, layout, previous } = input;
   const plan = await stackSettings(ctx.installDir);
   if (!existsSync(join(ctx.installDir, 'docker-compose.yml'))) {
     console.log(`  ${dot} no docker-compose.yml in this folder: nothing runs yet. ${spellOn(layout, 'setup')} writes it on the new code.`);
-    printWayBack(layout, previous, null);
+    printWayBack(layout, previous, null, false);
     return 0;
   }
-  const outcome = await applyStack({ installDir: ctx.installDir, packageDir: ctx.packageDir, project: plan.project, appPort: plan.appPort, recreate: plan.recreate }, ports);
+  const outcome = await applyStack({
+    installDir: ctx.installDir, packageDir: ctx.packageDir, project: plan.project, appPort: plan.appPort, recreate: plan.recreate,
+    plane: layout === 'image' ? 'image' : 'host', ...(input.regenerate ? { regenerate: input.regenerate } : {}),
+    ...(layout === 'image' ? { upgradeBinds: upgradeDeviceBinds(ctx.env, resolveNeuralisHome(ctx.env as NodeJS.ProcessEnv).home) } : {}),
+  }, ports);
   console.log('');
   if (outcome.ok) {
-    console.log(`  ${ok} ${c.bold}updated${c.reset}: the app answers ready on http://127.0.0.1:${plan.appPort} (${outcome.seconds} s after the recreate)`);
+    // A regeneration by another release's setup wrote no install record: this code writes it.
+    if (input.regenerate) await recordInstall(resolveNeuralisHome().home, ctx.installDir);
+    // Readiness is named where it was proved: an image-only folder's probe ran inside the stack.
+    const where = layout === 'image'
+      ? `the app answers ready inside the stack (service ${outcome.app}); this command ran in a container and did not reach http://127.0.0.1:${plan.appPort} — open it on the host to confirm`
+      : `the app answers ready on http://127.0.0.1:${plan.appPort}`;
+    console.log(`  ${ok} ${c.bold}updated${c.reset}: ${where} (${outcome.seconds} s after the recreate)`);
     if (outcome.checkpoint) console.log(`  ${dot} checkpoint     : ${outcome.checkpoint} ${c.dim}(the data before this upgrade)${c.reset}`);
-    printWayBack(layout, previous, outcome.checkpoint);
+    printWayBack(layout, previous, outcome.checkpoint, outcome.upgradeRan);
     return 0;
   }
   console.log(`  ${c.red}✗${c.reset} ${c.bold}stopped at ${outcome.step}${c.reset}: ${outcome.reason}`);
-  console.log(`  ${dot} done before it : ${outcome.done.length > 0 ? outcome.done.join(', ') : 'nothing'} — nothing after it ran`);
+  const before = [...(input.moved ?? []), ...(outcome.regenerated && !outcome.done.includes('compose') ? ['docker-compose.yml regenerated'] : []), ...outcome.done];
+  console.log(`  ${dot} done before it : ${before.length > 0 ? before.join(', ') : 'nothing'} — nothing after it ran`);
   const stack = outcome.stack;
   const commands = stackCommands({ stack, project: plan.project, recreate: plan.recreate, spellVerb: (verb) => spellOn(layout, verb) });
   const remaining = commands.slice(commandIndexOf(outcome.step, stack));
   console.log(`  ${dot} to continue by hand once the cause is fixed: ${remaining.join(' → ')}`);
-  printWayBack(layout, previous, outcome.checkpoint);
+  printWayBack(layout, previous, outcome.checkpoint, outcome.upgradeRan);
   return 1;
 }
 
@@ -753,10 +894,11 @@ export function companionVersionsFor(input: { manifest: ReleaseManifest | null; 
  * reported and left. The packages are already installed when this runs, so a
  * failed write names the exact manual edit.
  */
-export async function moveCompanionImages(images: Readonly<Record<string, string>>, configDir: string, neuralisHome: string): Promise<void> {
+export async function moveCompanionImages(images: Readonly<Record<string, string>>, configDir: string, neuralisHome: string): Promise<string[]> {
   const env = await readEnvFile(configDir);
   const platform = await readPlatformConfig(neuralisHome);
   const platformMoves: Record<string, string> = {};
+  const moved: string[] = [];
   for (const setting of PINNED_COMPANIONS) {
     const raw = setting.where === 'env' ? env[setting.key] : platform[setting.key];
     const where = setting.where === 'env' ? `${configDir}/.env ${setting.key}` : `platform.json ${setting.key}`;
@@ -769,19 +911,22 @@ export async function moveCompanionImages(images: Readonly<Record<string, string
     if (setting.where === 'platform') {
       platformMoves[setting.key] = move.to;
       console.log(`  ${ok} ${where}: ${move.from} → ${c.bold}${move.to}${c.reset}`);
+      moved.push(`platform.json ${setting.key} → ${move.to}`);
       continue;
     }
     try {
       await upsertEnvValue(configDir, setting.key, move.to);
       console.log(`  ${ok} ${where}: ${move.from} → ${c.bold}${move.to}${c.reset}`);
+      moved.push(`.env ${setting.key} → ${move.to}`);
     } catch (err) {
       throw new CliExit(1, `the packages are installed, but ${where} could not be moved`, [err instanceof Error ? err.message : String(err), `Set ${setting.key}=${move.to} there yourself.`]);
     }
   }
-  if (Object.keys(platformMoves).length === 0) return;
+  if (Object.keys(platformMoves).length === 0) return moved;
   try {
     await writeMergedPlatformConfig(neuralisHome, {}, platformMoves);
   } catch (err) {
     throw new CliExit(1, 'the packages are installed, but platform.json could not be updated', [err instanceof Error ? err.message : String(err), `Set ${Object.entries(platformMoves).map(([k, v]) => `${k}=${v}`).join(', ')} through Admin → Config yourself.`]);
   }
+  return moved;
 }

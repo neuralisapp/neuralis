@@ -1,15 +1,15 @@
-# Developing your own first-party package
+# Your own native package
 
 ## Registration is a trust act
 
-Presence in the install folder's `package.json` dependencies **is** the authorization boundary
+**Both lanes are a trust act, not a convenience.** Presence in the install folder's `package.json` dependencies (or, for `neuralis package`, in the runtime record) **is** the authorization boundary
 (on the development checkout and a public clone that folder is the host package itself — so a
 Docker-run public clone cannot carry operator packages: register them on an npm install folder, or
 run the clone natively). A
 dependency whose own manifest carries a `neuralis` block is discovered at boot and
-loaded **in-process, with host-assigned first-party trust** — the same trust the
+loaded **in-process, with host-assigned native trust** — the same trust the
 platform's own packages hold. There is no sandbox on this path; that is what
-first-party means.
+native means.
 
 Only whoever controls the deployment configuration can grant it, and the change is a
 one-line edit to a tracked file, so the diff is the audit surface. Vet a package here
@@ -20,23 +20,75 @@ WebAssembly-sandboxed, and a source package is markdown discovered in a synced s
 with no install step at all. Reach for those first if the capability does not need
 in-process trust.
 
-## The loop
+## Install it while the host runs — `neuralis package`
+
+**First choice, on every kind of install** — the desktop app, an image-only folder, an npm
+install folder and a clone alike: install it into the RUNNING host.
+
+```bash
+neuralis package list                       # every package: slot (core, operator, runtime), status, how it changes
+neuralis package install NAME@VERSION       # or a packed ./FILE.tgz — the host stages it and prints a summary
+neuralis package approve REQUEST_ID         # or answer the prompt, or add --yes to install
+neuralis package restart                    # it loads from the next start
+neuralis package update NAME                # a newer version; `remove NAME` takes it out
+```
+
+The host stages the package without running any of its code and summarizes what it brings —
+routes, tools, features and their default grants, config keys, credentials, and its build
+source (an npm provenance attestation, or "no verified build source"). Asking needs
+`platform.packages`; approving and restarting need `platform.packages.approve` as well, which
+no role holds by default but the owner's — a person, an agent or the client alike. It is
+recorded in the data folder (`<NEURALIS_HOME>/app/packages/`, which outlives a rebuild); the
+restart is the desktop app's `up` or Docker's restart policy bringing the host back. The host
+runs the npm of its own Node with `--ignore-scripts`, from the registry the "Package Registry"
+setting names; it refuses while the private-scope record names a scope, and a name the image
+ships stays the image's. **The operator's allow-list** narrows what may be installed at all:
+`<NEURALIS_HOME>/app/packages/allow-list.json`, a JSON list of scopes and exact names
+(`["@acme", "left-pad"]`), written on the server by its operator — no setting or screen writes
+it. Missing or empty, every name may be asked for; a name it leaves out is refused before any
+network step.
+
+A finished package, end to end:
+
+```bash
+cd /home/me/work/my-package && npm pack                       # or publish it to a registry
+neuralis package install ./acme-my-package-0.1.0.tgz          # or @acme/my-package@0.1.0
+neuralis package restart                                      # after the approval
+```
+
+The loop below is for a package you are still DEVELOPING: the image lane, with a live bind.
+
+## The loop — into this install's image with `neuralis pkg`
+
+**Second, into this install's IMAGE** — an npm install folder or a clone (not the desktop app,
+not an image-only folder): the package is built into the image by a rebuild.
+
+```bash
+neuralis pkg list                                  # builtin-class deps
+neuralis pkg add NAME --path ABS_HOST_DIR   # a folder you are developing — the image build builds it (ABSOLUTE path: a relative one resolves from the shell's cwd)
+neuralis pkg add NAME --tarball TARBALL       # a packed package, installed as packed
+neuralis pkg add NAME --version VERSION       # a registry package at an EXACT version, public or private
+neuralis pkg remove NAME                      # line + mount out; default role grants revoked at the next start
+neuralis rebuild                                 # after either: this install's image installs or drops it
+```
+
+The development loop:
 
 ```bash
 # 1. Register it — the trust act. Use the folder you are editing.
-npx neuralis pkg add @acme/my-package --path /home/me/work/my-package
+neuralis pkg add @acme/my-package --path /home/me/work/my-package
 
 # 2. Install it. The image build builds the folder and installs it as node_modules/@acme/my-package.
-npx neuralis rebuild
+neuralis rebuild
 
 # 3. To edit it live: bind the folder over that installed copy, then restart once.
-npx neuralis mount add /home/me/work/my-package --pkg @acme/my-package
+neuralis mount add /home/me/work/my-package --pkg @acme/my-package
 
 # 4. From here on: edit, then build it in its folder and restart, in about a minute.
-npx neuralis sync my-package
+neuralis sync my-package
 
 # 5. Check what the container actually has, any time.
-npx neuralis sync status
+neuralis sync status
 ```
 
 Step 2 cannot be shortcut on first install: the image is where a package is installed,
@@ -48,6 +100,11 @@ every runtime folder, the kernel as a peer, and no `link:`/`file:` spec that lea
 folder. A refused add changes nothing and names every problem. An accepted add is also
 recorded, so the first start that carries the package grants its default roles in every
 existing project once; a revoke made by hand comes back only if you run `add` again.
+
+**On an npm install folder the container runs the derived image, never a bind of the folder.**
+Builtin discovery reads the IMAGE's `/neuralis/package.json`, so a registered package reaches the
+container only through `neuralis rebuild`; a build that cannot install it names the package and
+leaves the running stack as it was.
 
 **On an npm install folder that image is the install's own derived image** (`FROM
 neuralisapp/neuralis:<NEURALIS_IMAGE_TAG>`, generated into `operator-image/` beside the compose file
@@ -63,13 +120,13 @@ and installs packed; a tarball installs as packed. The layer brings `python3`, `
 native dependencies and removes them again; a failure names the package and leaves no half image.
 A `mount add --pkg` bind never stands in for this: discovery would not see it.
 
-Confirm registration with `npx neuralis pkg list`, which shows every builtin-class
+Confirm registration with `neuralis pkg list`, which shows every builtin-class
 dependency — that is, every dependency carrying a `neuralis` block, whatever its scope.
 
 **From a private registry.** Put an `.npmrc` with your scope's lines only
 (`@acme:registry=<url>` and its `_authToken` line — never a default `registry=`) somewhere
 outside the repository and point `.env` `NEURALIS_BUILD_NPMRC` at it. Then
-`npx neuralis pkg add @acme/x --version 1.2.3` (exact; refused while the file lacks the
+`neuralis pkg add @acme/x --version 1.2.3` (exact; refused while the file lacks the
 scope), on the development checkout `pnpm install` so the tracked lock carries it (the command
 prints the flag that lets your fresh release past the one-day age floor), and rebuild. An install
 folder has no lock to update: its derived image resolves the package at that exact version under
@@ -86,14 +143,37 @@ forget a scope that is public now, delete its entry from that file (a broken fil
 closed). A scope this machine never saw served privately is indistinguishable from a public
 one — its first resolve depends on your `.npmrc`.
 
-**Removing it.** `npx neuralis pkg remove @acme/my-package` takes the line and the mount
+**Removing it.** `neuralis pkg remove @acme/my-package` takes the line and the mount
 out, records the features its manifest grants roles by default so the next start revokes
 them (a hand grant stays, inert), and lists the data, config keys and credentials it leaves,
 each with its delete command. Then rebuild.
 
-**When it fails.** A package the build or the start refuses is left out alone — the platform
-runs, `npx neuralis rebuild` printed the reason, and Admin health names it
-(`builtin-packages`; a refused UI module under `ui-modules` and in its widget's place).
+**When it fails.** A `--path` or `--tarball` package is part of the image build, so a folder's
+compile error — most often an `@neuralis/*` package it imports but does not declare as a peer
+dependency, which the build then neither orders before it nor resolves — or either kind failing
+the admission check stops the rebuild: the running instance keeps its previous image and
+`neuralis rebuild` prints the error. Fix the package or `neuralis pkg remove` it, then rebuild.
+A `--version` registry package the checks or the start refuse is left out alone — the platform runs, `neuralis rebuild` printed the reason, and
+Admin health names it (`builtin-packages`; a refused UI module under `ui-modules` and in its
+widget's place).
+
+**A tool name is one key for the whole deployment, and adding a package can take one.**
+There is no per-package prefix: if the package you register declares a tool name an
+already-loaded package uses, one of them answers the bare name by default and the other
+stays loaded — the native entry wins, and between two native entries (which
+every registered dependency is) the lexically smaller package id does. Nothing is
+renamed and **nothing refuses to start** — a collision is a diagnosable annoyance, never
+an outage. The boot log carries a `Namespace collisions detected` line naming the owner
+and the shadowed ids, and the agent tool catalog lists the name under `contestedTools`,
+where an agent's Tool Access can pick the other package. If calling a newly registered
+package's tool answers from somewhere else, that is this: the name is contested, and the
+durable fix is a rename in the package, not a reinstall.
+
+**A local source (`file:`/`link:` dep line) builds into THIS machine's image and is never
+committed.** The drift tests exclude it and `npm pack` refuses while one exists. Host-dev
+lane: `pnpm install --lockfile=false` — a plain `pnpm install` would write the
+machine-absolute path into the tracked `pnpm-lock.yaml` (recovery: `git checkout --
+pnpm-lock.yaml`; `neuralis:rebuild` preflights this and names the fix).
 
 ## What makes a package syncable
 
@@ -137,7 +217,7 @@ a tarball or registry package ships it prebuilt, so its owner **rebuilds it afte
 platform upgrade**: the host refuses a module built for another host API version or React
 major — including one built before the host recorded a React major — or whose entry exports
 no `install<Name>HostComponents`, and its widgets show *"This widget cannot be rendered by
-this host."* with the reason beside it. `npx neuralis rebuild` names every refused module.
+this host."* with the reason beside it. `neuralis rebuild` names every refused module.
 
 ## The standing rule
 
@@ -147,4 +227,4 @@ image's own anonymous volume — so a proper rebuild removes it by construction,
 can never outlive the divergence it describes.
 
 Before any judgement that matters — an acceptance test, a claim that something works, a
-deployment decision — run `npx neuralis rebuild` and judge that.
+deployment decision — run `neuralis rebuild` and judge that.

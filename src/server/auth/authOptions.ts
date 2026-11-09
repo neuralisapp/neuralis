@@ -1,15 +1,15 @@
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import bcrypt from 'bcryptjs';
 import { findUserByEmail, isActiveUser, sessionEpochOf, updateUser } from '../store/UserStore';
 import { resolveActiveUser } from './memberSession';
 import { getLogger } from '../logging/setup';
-import { getEnv } from '../config/env';
+import { sessionSecret } from '../config/env';
 import { getPlatformConfigStore } from '../store/PlatformConfigStore';
 import { SetupRequiredError, assertSetupComplete } from '../init';
 import { beginLoginAttempt, recordLoginFailure, recordLoginSuccess } from './rateLimit';
 import { resolveClientAddress } from './requestClient';
 import { writeAuditLog } from '../store/AuditStore';
+import { verifyPassword } from './passwordPolicy';
 
 /**
  * Thrown from the `jwt` callback when the token's principal may no longer hold
@@ -63,12 +63,21 @@ export const authOptions: NextAuthOptions = {
         }
         if (gate.waitMs > 0) await new Promise((resolve) => setTimeout(resolve, gate.waitMs));
 
-        // Registration removed — user creation only via `pnpm setup` or admin API.
+        // Registration removed — user creation only via `pnpm setup`, the admin API or an invite link's redeem (`/api/invite/redeem`).
         // Every branch pays ONE bcrypt compare (a dummy hash when the email is
         // unknown), so the response time does not say whether an account
-        // exists, and every refusal counts on the same axes.
+        // exists, and every refusal counts on the same axes. A compare the
+        // worker pool cannot answer refuses the login and counts nothing — it
+        // is the server's failure, not a guess.
         const existing = await findUserByEmail(email);
-        const valid = await bcrypt.compare(credentials.password, existing?.passwordHash || DUMMY_PASSWORD_HASH);
+        let valid: boolean;
+        try {
+          valid = await verifyPassword(credentials.password, existing?.passwordHash || DUMMY_PASSWORD_HASH);
+        } catch (err) {
+          getLogger().child('auth').error('login refused: the password check could not run', { error: String(err) });
+          void writeAuditLog({ userId: existing?.id ?? null, action: 'login.failed', details: { email, reason: 'verifier_unavailable' }, ip });
+          return null;
+        }
 
         if (!existing) {
           void writeAuditLog({ userId: null, action: 'login.failed', details: { email, reason: 'not_found' }, ip });
@@ -119,7 +128,12 @@ export const authOptions: NextAuthOptions = {
       }
     },
   },
-  secret: getEnv().auth.secret,
+  // The session secret file (`sessionSecret`), read LAZILY for the same reason
+  // as `maxAge`: `next build` evaluates this literal with no data home, and
+  // NextAuth reads the property per request.
+  get secret(): string {
+    return sessionSecret();
+  },
   pages: { signIn: '/auth' },
   logger: {
     // A refused principal's every request lands here as `JWT_SESSION_ERROR`;
@@ -136,7 +150,8 @@ export const authOptions: NextAuthOptions = {
     async redirect({ url, baseUrl }) {
       // Allow relative URLs
       if (url.startsWith('/')) return `${baseUrl}${url}`;
-      // Allow same hostname across ports (MCP on 3101, app on 3100)
+      // Same hostname across ports is admitted; no MCP sign-in rides it any
+      // more — the consent renders on the app origin with a relative callback.
       try {
         const target = new URL(url);
         const base = new URL(baseUrl);

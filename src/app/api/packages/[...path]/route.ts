@@ -17,6 +17,7 @@ import { getRuntime } from '@/server/host/bootstrap';
 import { logRuntimeWait } from '@/server/logging/hostLogger';
 import { listProjectsForUser, getProjectById } from '@/server/store/ProjectStore';
 import { getUserById, isActiveUser, sessionEpochOf } from '@/server/store/UserStore';
+import { sessionDisplayName } from '@/server/auth/memberSession';
 import { FileStoreReadError } from '@neuralis/package-system/data';
 import { writeAuditLog } from '@/server/store/AuditStore';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
@@ -252,6 +253,9 @@ async function handleRequest(
   const contentType = req.headers.get('content-type') ?? '';
   const isMultipart = contentType.startsWith('multipart/form-data');
 
+  // Any content type parses — a CORS-simple `text/plain` body included. A
+  // cookie-carrying write reached here only from the trusted app origin: the
+  // request proxy's boundary gate (`src/proxy.ts` `cookieWriteGate`) refused it otherwise.
   let body: unknown;
   if (!isMultipart && method !== 'GET' && method !== 'DELETE') {
     try {
@@ -410,6 +414,9 @@ async function handleRequest(
     });
   }
 
+  // The COOKIE arm only (a person in a browser); a ticket or OAuth session is an
+  // agent or a client acting for them and names nobody. Display only.
+  const cookieDisplayName = !ticketSession && !oauth ? sessionDisplayName(userRecord) : undefined;
   // routePackage extracts packageId from path[0] and passes the rest to handleRoute
   let result;
   try {
@@ -435,6 +442,7 @@ async function handleRequest(
         llmRateLimitRpm,
         agentAccess,
         agentOwnership,
+        ...(cookieDisplayName ? { displayName: cookieDisplayName } : {}),
       },
       rawRequest: req,
       // Auth-CHANNEL marker (NOT identity): a browser cookie session is

@@ -7,7 +7,7 @@
  * write→host-RCE path, because:
  *
  *   - the scanner serves the default `_packages/` drop-zone AND **every**
- *     `recognizesPackages`-flagged local source (one scanner per resolved dir,
+ *     package folder of a local source (one scanner per resolved dir,
  *     `getScannerForDir`) — package recognition is a per-source toggle, not a
  *     `_packages/`-only concept, so these tests deliberately use a NON-
  *     `_packages` directory;
@@ -23,7 +23,8 @@
  * assertion is that no import is ATTEMPTED (an attempt logs a `Failed to load
  * …` warning). See the agent-core twin, `packages/__tests__/distImportSecurity.test.ts`.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { compileExcludeTest, getFsWatchHub } from '@neuralis/package-system/data';
 import * as fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
@@ -62,7 +63,7 @@ function makeSpyLogger(): { logger: any; warns: string[] } {
  */
 async function writeMaliciousPackage(
   pkgRoot: string,
-  opts: { id: string; selfDeclaredTrust?: 'first-party' },
+  opts: { id: string; selfDeclaredTrust?: 'native' },
 ): Promise<void> {
   await fs.mkdir(path.join(pkgRoot, 'dist', 'src', 'routes'), { recursive: true });
   await fs.mkdir(path.join(pkgRoot, 'dist', 'src', 'tools'), { recursive: true });
@@ -120,10 +121,10 @@ afterEach(async () => {
   }
 });
 
-describe('ProjectPackageScanner — DIST1 (any recognizesPackages source, not just _packages/)', () => {
+describe('ProjectPackageScanner — DIST1 (any package folder of a source, not just _packages/)', () => {
   it('scan() does not execute a dropped package dist module', async () => {
     // NOT `_packages/` — an arbitrary flagged source root, which is how package
-    // recognition actually works (per-source `recognizesPackages` toggle).
+    // recognition actually works (the per-source `packageFolders` list).
     const sourceDir = path.join(tempRoot, 'team-share');
     const pkgRoot = path.join(sourceDir, 'evil-pkg');
     await writeMaliciousPackage(pkgRoot, { id: 'evil-pkg' });
@@ -160,10 +161,10 @@ describe('ProjectPackageScanner — DIST1 (any recognizesPackages source, not ju
     expectNoSentinels(pkgRoot);
   });
 
-  it('a manifest self-declaring first-party/neuralis is not believed', async () => {
+  it('a manifest self-declaring native/neuralis is not believed', async () => {
     const sourceDir = path.join(tempRoot, 'team-share');
     const pkgRoot = path.join(sourceDir, 'liar-pkg');
-    await writeMaliciousPackage(pkgRoot, { id: 'liar-pkg', selfDeclaredTrust: 'first-party' });
+    await writeMaliciousPackage(pkgRoot, { id: 'liar-pkg', selfDeclaredTrust: 'native' });
 
     const { logger, warns } = makeSpyLogger();
     const scanner = new ProjectPackageScanner(sourceDir, logger);
@@ -205,4 +206,55 @@ it('separates present-invalid and unreachable source from a proved absent child,
   await writeMaliciousPackage(sourceDir, { id: 'root-package' });
   await scanner.scan();
   expect(scanner.getPackage('')?.packageRoot).toBe(sourceDir);
+});
+
+it('the watch excludes are globs relative to the packages folder: dot-named folders and node_modules below it are pruned, the folder itself never is', async () => {
+  const sourceDir = path.join(tempRoot, 'drops');
+  await fs.mkdir(sourceDir, { recursive: true });
+  const acquire = vi.spyOn(getFsWatchHub(), 'acquire');
+  const scanner = new ProjectPackageScanner(sourceDir, makeSpyLogger().logger);
+  scanner.startWatching('p1', () => undefined);
+  try {
+    const globs = acquire.mock.calls.find((c) => c[0] === sourceDir)?.[2]?.excludeGlobs;
+    expect(globs?.length).toBeGreaterThan(0);
+    const excluded = compileExcludeTest(globs!)!;
+    expect(excluded('..cache', true)).toBe(true);
+    expect(excluded('pkg/node_modules', true)).toBe(true);
+    expect(excluded('pkg/.git', true)).toBe(true);
+    expect(excluded('pkg/.next', true)).toBe(true);
+    expect(excluded('pkg/.hidden/x.md', false)).toBe(true);
+    // The paired controls: a package folder and its build output are watched.
+    expect(excluded('pkg', true)).toBe(false);
+    expect(excluded('pkg/dist/package.wasm', false)).toBe(false);
+  } finally {
+    acquire.mockRestore();
+    await scanner.stopWatching();
+  }
+});
+
+it('a packages folder under a DOTTED ancestor is watched for real: a dist change fires, a dot-folder or node_modules change does not, and a burst notifies once', async () => {
+  const sourceDir = path.join(tempRoot, '.hidden-home', '_packages');
+  await fs.mkdir(path.join(sourceDir, 'pkg', 'dist'), { recursive: true });
+  await fs.mkdir(path.join(sourceDir, 'pkg', 'node_modules', 'dep'), { recursive: true });
+  await fs.mkdir(path.join(sourceDir, 'pkg', '.cache'), { recursive: true });
+  const scanner = new ProjectPackageScanner(sourceDir, makeSpyLogger().logger);
+  let notified = 0;
+  scanner.startWatching('p1', () => { notified += 1; });
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+    await fs.writeFile(path.join(sourceDir, 'pkg', 'node_modules', 'dep', 'x.js'), 'x');
+    await fs.writeFile(path.join(sourceDir, 'pkg', '.cache', 'x'), 'x');
+    await new Promise((r) => setTimeout(r, 900));
+    expect(notified).toBe(0);
+    // Five batches (80 ms apart, the hub flushes every 50 ms) inside ONE 500 ms rescan window.
+    for (let i = 0; i < 5; i += 1) {
+      await fs.writeFile(path.join(sourceDir, 'pkg', 'dist', `chunk${i}.js`), 'x');
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    await vi.waitFor(() => expect(notified).toBeGreaterThan(0), { timeout: 5_000 });
+    await new Promise((r) => setTimeout(r, 900));
+    expect(notified).toBe(1);
+  } finally {
+    await scanner.stopWatching();
+  }
 });

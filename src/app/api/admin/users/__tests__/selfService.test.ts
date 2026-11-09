@@ -44,8 +44,10 @@ vi.mock('@/server/admin/offboardUser', () => ({
   checkDisableFloor: mocks.checkDisableFloor,
 }));
 vi.mock('@/server/store/AuditStore', () => ({ writeAuditLog: mocks.writeAuditLog }));
-vi.mock('bcryptjs', () => ({
-  default: { compare: mocks.compare, hash: mocks.hash },
+vi.mock('@/server/auth/passwordPolicy', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/auth/passwordPolicy')>()),
+  verifyPassword: mocks.compare,
+  hashPassword: mocks.hash,
 }));
 
 import { PATCH } from '../[id]/route';

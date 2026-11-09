@@ -29,7 +29,7 @@ export type IframeWidgetSource =
 
 /**
  * The frame's sandbox — the kernel's ONE external-frame predicate decides, never
- * a local copy. Only a first-party ABSOLUTE `https://` source on a foreign
+ * a local copy. Only a native ABSOLUTE `https://` source on a foreign
  * origin gets the external-app profile (its own origin, popups, downloads —
  * never `allow-top-navigation*`); a scoped asset, a root-relative or
  * protocol-relative url, a trusted/untrusted package, or an unknown host origin
@@ -169,8 +169,8 @@ export function runIframeWidgetScopeEffect(
  * update, server restart) drops back to the placeholder and re-acquires as a
  * fresh document generation.
  *
- * Absolute URLs are only emitted by the snapshot for first-party / trusted
- * packages — untrusted absolute URLs are dropped upstream. A first-party
+ * Absolute URLs are only emitted by the snapshot for native / trusted
+ * packages — untrusted absolute URLs are dropped upstream. A native
  * external `https://` app gets its OWN origin (`iframeWidgetSandbox`); every
  * other frame keeps the opaque sandbox, and none ever gets top navigation.
  */

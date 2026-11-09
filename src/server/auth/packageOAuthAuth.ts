@@ -47,7 +47,7 @@ export function packageApiChallenge(error?: 'invalid_token' | 'insufficient_scop
 }
 
 export type PackageOAuthResolveResult =
-  | { kind: 'match'; session: SessionContext; clientId: string; scope: string; expiresAt?: number }
+  | { kind: 'match'; session: SessionContext; clientId: string; scope: string; grantId?: string; expiresAt?: number }
   | { kind: 'reject'; code: RouteTokenVerifyErrorCode }
   | null;
 
@@ -83,6 +83,7 @@ export async function tryResolvePackageOAuth(req: NextRequest): Promise<PackageO
     session: result.session,
     clientId: result.clientId,
     scope: result.scope,
+    ...(result.grantId !== undefined ? { grantId: result.grantId } : {}),
     ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}),
   };
 }

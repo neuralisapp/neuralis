@@ -25,13 +25,13 @@ import { spell } from '../cli/spelling.mts';
 /** The version this release of the host is built and tested against. */
 export const QDRANT_TARGET_VERSION = '1.19.1';
 
-export type QdrantBinaryTarget = 'x86_64-unknown-linux-musl' | 'aarch64-unknown-linux-musl';
+export type QdrantBinaryTarget = 'x86_64-unknown-linux-musl' | 'aarch64-unknown-linux-musl' | 'aarch64-apple-darwin' | 'x86_64-apple-darwin' | 'x86_64-pc-windows-msvc';
 
 export type QdrantRelease = {
   version: string;
   /** Multi-arch image index digest of `qdrant/qdrant:v<version>`. */
   imageDigest: string;
-  /** sha256 of the release tarball per target triple. */
+  /** sha256 of the release archive per target triple (`.tar.gz`; Windows `.zip`). */
   binarySha256: Record<QdrantBinaryTarget, string>;
 };
 
@@ -40,12 +40,14 @@ export type QdrantRelease = {
  * never skips a row. 1.16 runs the background RocksDB→Gridstore migration, so
  * no hop may start before the previous one has settled.
  * Refresh: `docker buildx imagetools inspect qdrant/qdrant:v<ver>` for the
- * digest; the release's asset digests (or `sha256sum` of the tarball where the
- * release publishes none) for the binaries. Both targets are musl, static: the
- * x86_64 gnu build needs glibc 2.38 and does not start on Debian 12 or Ubuntu
- * 22.04, and upstream publishes arm64 as musl only (a `aarch64-unknown-linux-gnu`
- * asset does not exist). A gnu binary already installed keeps running — same
- * storage format; the next download (an upgrade hop) takes the musl one.
+ * digest; the release's asset digests (or `sha256sum` of the archive where the
+ * release publishes none — 1.13 and 1.14) for the binaries. Both Linux targets
+ * are musl, static: the x86_64 gnu build needs glibc 2.38 and does not start on
+ * Debian 12 or Ubuntu 22.04, and upstream publishes arm64 as musl only (a
+ * `aarch64-unknown-linux-gnu` asset does not exist). A gnu binary already
+ * installed keeps running — same storage format; the next download (an upgrade
+ * hop) takes the musl one. macOS ships both architectures as `.tar.gz`, Windows
+ * x64 as a `.zip` holding `qdrant.exe`; there is no Windows arm64 asset.
  */
 export const QDRANT_RELEASES: readonly QdrantRelease[] = [
   {
@@ -54,6 +56,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': 'ba5bcd1a0947c15c0ee49d10e6f07477af1c8a0c0cd8ed2b535ca9a072c429f1',
       'aarch64-unknown-linux-musl': 'b0b915dcc78fa7a1e52aa2225453a1dddef5e187f24b83af03e647858843425d',
+      'aarch64-apple-darwin': 'e706cea3a2fffe03549f7b9fd202a769ca31dad73f3c57cdf1ae42d538b43f86',
+      'x86_64-apple-darwin': '9b2663461abc388069f582daa510b8ed5cf22fdf399e82b143fdcecf3f584478',
+      'x86_64-pc-windows-msvc': 'fac4743c7c976268850f603cb07a120e5cb857a441f523b1507d5f2714a273e1',
     },
   },
   {
@@ -62,6 +67,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': '1c1f514efac9c39250d63b88bf4b6073d7af08a80ee83ef10b3fef02b0713911',
       'aarch64-unknown-linux-musl': 'ed221c141e240d1443535ba44e71c965f1d2d5e702f01c52c5ad4b7fc64bb604',
+      'aarch64-apple-darwin': 'e790977ad8e93a9fdcd45d311c4e36e643187ff01ba3a7f6614ab8b02743e9ad',
+      'x86_64-apple-darwin': 'fac93bfd88f019afa312d9248d913a07fb68fe5b498b6927a26d699f865d9eb8',
+      'x86_64-pc-windows-msvc': '52f3e58a73709b81f13b035fac144089b7317da259ae2e6e71c949c536081854',
     },
   },
   {
@@ -70,6 +78,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': 'a6d36c60efda2872494f44b727796c811c3e9f307a2dd9c0054ee43d995d14ad',
       'aarch64-unknown-linux-musl': '9a68ff1b158fd3a73b63e5e07a80c3bef95c869436a946151246b10b4a85bcd4',
+      'aarch64-apple-darwin': 'e712f362e1e9aff18bb062f15c05fa384282ededc7d49f1935792cdc64e25222',
+      'x86_64-apple-darwin': 'b25f5512f2b696bae84752ff50752a77eec2ce6955e00847816e05c6344d6af9',
+      'x86_64-pc-windows-msvc': 'feaeb25c1d2a17fb787f9053de0fa9732bab74ff7e580135fd49e796a889ab91',
     },
   },
   {
@@ -78,6 +89,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': '52b21d0b31d7415c42e9dba8e5133459b8fa3ab264b192d41b20ec84c7623e1f',
       'aarch64-unknown-linux-musl': 'd1685202c98ad680234fb203676247aa948eda08d51d32d4dadce9de98f21394',
+      'aarch64-apple-darwin': 'c8590a9b3ec576d7c72e92bbcec449224f880389a5dc470e28b921d6379efa56',
+      'x86_64-apple-darwin': '5e493679833c310c8aaad63a5190fc222cc4c88131894ef89c710532fcd57909',
+      'x86_64-pc-windows-msvc': 'a1159282922776a05bdeaad9e90c85d8d1ca0bc90d9e5e4add56133e15748753',
     },
   },
   {
@@ -86,6 +100,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': '4028d5e753de53bda82fa487df25353f668e785c3dfff66dfa636e2203a82b3a',
       'aarch64-unknown-linux-musl': '9347a4db839f53fe123cc775bd87e4dd02f6c2750783bea02ea4fcae9c923164',
+      'aarch64-apple-darwin': 'adf795d7c2ac9d93677517fd58b119e9bb5bc8fc5143ac9b581a6f8264def8da',
+      'x86_64-apple-darwin': 'd7308c504afa58eb4aa2bd0c655252c324aea04891ac079b6b8764b33fa7dc15',
+      'x86_64-pc-windows-msvc': 'fe28df5993a9f9830b1e7290e2e341becf3c91366941b73b4322a05e4f91585c',
     },
   },
   {
@@ -94,6 +111,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': 'b4faedcdf8c9577bf1c8f2ab9b454636b87e056c116c99d49bd4f9fb2e634285',
       'aarch64-unknown-linux-musl': '1e738b45f90935c383b4076c30f377f390964cb5962b5bff24439812d157dc24',
+      'aarch64-apple-darwin': '0cb040a261035c316779bd7b4cca2e6ab39faf62640d6918bbbe320e2a9a6547',
+      'x86_64-apple-darwin': '45bdd4642e7f25611e9cd74f9f91482b27c5376840cd8dc476da67b87abe25a6',
+      'x86_64-pc-windows-msvc': '984619bbd4032ace578656174c465c5d6b71d1267ecad5b7b4c21cc6549ca833',
     },
   },
   {
@@ -102,6 +122,9 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
     binarySha256: {
       'x86_64-unknown-linux-musl': '70a40529e2ebe0a2787d574d3a2e28437cfe94f26f24fa419f6ac57b4ae817c9',
       'aarch64-unknown-linux-musl': '0e607c11705fab22f7d667f4749bc0b6b60a8fa9e91de71880a6ebafbbda1b26',
+      'aarch64-apple-darwin': 'e060209dfefc9d977ddcec48521349f505f8fd1ce21f2a3db444140870522fe4',
+      'x86_64-apple-darwin': 'ba7cbada9a90aefdbd7f92de4e093cd25328206bd65e9e96657bd6133d272637',
+      'x86_64-pc-windows-msvc': '9b6f69bd85f6abed4bc13f943099f55c6ffd55f5dd90388635320d8fbb569eb0',
     },
   },
 ];
@@ -128,6 +151,20 @@ export function qdrantImageRef(version: string): string {
   return `qdrant/qdrant:v${release.version}@${release.imageDigest}`;
 }
 
+/** Upstream's target triple per `<platform>-<arch>`; a pair missing here has no release asset. */
+const QDRANT_TARGETS: Readonly<Record<string, QdrantBinaryTarget>> = {
+  'linux-x64': 'x86_64-unknown-linux-musl',
+  'linux-arm64': 'aarch64-unknown-linux-musl',
+  'darwin-arm64': 'aarch64-apple-darwin',
+  'darwin-x64': 'x86_64-apple-darwin',
+  'win32-x64': 'x86_64-pc-windows-msvc',
+};
+
+/** The binary's file name in its archive and on disk. */
+export function qdrantBinaryName(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'qdrant.exe' : 'qdrant';
+}
+
 /** The release asset for this machine, or null where upstream ships none. */
 export function qdrantBinaryAsset(
   version: string,
@@ -135,11 +172,9 @@ export function qdrantBinaryAsset(
   arch: string = process.arch,
 ): { url: string; filename: string; sha256: string } | null {
   const release = findQdrantRelease(version);
-  if (!release || platform !== 'linux') return null;
-  const target: QdrantBinaryTarget | null =
-    arch === 'x64' ? 'x86_64-unknown-linux-musl' : arch === 'arm64' ? 'aarch64-unknown-linux-musl' : null;
-  if (!target) return null;
-  const filename = `qdrant-${target}.tar.gz`;
+  const target = QDRANT_TARGETS[`${platform}-${arch}`];
+  if (!release || !target) return null;
+  const filename = `qdrant-${target}${platform === 'win32' ? '.zip' : '.tar.gz'}`;
   return {
     url: `https://github.com/qdrant/qdrant/releases/download/v${release.version}/${filename}`,
     filename,
@@ -315,7 +350,7 @@ export function qdrantVolumeName(composeProject: string): string {
 type SpawnSyncLike = (cmd: string, args: string[]) => { status: number | null; stdout: string; stderr: string; error?: Error };
 
 const realSpawnSync: SpawnSyncLike = (cmd, args) => {
-  const result = spawnSync(cmd, args, { encoding: 'utf-8', timeout: 15_000 });
+  const result = spawnSync(cmd, args, { encoding: 'utf-8', timeout: 15_000, windowsHide: true });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', error: result.error };
 };
 

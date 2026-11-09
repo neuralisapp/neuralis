@@ -8,7 +8,7 @@ import type { WidgetDefinition } from '../widgets/types';
 import { getHostRegistry } from './hostRegistryInstance';
 import { IframeWidget, type IframeWidgetSource } from './IframeWidget';
 import { isAssetBackedSurfaceUrl } from './packageAssetScope';
-import { isUiModulePending, uiModuleRefusalReason } from './uiModuleLoader';
+import { isUiModuleAwaited, uiModuleRefusalReason } from './uiModuleLoader';
 
 type DirectRenderer = ComponentType<Record<string, unknown>>;
 
@@ -48,7 +48,7 @@ export function resolveWidgetRenderer(
     // logical descriptor. The scoped-asset path needs the COORDINATE
     // (packageId, surfaceKind, surfaceId, fingerprint); the entry path is
     // resolved server-side at mint (§F item 2). Only a genuinely remote
-    // absolute URL (trusted/first-party — untrusted absolutes are dropped in
+    // absolute URL (trusted/native — untrusted absolutes are dropped in
     // the snapshot) is passed through as-is. `isAssetBackedSurfaceUrl` is the
     // ONE client-side classifier, shared with the card reconcile.
     const source: IframeWidgetSource =
@@ -76,10 +76,13 @@ export function resolveWidgetRenderer(
     };
   }
 
-  // A `direct` surface whose runtime module is still attaching is LOADING, not
-  // unrenderable — the registry notifies and the widget re-resolves. One the
-  // host REFUSED names the reason in place (the same list the server logged).
-  const attaching = widget.component.renderer === 'direct' && isUiModulePending(widget.packageId);
+  // A `direct` surface whose runtime module is still to come is LOADING, not
+  // unrenderable — before the host's first `ui` view, while it imports, and
+  // after a failed fetch the next view retries; the loader and the registry
+  // notify and the widget re-resolves. Only a view that lists no module for the
+  // package says it cannot be rendered; one the host REFUSED names the reason
+  // in place (the same list the server logged).
+  const attaching = widget.component.renderer === 'direct' && isUiModuleAwaited(widget.packageId);
   const refusalOf = (): string | null =>
     widget.component.renderer === 'direct' && widget.packageId ? uiModuleRefusalReason(widget.packageId) : null;
   return {

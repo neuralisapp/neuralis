@@ -8,7 +8,7 @@ import { agentTapOpenOrder, boundAgentOf, getDefaultChatWidgetType, isGroupRunti
 import type { WidgetInstance } from '../store/types';
 import { useAgentHasStore, useAgentsState, useDockPrefs, useDockWidgetItems, useNewWindowAgent, usePhoneForegroundId, useProjectGroups, usePresentation, useWorkspaceSession } from '../store/selectors';
 import { getWidgetDefinition, isRepeatableWidget } from '../widgets/registry';
-import { getScopedSnapshot, onSnapshotChange } from '../packages/runtimeClient';
+import { getScopedSnapshot, isScopedSnapshotPending, onScopedSnapshotPendingChange, onSnapshotChange } from '../packages/runtimeClient';
 import { buildPackageDockItems, type PackageDockItem } from '../packages/dockRuntime';
 import {
   HOST_SLOTS,
@@ -19,7 +19,7 @@ import {
 } from '../packages/hostRegistryInstance';
 import type { PackageTrust } from '@neuralis/package-system/contracts';
 import { cn } from '@/lib/cn';
-import { DockWindowChooser, opensWindowChooser, type DockItem, type DockWindowChoice } from './Dock';
+import { DockWindowChooser, opensWindowChooser, type DockItem, type DockItemPresentation, type DockWindowChoice } from './Dock';
 import type { DockEdge } from './dockPlacement';
 import { resolveDockIcon } from './dockIcons';
 import { UserInfo } from './UserInfo';
@@ -47,12 +47,17 @@ function windowChoices(params: {
   cleanWindow: WorkspaceStore['cleanWindow'];
 }): DockWindowChoice[] {
   const { ids, byId, runtimeKey, type, title, inGroup, agentName, openWidget, cleanWindow } = params;
+  const counts = new Map<string | null, number>();
+  const seen = new Map<string | null, number>();
+  for (const id of ids) { const bound = byId[id] && runtimeKey ? boundAgentOf(runtimeKey, byId[id]) : null; counts.set(bound, (counts.get(bound) ?? 0) + 1); }
   return ids.map((id, index) => {
     const w = byId[id];
     const bound = w && runtimeKey ? boundAgentOf(runtimeKey, w) : null;
+    const ordinal = (seen.get(bound) ?? 0) + 1;
+    seen.set(bound, ordinal);
     return {
       id,
-      label: inGroup ? `${title} · ${bound ? agentName(bound) : ''}` : ids.length > 1 ? `${title} ${index + 1}` : title,
+      label: inGroup ? `${title} · ${bound ? agentName(bound) : ''}${(counts.get(bound) ?? 0) > 1 ? ` ${ordinal}` : ''}` : ids.length > 1 ? `${title} ${index + 1}` : title,
       minimized: w?.hidden === true,
       onSelect: () => { if (bound) openWidget({ agentId: bound, type, title, target: { instanceId: id } }); },
       onClean: () => cleanWindow({ widgetInstanceId: id }),
@@ -62,7 +67,7 @@ function windowChoices(params: {
 
 // ─── Primary dock items (package-contributed + UserInfo + layout) ──────────
 
-export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean): DockItem[] {
+export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean, raw = false, catalog = false): DockItem[] {
   const { agentId, projectId } = useWorkspaceSession();
   const { ids, byId: agentsById } = useAgentsState();
   const openWidget = useWorkspaceStore((s) => s.openWidget);
@@ -148,8 +153,8 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       icon: Package,
       section: 'header',
       onClick: () => {},
-      renderCustom: () => (
-        <UserInfo expanded={hasLabels} align="left" disabled={disabled} pinned={pinned} edge={edge} />
+      renderCustom: (presentation) => (
+        <UserInfo iconSize={presentation?.iconSize} phoneNavigation={presentation?.phoneNavigation} launcher={raw} expanded={hasLabels} align="left" disabled={disabled} pinned={pinned} edge={edge} />
       ),
     };
 
@@ -168,6 +173,7 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
         position: item.position,
         title: item.label,
         prefKey: key,
+        prefsId: item.dock,
         group: `trust:${item.trust ?? 'untrusted'}`,
         badgeKey: key,
         icon: resolveDockIcon(item.icon),
@@ -198,15 +204,15 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       };
     };
 
-    // Group package items by trust tier (first-party / trusted / untrusted)
+    // Group package items by trust tier (native / trusted / untrusted)
     // so we can render a separator between each group.
-    const trustOrder: PackageTrust[] = ['first-party', 'trusted', 'untrusted'];
+    const trustOrder: PackageTrust[] = ['native', 'trusted', 'untrusted'];
     const trustRank = (t: PackageTrust | undefined): number => {
       const idx = trustOrder.indexOf(t ?? 'untrusted');
       return idx === -1 ? trustOrder.length : idx;
     };
 
-    const primaryItems = [...packageItems].filter((item) => item.dock === 'primary');
+    const primaryItems = [...packageItems].filter((item) => catalog || item.dock === 'primary');
     primaryItems.sort((a, b) => {
       const ta = trustRank(a.trust);
       const tb = trustRank(b.trust);
@@ -256,8 +262,8 @@ export function usePrimaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: 
       disabled: false,
     };
 
-    return applyDockPrefs([userInfoItem, ...pkgItemsWithSeparators, layoutSettingsItem], prefs);
-  }, [canOpen, newAgent, inGroup, runtimeKey, agentsById, openWidget, exclusiveOpenWidget, closeWidget, cleanWindow, openWidgetsById, packageItems, widgetTypeState, setWorkspaceView, edge, hasLabels, pinned, disabled, prefs]);
+    return applyDockPrefs([userInfoItem, ...pkgItemsWithSeparators, layoutSettingsItem], raw ? undefined : prefs);
+  }, [canOpen, newAgent, inGroup, runtimeKey, agentsById, openWidget, exclusiveOpenWidget, closeWidget, cleanWindow, openWidgetsById, packageItems, widgetTypeState, setWorkspaceView, edge, hasLabels, pinned, disabled, prefs, raw, catalog]);
 }
 
 /**
@@ -272,9 +278,19 @@ export function usePackageDockItems(projectId: string | null, agentId: string | 
   return useMemo(() => snapshot ? buildPackageDockItems(snapshot) : [], [snapshot]);
 }
 
+/**
+ * Whether those package dock items are empty because the scoped snapshot is
+ * still loading — one boolean, so the shell re-renders only when it flips.
+ */
+export function useScopedSnapshotPending(projectId: string | null, agentId: string | null): boolean {
+  const read = useCallback(() => isScopedSnapshotPending({ projectId, agentId }), [projectId, agentId]);
+  return useSyncExternalStore(onScopedSnapshotPendingChange, read, () => false);
+}
+
 // ─── Agent activity (the `dock.agentActivity` slot) ────────────────────────
 
 type AgentDockButtonProps = {
+  presentation?: DockItemPresentation;
   id: string;
   agent: { name?: string; slug?: string; userId?: string; userName?: string; config?: Record<string, unknown> } | undefined;
   idx: number;
@@ -314,7 +330,7 @@ function AgentDockButton(props: AgentDockButtonProps) {
 // ─── Agent button (custom render for secondary dock) ───────────────────────
 
 function AgentDockTile({
-  id, agent, idx, selected, chatCollapsed, hasLabels, pinned, disabled, onSelect, currentUserId, currentUserName, activity, choice, edge = 'left',
+  id, agent, idx, selected, chatCollapsed, hasLabels, pinned, disabled, onSelect, currentUserId, currentUserName, activity, choice, edge = 'left', presentation,
 }: AgentDockButtonProps & { activity: AgentActivity }) {
   const cleanAgentStore = useWorkspaceStore((s) => s.cleanAgentStore);
   const [chooser, setChooser] = useState<DOMRect | null>(null);
@@ -384,9 +400,10 @@ function AgentDockTile({
         onClick={(event) => { if (choice) setChooser(event.currentTarget.getBoundingClientRect()); else onSelect(id); }}
         disabled={disabled}
         className={cn(
-          'w-full h-10 rounded-xl flex flex-row-reverse items-center transition shrink-0',
+          'rounded-xl flex flex-row-reverse items-center transition shrink-0',
+          presentation?.logoOnly ? 'w-14 h-14' : 'w-full h-10',
           hasLabels ? 'px-0' : 'justify-center',
-          dockSurf.bg,
+          !presentation?.logoOnly && dockSurf.bg,
           selected ? 'text-white' : 'text-white/70',
           showCollapsedHint && 'ring-2 ring-white/30 animate-pulse',
           'disabled:opacity-40 disabled:cursor-not-allowed',
@@ -394,10 +411,10 @@ function AgentDockTile({
         title={showCollapsedHint ? `Open ${agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug })} chat` : (agentDisplayLabel({ id, name: agent?.name, slug: agent?.slug }))}
       >
         <div
-          className="w-12 h-full flex items-center justify-center shrink-0 relative"
+          className={cn('h-full flex items-center justify-center shrink-0 relative', presentation?.logoOnly ? 'w-14' : 'w-12')}
           style={{ color, filter: iconGlow ? `drop-shadow(0 0 7px ${iconGlow})` : undefined }}
         >
-          <AgentIcon size={18} />
+          <AgentIcon size={presentation?.iconSize ?? 32} />
           {showAvatar ? (
             <span className="absolute -bottom-0.5 -right-0.5 flex items-center">
               {avatarStack.map((uid, i) => {
@@ -449,7 +466,7 @@ function AgentDockTile({
 
 // ─── Secondary dock items (ProjectSwitcher + agents + create) ──────────────
 
-export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean): DockItem[] {
+export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned: boolean, disabled: boolean, raw = false): DockItem[] {
   const { byId, ids: allIds } = useAgentsState();
   const prefs = useDockPrefs('secondary');
   // In a Group the SAME agent dock shows the Group's authorized members, and
@@ -500,8 +517,8 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
       icon: Package,
       section: 'header',
       onClick: () => {},
-      renderCustom: () => (
-        <ProjectSwitcher expanded={hasLabels} align="right" disabled={disabled} pinned={pinned} edge={edge} />
+      renderCustom: (presentation) => (
+        <ProjectSwitcher iconSize={presentation?.iconSize} phoneNavigation={presentation?.phoneNavigation} launcher={raw} expanded={hasLabels} align="right" disabled={disabled} pinned={pinned} edge={edge} />
       ),
     };
 
@@ -565,8 +582,8 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
       const choice = opensWindowChooser(item) ? { title: `${item.title} · ${chatTitle}`, windows, onNewWindow } : null;
       return {
         ...item,
-        renderCustom: () => (
-          <AgentDockButton
+        renderCustom: (presentation) => (
+          <AgentDockButton presentation={presentation}
             key={entry.id}
             id={entry.id}
             agent={byId[entry.id]}
@@ -616,6 +633,6 @@ export function useSecondaryDockItems(edge: DockEdge, hasLabels: boolean, pinned
       disabled,
     };
 
-    return applyDockPrefs([projectItem, ...agentDockItems, createItem], prefs);
-  }, [agentId, allIds, byId, currentUserId, currentUserName, disabled, edge, handleAgentSelect, hasLabels, ids, pinned, setWorkspaceView, prefs, chatWindowsByAgent, phoneForeground, windowsById, runtimeKey, openWidget, cleanWindow]);
+    return applyDockPrefs([projectItem, ...agentDockItems, createItem], raw ? undefined : prefs);
+  }, [agentId, allIds, byId, currentUserId, currentUserName, disabled, edge, handleAgentSelect, hasLabels, ids, pinned, setWorkspaceView, prefs, raw, chatWindowsByAgent, phoneForeground, windowsById, runtimeKey, openWidget, cleanWindow]);
 }

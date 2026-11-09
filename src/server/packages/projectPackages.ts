@@ -6,7 +6,7 @@
  * and watcher, and their packages are tracked separately in the runtime.
  */
 
-import { packageInstanceId, parsePackageInstanceId } from '@neuralis/package-system/contracts';
+import { isPackageFolderPath, packageInstanceId, parsePackageInstanceId } from '@neuralis/package-system/contracts';
 import { join } from 'node:path';
 import { resolveProjectRoot } from '@neuralis/package-system/paths';
 import { getEnv } from '../config/env';
@@ -16,18 +16,19 @@ import { getPackageRuntimeManager, type PackageLoadError } from './PackageRuntim
 import { toResolvedRecord } from './packageRecords';
 import { getProjectById } from '../store/ProjectStore';
 import { getRuntime } from '../host/bootstrap';
-import type { InstalledPackageInfo, SourceScope, PackageSourceRoot, PackageSourceRoots } from '@neuralis/package-system/contracts';
+import type { InstalledPackageInfo, PackageReader, SourcePlane, SourceScope, PackageSourceRoot, PackageSourceRoots } from '@neuralis/package-system/contracts';
 
 type Logger = ReturnType<ReturnType<typeof getLogger>['child']>;
 
 /**
  * A scanner paired with the owning SOURCE scope of the directory it scans
  * (R2b). The default `_packages/` drop-zone is `{ kind: 'project' }`; a
- * `recognizesPackages`-flagged source carries its own project/user/agent scope.
+ * source's package folder carries that source's own project/user/agent scope.
  * The scope is stamped onto every record so the runtime can isolate advertise.
  */
-type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; uriRoot: string };
-type FlaggedRoot = { dir: string; ownerScope: SourceScope; uriRoot: string };
+type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; device?: string };
+/** A folder to scan; `reader` present ⇒ a device folder read over its link (`dir` is its path there, `device` its id). `plane` is the source's own. */
+type FlaggedRoot = { dir: string; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; reader?: PackageReader; device?: string };
 
 type ActivationState = {
   /** Projects scanned + synced + watching. */
@@ -36,7 +37,7 @@ type ActivationState = {
   pending: Map<string, Promise<void>>;
   /**
    * All package scanners per activated project (default `_packages/` FIRST,
-   * then each `recognizesPackages`-flagged source), each paired with its owning
+   * then each source's package folders), each paired with its owning
    * source scope. The source of truth for re-collecting records on any sync and
    * for the installed-packages overview.
    */
@@ -94,15 +95,15 @@ async function activateProject(projectId: string): Promise<void> {
   // entry points before source enumeration is guaranteed ready, so its load
   // must never depend on a brain-core call (boot-order hazard). The drop-zone is
   // implicitly project-scope.
-  entries.push({ scanner: getProjectPackageScanner(projectRoot, logger), ownerScope: { kind: 'project' }, uriRoot: 'packages://' });
+  entries.push({ scanner: getProjectPackageScanner(projectRoot, logger), ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'packages://' });
 
-  // C2/R2b — source-driven: in ADDITION, any enabled, local source flagged
-  // `recognizesPackages` gets its own scanner, carrying the source's OWN
+  // C2/R2b — source-driven: in ADDITION, every package folder of an enabled
+  // source this process opens gets its own scanner, carrying the source's OWN
   // project/user/agent scope. The packages LOAD here; the per-caller advertise
   // isolation (only the owning user/agent sees them) is enforced downstream at
   // the snapshot + stream boundary via the stamped `ownerScope`.
-  for (const { dir, ownerScope, uriRoot } of (await listFlaggedPackageRoots(projectId, logger)) ?? []) {
-    entries.push({ scanner: getScannerForDir(dir, logger), ownerScope, uriRoot });
+  for (const { dir, ownerScope, plane, uriRoot, reader, device } of (await listFlaggedPackageRoots(projectId, logger)) ?? []) {
+    entries.push({ scanner: getScannerForDir(dir, logger, reader, { projectId, scope: ownerScope, uriRoot }), ownerScope, plane, uriRoot, ...(device ? { device } : {}) });
   }
 
   // A re-activation (after clear-cache) drops this project's listener from a
@@ -144,7 +145,7 @@ async function releaseDropped(projectId: string, previous: readonly ScannerEntry
   }
 }
 
-const rootKey = (root: FlaggedRoot): string => JSON.stringify([root.dir, root.ownerScope, root.uriRoot]);
+const rootKey = (root: FlaggedRoot): string => JSON.stringify([root.dir, root.ownerScope, root.plane, root.uriRoot, root.reader?.id ?? 'local']);
 
 /**
  * Re-derive an activated project's flagged roots and apply only the
@@ -163,11 +164,11 @@ function rederiveFlaggedRoots(projectId: string, logger: Logger): Promise<boolea
     if (desired === null) return false; // an unreadable inventory never drops a loaded source
     const [dropZone, ...flagged] = current;
     if (!dropZone) return false;
-    const held = new Map(flagged.map((e) => [rootKey({ dir: e.scanner.packagesDir, ownerScope: e.ownerScope, uriRoot: e.uriRoot }), e]));
+    const held = new Map(flagged.map((e) => [rootKey({ dir: e.scanner.packagesDir, ownerScope: e.ownerScope, plane: e.plane, uriRoot: e.uriRoot, reader: e.scanner.reader }), e]));
     const wanted = new Map(desired.map((root) => [rootKey(root), root]));
     if (held.size === wanted.size && [...wanted.keys()].every((key) => held.has(key))) return false;
     const next: ScannerEntry[] = [dropZone, ...[...wanted].map(([key, root]) => held.get(key)
-      ?? { scanner: getScannerForDir(root.dir, logger), ownerScope: root.ownerScope, uriRoot: root.uriRoot })];
+      ?? { scanner: getScannerForDir(root.dir, logger, root.reader, { projectId, scope: root.ownerScope, uriRoot: root.uriRoot }), ownerScope: root.ownerScope, plane: root.plane, uriRoot: root.uriRoot, ...(root.device ? { device: root.device } : {}) })];
     const added = next.slice(1).filter((e) => !flagged.includes(e));
     state.scanners.set(projectId, next);
     await Promise.all(added.map((e) => e.scanner.scan()));
@@ -208,12 +209,20 @@ function armSourceRootsSubscription(roots: PackageSourceRoots, logger: Logger): 
 }
 
 /**
- * C2/R2b (pure) — select the roots to scan from brain-core's enumerated
+ * C2/R2b (pure) — select the folders to scan from brain-core's enumerated
  * package-source candidates, each paired with the source's OWNING scope. A
- * source is scanned iff it is `recognizesPackages`, enabled, local, and not the
- * default `packages` drop-zone (handled unconditionally by C3). User/agent-scoped
- * sources ARE now included (R2b): they load, and their packages carry the
- * source's scope so advertise-time isolation can hide them from other callers.
+ * folder is scanned iff its source lists it in `packageFolders` (each entry
+ * re-checked here with the kernel's `isPackageFolderPath` before it is joined
+ * onto a root), is enabled, has a root THIS process opens (`containerRoot`: an
+ * in-process folder, or a device folder on this machine's own disk that
+ * brain-core and agent-core judged loadable) OR a `device` reader (another
+ * device's folder, or any device's from inside a container — read over its
+ * link, one reader per package folder), and is not the default `packages`
+ * drop-zone (handled unconditionally by C3). User/agent-scoped sources
+ * ARE included (R2b): they load, and their packages carry the source's scope so
+ * advertise-time isolation can hide them from other callers. Loading is never
+ * execution: a package from any non-native root keeps only its declarative
+ * and WASM contributions (the loader's DISCOVERY-IS-NOT-EXECUTION demote).
  * Deny-by-default on every OTHER axis; logs each skip when a logger is supplied.
  *
  * Exported for the floor-gate test (proves the scope is carried through, and the
@@ -222,21 +231,37 @@ function armSourceRootsSubscription(roots: PackageSourceRoots, logger: Logger): 
 export function selectFlaggedPackageRoots(
   roots: PackageSourceRoot[],
   logger?: Logger,
-): Array<{ dir: string; ownerScope: SourceScope; uriRoot: string }> {
-  const selected: Array<{ dir: string; ownerScope: SourceScope; uriRoot: string }> = [];
+): FlaggedRoot[] {
+  const selected: FlaggedRoot[] = [];
   for (const r of roots) {
     if (r.slug === 'packages') continue; // C3 — the default drop-zone is unconditional
-    if (!r.recognizesPackages) continue;
-    if (r.kind !== 'local') {
-      logger?.debug?.('Skipping non-local package source', { slug: r.slug, kind: r.kind });
-      continue;
-    }
+    if (r.packageFolders.length === 0) continue;
     if (!r.enabled) {
       logger?.debug?.('Skipping disabled package source', { slug: r.slug });
       continue;
     }
-    if (!r.containerRoot) continue;
-    selected.push({ dir: r.containerRoot, ownerScope: r.scope, uriRoot: r.uriRoot });
+    if (!r.containerRoot && !r.device) {
+      logger?.debug?.('Skipping package source with no root this host can read', { slug: r.slug, kind: r.kind });
+      continue;
+    }
+    for (const folder of r.packageFolders) {
+      if (!isPackageFolderPath(folder)) {
+        logger?.warn('Skipping a package folder that is not source-relative', { slug: r.slug });
+        continue;
+      }
+      const uriRoot = folder ? `${r.uriRoot}${folder}` : r.uriRoot;
+      if (r.containerRoot) {
+        selected.push({ dir: folder ? join(r.containerRoot, ...folder.split('/')) : r.containerRoot, ownerScope: r.scope, plane: r.plane, uriRoot });
+        continue;
+      }
+      if (!r.device) continue;
+      try {
+        const opened = r.device.openReader(folder);
+        selected.push({ dir: opened.root, ownerScope: r.scope, plane: r.plane, uriRoot, reader: opened.reader, device: r.device.id });
+      } catch (error) {
+        logger?.warn('Skipping a device package folder that cannot be opened', { slug: r.slug, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
   }
   return selected;
 }
@@ -355,13 +380,34 @@ function resolveScannerRecords(projectId: string, entries: readonly ScannerEntry
   for (const entry of entries) {
     for (const record of entry.scanner.listPackages()) {
       try {
-        records.push(toResolvedRecord(record, projectId, entry.ownerScope, { directory: entry.scanner.packagesDir, uriRoot: entry.uriRoot }));
+        records.push(toResolvedRecord(record, projectId, entry.ownerScope, { directory: entry.scanner.packagesDir, uriRoot: entry.uriRoot, plane: entry.plane }));
       } catch (error) {
         skipped.push({ packageId: record.packageId, error: error instanceof Error ? error.message : String(error) });
       }
     }
   }
   return { records, skipped };
+}
+
+/**
+ * The paired device an activated package's origin lives on — the id of the
+ * device folder whose scanner contributed it — or undefined (this server).
+ * Read from the activation state, no disk read; an offline device's package
+ * still names its device.
+ */
+export function packageOriginDevice(projectId: string, originUri: string): string | undefined {
+  return deviceOfOrigin(activationState().scanners.get(projectId) ?? [], originUri);
+}
+
+/** The device of the scanner whose root holds `originUri` (a segment boundary, never a bare prefix). */
+export function deviceOfOrigin(entries: readonly { uriRoot: string; device?: string }[], originUri: string): string | undefined {
+  for (const entry of entries) {
+    if (!entry.device) continue;
+    const base = entry.uriRoot;
+    const under = base.endsWith('://') || base.endsWith('/') ? originUri.startsWith(base) : originUri === base || originUri.startsWith(`${base}/`);
+    if (under) return entry.device;
+  }
+  return undefined;
 }
 
 /** Match against host-stamped records from every owning scanner, never a caller path. */

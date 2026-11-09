@@ -38,7 +38,7 @@ export type PackageDockItem = {
   packageId: string;
   /**
    * Trust tier of the contributing package. Used by the dock UI to group
-   * items (first-party / trusted / untrusted) with visual separators.
+   * items (native / trusted / untrusted) with visual separators.
    */
   trust?: PackageTrust;
   onClick:
@@ -51,7 +51,7 @@ export type PackageDockItem = {
  *
  * Each dock item is enriched with the contributing package's trust tier
  * (looked up from `snapshot.packages[].access.trust`) so the UI can render
- * grouped separators between first-party / trusted / untrusted sections.
+ * grouped separators between native / trusted / untrusted sections.
  */
 export function buildPackageDockItems(
   snapshot: PackageRuntimeSnapshot,

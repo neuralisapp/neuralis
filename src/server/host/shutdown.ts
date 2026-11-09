@@ -1,7 +1,11 @@
 /**
  * Process-level graceful shutdown for the community host.
  *
- * ONE owner for SIGTERM/SIGINT. Before this module the handler lived inside
+ * ONE owner for SIGTERM/SIGINT — and for the stop a `neuralis up` supervisor
+ * sends over its `'ipc'` channel on every OS (Windows has no SIGTERM to
+ * deliver): `homeLock.ts` `followSupervisor` turns that message, and the
+ * channel's loss, into this same SIGTERM event, so there is no second stop
+ * path to drift. Before this module the handler lived inside
  * `startMcpServer()`, which left two holes a restart could fall through:
  *
  *   1. `MCP_HTTP_PORT=0|false` returns from `instrumentation.register()`
@@ -28,6 +32,9 @@
  *      conventional teardown direction (a later registrant may depend on an
  *      earlier one still being up).
  *   3. `runtime.shutdown()` — connector lifecycle + every package's `stop`.
+ *   4. Close every connection still open on every HTTP server (the upgrade
+ *      watchdog's hook records them) — Next's cleanup awaits `server.close()`,
+ *      which never closes a held keep-alive/SSE connection in production.
  *
  * Steps 1 and 3 run on the PEEKED runtime, never one awaited into existence:
  * booting the runtime *during* shutdown would be absurd, so a process dying
@@ -36,12 +43,13 @@
  *
  * Every step is individually try/caught: one failing teardown must not strand
  * the ones after it. Next's own signal handling closes the HTTP server; we do
- * not take that over. A watchdog does force an exit, but only past a deadline
+ * not take that over — step 4 only releases the connections its close waits on. A watchdog does force an exit, but only past a deadline
  * ABOVE the drain window — see `runShutdown`.
  */
 import { getPlatformConfigStore } from '../store/PlatformConfigStore';
 import { peekRuntime } from './bootstrap';
 import { getLogger } from '../logging/setup';
+import { closeTrackedServerConnections } from '../upgradeWatchdog';
 
 export type ShutdownStep = {
   /** Human-readable label used in shutdown logs. */
@@ -209,6 +217,14 @@ export async function runShutdown(signal: string): Promise<void> {
       log.warn(`Runtime shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // 4. Every connection still open — LAST, so the drain's sockets stay up until
+  // their turns are persisted. Next's cleanup is awaiting `server.close()`,
+  // which in production waits for every keep-alive/SSE/MCP client: one browser
+  // tab on the port held each stop until the 40 s kill. Closing them lets
+  // Next's own cleanup finish and exit.
+  const servers = closeTrackedServerConnections();
+  if (servers > 0) log.info(`Closed open connections on ${servers} server(s)`);
 
   clearTimeout(watchdog);
   log.info('Shutdown complete');

@@ -19,31 +19,33 @@ const dom = installFakeDom();
 
 vi.mock('next-auth/react', () => ({ useSession: () => ({ data: { user: { id: 'u1', name: 'Ada' } }, status: 'authenticated' }) }));
 const dockFixture = vi.hoisted(() => ({
-  items: (dockId: string) => [1, 2, 3].map((n) => ({ id: `${dockId}-${n}`, position: n, title: `${dockId} ${n}`, icon: () => null, onClick: () => undefined })),
+  items: (dockId: string) => [1, 2, 3].map((n) => ({ id: `${dockId}-${n}`, position: n, prefKey: `${dockId}-${n}`, group: 'trust:native', title: `${dockId} ${n}`, icon: () => null, onClick: () => undefined })),
 }));
 vi.mock('../useDockItems', () => ({
   usePackageDockItems: () => [],
   usePrimaryDockItems: () => dockFixture.items('primary'),
   useSecondaryDockItems: () => dockFixture.items('secondary'),
+  useScopedSnapshotPending: () => false,
 }));
 vi.mock('../AnimatedUniverseBackground', () => ({ AnimatedUniverseBackground: () => null }));
 const wallpaper = vi.hoisted(() => ({ image: null as string | null }));
 vi.mock('../../theme/useTheme', async () => {
   const { DEFAULT_THEME } = await import('../../theme/themes');
-  return { useTheme: () => ({ theme: DEFAULT_THEME, backgroundTheme: DEFAULT_THEME, dockTheme: DEFAULT_THEME, backgroundImage: wallpaper.image }) };
+  return { useTheme: () => ({ theme: DEFAULT_THEME, backgroundTheme: DEFAULT_THEME, dockTheme: DEFAULT_THEME, availableThemes: [DEFAULT_THEME], backgroundImage: wallpaper.image }) };
 });
 Object.assign(window, { innerWidth: 1280, innerHeight: 800, screen: { width: 1280, height: 800 } });
-vi.mock('../UserAvatar', () => ({ UserAvatar: () => null }));
+vi.mock('../UserAvatar', () => ({ UserAvatar: ({ userId, size }: { userId?: string | null; size?: number }) => createElement('span', { 'data-test-avatar': userId, 'data-test-avatar-size': String(size) }) }));
 vi.mock('../UserProfilePopup', () => ({ UserProfilePopup: () => null }));
 vi.mock('../../realtime/eventHub', () => ({ subscribeHub: () => () => undefined, getHubConnected: () => true }));
 
 const { createElement, act } = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useWorkspaceStore } = await import('../../store/workspaceStore');
-const { Dock } = await import('../Dock');
+const { Dock, DockEditor } = await import('../Dock');
+const { AppMenu } = await import('../AppMenu');
 const { WorkspaceShell } = await import('../WorkspaceShell');
 const { DockScrollContainer } = await import('../DockScrollContainer');
-const { EditDocksToggle, DISCARD_CONFIRM_MS } = await import('../LayoutSettingsPanel');
+const { DISCARD_CONFIRM_MS } = await import('../LayoutSettingsPanel');
 const { InboxPanel, CLEAR_CONFIRM_MS } = await import('../InboxPanel');
 const { UserInfo } = await import('../UserInfo');
 const client = await import('../../notifications/notificationsClient');
@@ -107,7 +109,7 @@ describe('Edit docks', () => {
     icon: Glyph,
     onClick: () => undefined,
     prefKey: `pkg:${dockId}-${n}`,
-    group: 'trust:first-party',
+    group: 'trust:native',
   }));
   const dock = (dockId: 'primary' | 'secondary') => createElement(
     'div',
@@ -121,61 +123,77 @@ describe('Edit docks', () => {
     }),
   );
   const saveButton = (dockId: string): FakeNode | undefined =>
-    byAttr('data-test-dock', dockId)[0]?.querySelectorAll('[aria-label="Save dock order"]')[0];
-  const toggle = (): FakeNode | undefined => [...findByText(dom.container, 'Edit docks'), ...findByText(dom.container, 'Editing docks…')][0];
+    dom.document.querySelectorAll(`[data-dock-capsule="${dockId}"]`)[0]?.querySelectorAll('[aria-label="Save dock order"]')[0];
+  const toggle = (): FakeNode | undefined => [...findByText(dom.document.body as FakeNode, 'Edit docks'), ...findByText(dom.document.body as FakeNode, 'Editing docks…')][0];
+
+  const openLayout = async () => {
+    if (!byAttr('aria-label', 'Apps').length) {
+      await act(async () => window.dispatchEvent(new Event('neuralis:apps-open')));
+      await press(byAttr('aria-label', 'Layout')[0]);
+    }
+  };
 
   beforeEach(async () => {
-    await render(createElement('div', null, dock('primary'), dock('secondary'), createElement(EditDocksToggle)));
+    await render(createElement(WorkspaceShell, { snapshotReady: true, children: 'workspace' }));
+    await act(async () => window.dispatchEvent(new Event('neuralis:apps-open')));
+    await press(byAttr('aria-label', 'Layout')[0]);
   });
 
   it('one dock saved, the other still editing: the toggle says "Edit docks" and a click keeps the editing dock MOUNTED', async () => {
-    await act(async () => { useWorkspaceStore.getState().setDockEditing('primary', true); });
+    await openLayout(); await press(toggle());
+    await press(byAttr('aria-label', 'Hide primary 1')[0]);
+    await press(saveButton('secondary'));
     const editor = saveButton('primary');
     expect(editor).toBeDefined();
     expect(saveButton('secondary')).toBeUndefined();
+    await openLayout();
     expect(toggle()?.textContent.trim()).toBe('Edit docks');
     expect(toggle()?.getAttribute('aria-pressed')).toBe('false');
 
-    await press(toggle());
+    await openLayout(); await press(toggle());
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: true, secondary: true });
+    expect(byAttr('aria-label', 'Apps')).toHaveLength(0);
     // The same element — the primary dock's editor (and its draft) was never remounted.
     expect(saveButton('primary')).toBe(editor);
+    expect(byAttr('aria-label', 'Hide primary 1')).toHaveLength(0);
     expect(saveButton('secondary')).toBeDefined();
+    await openLayout();
     expect(toggle()?.textContent.trim()).toBe('Editing docks…');
     expect(toggle()?.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('both editing: a click ASKS; "Keep editing" keeps both drafts, "Discard" ends both', async () => {
-    await press(toggle());
+    await openLayout(); await press(toggle());
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: true, secondary: true });
     const editor = saveButton('primary');
 
-    await press(toggle());
-    expect(findByText(dom.container, 'Discard both drafts?', 'SPAN')).toHaveLength(1);
+    await openLayout(); await press(toggle());
+    expect(findByText(dom.document.body as FakeNode, 'Discard both drafts?', 'SPAN')).toHaveLength(1);
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: true, secondary: true });
-    await press(findByText(dom.container, 'Keep editing')[0]);
+    await press(findByText(dom.document.body as FakeNode, 'Keep editing')[0]);
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: true, secondary: true });
     expect(saveButton('primary')).toBe(editor);
 
-    await press(toggle());
-    await press(findByText(dom.container, 'Discard')[0]);
+    await openLayout(); await press(toggle());
+    await press(findByText(dom.document.body as FakeNode, 'Discard')[0]);
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: false, secondary: false });
     expect(saveButton('primary')).toBeUndefined();
   });
 
   it('the discard question disarms itself, and when a dock leaves edit', async () => {
     vi.useFakeTimers();
-    await press(toggle());
-    await press(toggle());
-    expect(findByText(dom.container, 'Discard')).toHaveLength(1);
+    await openLayout(); await press(toggle());
+    await openLayout(); await press(toggle());
+    expect(findByText(dom.document.body as FakeNode, 'Discard')).toHaveLength(1);
     await act(async () => { vi.advanceTimersByTime(DISCARD_CONFIRM_MS); });
-    expect(findByText(dom.container, 'Discard')).toHaveLength(0);
+    expect(findByText(dom.document.body as FakeNode, 'Discard')).toHaveLength(0);
     expect(useWorkspaceStore.getState().dockEditing).toEqual({ primary: true, secondary: true });
 
-    await press(toggle());
-    expect(findByText(dom.container, 'Discard')).toHaveLength(1);
+    await openLayout(); await press(toggle());
+    expect(findByText(dom.document.body as FakeNode, 'Discard')).toHaveLength(1);
     await act(async () => { useWorkspaceStore.getState().setDockEditing('secondary', false); });
-    expect(findByText(dom.container, 'Discard')).toHaveLength(0);
+    expect(findByText(dom.document.body as FakeNode, 'Discard')).toHaveLength(0);
+    await openLayout();
     expect(toggle()?.textContent.trim()).toBe('Edit docks');
   });
 });
@@ -593,5 +611,89 @@ describe('the Apps footer', () => {
     const footer = byAttr('data-dock-footer')[0];
     expect(footer.parentNode).toBe(capsule);
     expect(capsule.childNodes.at(-1)).not.toBe(footer);
+  });
+});
+
+
+describe('mounted phone editor captures its transaction intent', () => {
+  it('refuses presentation/Group switches, saves Group+phone in one publish, and cancels without preference changes', async () => {
+    // Use the store's actual key owner, rather than duplicating its spelling.
+    const { groupScopeKey } = await import('../../store/workspaceStore');
+    const key = groupScopeKey('u1', 'p1');
+    useWorkspaceStore.setState({ liveUserId: 'u1', session: { projectId: 'p1', agentId: 'a', workspaceView: 'default' }, agents: { byId: { a: { id: 'a', name: 'Ann', userId: 'u1' } }, ids: ['a'], status: 'success', error: null }, groupStateByScope: { [key]: { presentation: 'group', selectedGroupId: 'g1', groups: [{ id: 'g1', name: 'Main', memberIds: ['a'] }, { id: 'g2', name: 'Other', memberIds: [] }] } }, phoneDockPrefsByScope: {}, dockEditing: { primary: false, secondary: false, phone: true } });
+    const editor = () => createElement(DockEditor, { dockId: 'phone' as const, items: [{ id: 'app', title: 'App', position: 1, prefKey: 'p:app', group: 'trust:native', icon: () => null, onClick: () => undefined }], horizontal: false, hasLabels: true, pinned: true, cornerReverse: false, modeSwitch: null, groupPanel: 'inline' as const });
+    await render(editor());
+    const state = useWorkspaceStore.getState;
+    const before = JSON.stringify(state().phoneDockPrefsByScope);
+    await act(async () => { state().setPresentation('agent'); state().selectGroup('g2'); });
+    expect(state().groupStateByScope[key].presentation).toBe('group');
+    expect(state().groupStateByScope[key].selectedGroupId).toBe('g1');
+    const publish = vi.fn(); const stop = useWorkspaceStore.subscribe(publish);
+    await act(async () => click(byAttr('aria-label', 'Save dock order')[0]));
+    stop(); expect(publish).toHaveBeenCalledTimes(1);
+    expect(state().phoneDockPrefsByScope?.[key]).toEqual({ order: ['p:app'], hidden: [] });
+    expect(state().groupStateByScope[key].selectedGroupId).toBe('g1');
+    expect(before).toBe('{}');
+    await act(async () => { state().setDockEditing('phone', true); });
+    const saved = JSON.stringify(state().phoneDockPrefsByScope);
+    await act(async () => click(byAttr('aria-label', 'Cancel dock editing')[0]));
+    expect(JSON.stringify(state().phoneDockPrefsByScope)).toBe(saved);
+    expect(state().dockEditing.phone).toBe(false);
+  });
+
+  it('an old mounted draft cannot save into a new user or project', async () => {
+    useWorkspaceStore.setState({ liveUserId: 'u1', phoneDockPrefsByScope: {}, dockEditing: { primary: false, secondary: false, phone: true } });
+    await render(createElement(DockEditor, { dockId: 'phone', items: [], horizontal: false, hasLabels: true, pinned: true, cornerReverse: false, modeSwitch: null, groupPanel: 'inline' }));
+    await act(async () => useWorkspaceStore.getState().setLiveUserId('u2'));
+    await act(async () => click(byAttr('aria-label', 'Save dock order')[0]));
+    expect(useWorkspaceStore.getState().phoneDockPrefsByScope).toEqual({});
+    expect(useWorkspaceStore.getState().dockEditing.phone).toBe(false);
+  });
+});
+
+describe('real custom agent presentation', () => {
+  it('carries dock and launcher sizing through the real producer/activity slot without losing chooser or cleanup', async () => {
+    const actual = await vi.importActual<typeof import('../useDockItems')>('../useDockItems');
+    const { DockItemButton, LauncherGrid } = await import('../Dock');
+    const { registerWidget, syncPackageWidgets } = await import('../../widgets/registry');
+    const { getHostRegistry, HOST_SLOTS } = await import('../../packages/hostRegistryInstance');
+    const forwarded: Array<[string, string | null]> = [];
+    const Activity = ({ agentId, projectId, children }: import('../../packages/hostRegistryInstance').AgentActivitySlotProps) => {
+      forwarded.push([agentId, projectId]);
+      return children({ streaming: true, presenceUserId: 'colleague', presenceUserName: 'Bea', participantUserIds: ['u1', 'colleague'] });
+    };
+    useWorkspaceStore.getState().reset();
+    useWorkspaceStore.setState({ liveUserId: 'u1', session: { projectId: 'custom-p', agentId: 'a', workspaceView: 'default' }, groupStateByScope: {}, agents: { byId: { a: { id: 'a', name: 'Real agent', userId: 'u1' } }, ids: ['a'], status: 'success', error: null } });
+    registerWidget({ type: 'chat', title: 'Chat', defaultOpen: true, render: () => createElement('div') });
+    useWorkspaceStore.getState().openWidget({ agentId: 'a', type: 'chat', title: 'Chat' });
+    function Producer({ size, launcher }: { size: number; launcher: boolean }) {
+      const items = actual.useSecondaryDockItems('bottom', false, true, false, true).filter((item) => item.id === (size === 28 ? '__project-switcher' : 'a'));
+      return launcher ? createElement(LauncherGrid, { label: 'Agents', items, phone: size === 40, onAct: () => undefined }) : createElement(DockItemButton, { item: size === 32 ? { ...items[0], phoneSection: 'agents' } : items[0], horizontal: false, hasLabels: false, pinned: true });
+    }
+    try {
+      await render(createElement(Producer, { size: 26, launcher: false }));
+      expect(byAttr('data-dock-tile-act')[0].querySelectorAll('SVG')[0].getAttribute('width')).toBe('26');
+      expect(byAttr('class').some((node) => node.getAttribute('class')?.includes('streaming-ring'))).toBe(false);
+      await act(async () => root!.render(createElement(Producer, { size: 28, launcher: false })));
+      expect(dom.container.querySelectorAll('SVG')[0].style.width).toBe('28px');
+      await act(async () => root!.render(createElement(Producer, { size: 32, launcher: false })));
+      expect(byAttr('data-dock-tile-act')[0].querySelectorAll('SVG')[0].getAttribute('width')).toBe('32');
+      await act(async () => getHostRegistry().register({ packageSlug: 'activity-fixture', componentImport: HOST_SLOTS.agentActivity, Component: Activity }));
+      expect(forwarded.at(-1)).toEqual(['a', 'custom-p']);
+      expect(byAttr('data-test-avatar').map((node) => node.getAttribute('data-test-avatar'))).toEqual(['colleague', 'u1']);
+      expect(byAttr('class').some((node) => node.getAttribute('class')?.includes('streaming-ring__frame'))).toBe(true);
+      expect(byAttr('aria-label', 'Clean Real agent workspace')).toHaveLength(1);
+      await press(byAttr('data-dock-tile-act')[0]);
+      expect(byAttr('role', 'dialog').length).toBeGreaterThan(0);
+      for (const size of [40, 44]) {
+        await act(async () => root!.render(createElement(Producer, { size, launcher: true })));
+        const button = byAttr('data-dock-tile-act')[0];
+        expect(button.querySelectorAll('SVG')[0].getAttribute('width')).toBe(String(size));
+        expect(button.getAttribute('class')).toContain('w-14 h-14');
+        expect(byAttr('aria-label', 'Clean Real agent workspace')).toHaveLength(1);
+      }
+      await act(async () => getHostRegistry().unregister(HOST_SLOTS.agentActivity));
+      expect(byAttr('class').some((node) => node.getAttribute('class')?.includes('streaming-ring__frame'))).toBe(false);
+    } finally { getHostRegistry().unregister(HOST_SLOTS.agentActivity); syncPackageWidgets([]); }
   });
 });

@@ -9,13 +9,17 @@
  * `RangeError` storm).
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts';
 import {
   onSnapshotChange,
   seedSnapshotCache,
   getCachedSnapshot,
   getScopedSnapshot,
+  isScopedSnapshotPending,
+  loadScopedSnapshot,
+  onScopedSnapshotPendingChange,
+  fetchPackageSnapshot,
 } from '../runtimeClient';
 
 function makeSnapshot(revision: string): PackageRuntimeSnapshot {
@@ -108,5 +112,127 @@ describe('getScopedSnapshot fail-closed scoping', () => {
     expect(getScopedSnapshot({ projectId: 'p1', agentId: 'a2' })).toBeNull();
     expect(getScopedSnapshot({ projectId: 'p2', agentId: 'a1' })).toBeNull();
     expect(getScopedSnapshot()).toBeNull();
+  });
+});
+
+/**
+ * The dock shows its loading state while the workspace waits for the scoped
+ * snapshot (the SSR seed is unscoped, so the package tiles are empty until it
+ * lands). That wait is BOUNDED: one retry after the fallback, then it stops
+ * and logs — never a poll, never a timer left behind.
+ */
+describe('loadScopedSnapshot — the bounded scoped wait', () => {
+  const RETRY_MS = 6000;
+  const answer = (snapshot: PackageRuntimeSnapshot) => ({ ok: true, status: 200, json: async () => snapshot }) as unknown as Response;
+  const start = (scope: { projectId: string; agentId: string }) => {
+    const delivered: string[] = [];
+    const cancel = loadScopedSnapshot(scope, RETRY_MS, (snapshot) => {
+      delivered.push(snapshot.revision);
+      seedSnapshotCache(snapshot, scope); // what WorkspaceRoot's applySnapshot does
+    });
+    return { delivered, cancel };
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('is pending until the scoped snapshot is delivered, then clears with no timer left', async () => {
+    vi.useFakeTimers();
+    let resolve!: (res: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((r) => { resolve = r; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const scope = { projectId: 'load-ok', agentId: 'a1' };
+    const flips = vi.fn();
+    const stop = onScopedSnapshotPendingChange(flips);
+    const { delivered } = start(scope);
+    expect(isScopedSnapshotPending(scope)).toBe(true);
+    expect(isScopedSnapshotPending({ projectId: 'other', agentId: 'a1' })).toBe(false);
+    resolve(answer(makeSnapshot('scoped')));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(delivered).toEqual(['scoped']);
+    expect(isScopedSnapshotPending(scope)).toBe(false);
+    expect(flips).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('a rejected fetch is retried ONCE after the fallback; then no attempt, no timer — and the dock still waits', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async () => { throw new Error('offline'); });
+    vi.stubGlobal('fetch', fetchMock);
+    const scope = { projectId: 'load-reject', agentId: 'a1' };
+    const { delivered } = start(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(isScopedSnapshotPending(scope)).toBe(true); // the first failure waits for the fallback
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Never an empty dock presented as final: the scope stays awaited.
+    expect(isScopedSnapshotPending(scope)).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(RETRY_MS * 10);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(delivered).toEqual([]);
+  });
+
+  it('after both attempts failed, the hub\'s connect refetch (the runtime:snapshot path) ends the wait — no call of its own', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let hostUp = false;
+    const fetchMock = vi.fn(async () => {
+      if (!hostUp) throw new TypeError('Failed to fetch');
+      return answer(makeSnapshot('after-restart'));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const scope = { projectId: 'load-recover', agentId: 'a1' };
+    start(scope);
+    await vi.advanceTimersByTimeAsync(RETRY_MS * 3);
+    expect(isScopedSnapshotPending(scope)).toBe(true);
+    hostUp = true;
+    // `subscribeToRuntimeEvents` runs exactly this on the hub's on-connect frame.
+    await fetchPackageSnapshot(scope);
+    expect(isScopedSnapshotPending(scope)).toBe(false);
+    expect(getScopedSnapshot(scope)?.revision).toBe('after-restart');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a fetch that never answers is retried once; after the second fallback no timer is left and the dock still waits', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal('fetch', fetchMock);
+    const scope = { projectId: 'load-hang', agentId: 'a1' };
+    start(scope);
+    await vi.advanceTimersByTimeAsync(RETRY_MS - 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(isScopedSnapshotPending(scope)).toBe(true);
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(isScopedSnapshotPending(scope)).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancel (unmount or a scope change) clears the timer and drops a later answer', async () => {
+    vi.useFakeTimers();
+    let resolve!: (res: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { resolve = r; })));
+    const scope = { projectId: 'load-cancel', agentId: 'a1' };
+    const { delivered, cancel } = start(scope);
+    cancel();
+    expect(isScopedSnapshotPending(scope)).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    resolve(answer(makeSnapshot('late')));
+    await vi.advanceTimersByTimeAsync(RETRY_MS * 3);
+    expect(delivered).toEqual([]);
   });
 });

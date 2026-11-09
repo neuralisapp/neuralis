@@ -161,7 +161,7 @@ describe('/api/events — discovered channel coverage', () => {
     expect(discovered).toHaveLength(5);
     const route = readFileSync(join(repository, 'neuralis/src/app/api/events/route.ts'), 'utf-8');
     const hostArms = [...route.matchAll(/send\('([^']+)'/g)].map((match) => match[1]);
-    expect(new Set(hostArms).size).toBe(4);
+    expect(new Set(hostArms).size).toBe(5);
     const client = readFileSync(join(repository, 'neuralis/src/workspace/realtime/eventHub.ts'), 'utf-8');
     const union = client.match(/export type HubChannel = ([^;]+);/)?.[1];
     expect(union).toBeDefined();

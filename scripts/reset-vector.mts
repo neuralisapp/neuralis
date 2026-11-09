@@ -15,6 +15,7 @@
 import { readdir, unlink, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { readLock, resetOwnedCollections, StoreResetPartialError } from '@neuralis/brain-core';
 import { appPort, checkOffline, composeProbe, httpProbe, type OfflineProbes } from './checkpoint.mts';
 import type { CliContext } from './cli/registry.mts';
@@ -43,10 +44,6 @@ const fail = `${c.red}✗${c.reset}`;
 const dot = `${c.dim}·${c.reset}`;
 
 // ── Paths ─────────────────────────────────────────────────────────
-
-function resolveNeuralisHome(): string {
-  return process.env.NEURALIS_HOME || join(process.env.HOME || '/root', '.neuralis');
-}
 
 function lockPath(home: string): string { return join(home, 'app', 'config', 'embedding-lock.json'); }
 function projectsDir(home: string): string { return join(home, 'projects'); }
@@ -138,7 +135,7 @@ export async function run(_argv: string[], ctx: CliContext): Promise<number> {
   console.log(`  again; optional embedding incurs its configured costs.${c.reset}`);
   console.log();
 
-  const home = resolveNeuralisHome();
+  const home = resolveNeuralisHome().home;
   const qdrantUrl = resolveQdrantUrl();
   const prefix = resolveCollectionPrefix();
   const explicit = resolveExplicitCollection();

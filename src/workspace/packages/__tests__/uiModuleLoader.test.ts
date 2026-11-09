@@ -23,8 +23,8 @@ import {
   ensureUiModules,
   guardedRegistryFor,
   installModule,
+  isUiModuleAwaited,
   isUiModuleHoldActive,
-  isUiModulePending,
   readUiAttachments,
   uiModuleRefusalReason,
   uiModulePinViolation,
@@ -329,8 +329,8 @@ describe('ensureUiModules — modules install concurrently, each after its own p
     await vi.waitFor(() => expect(io.requested).toContain(free.entryUrl));
     io.release(free.entryUrl);
     await vi.waitFor(() => expect(io.installed).toEqual([free.entryUrl]));
-    expect(isUiModulePending('@x/free')).toBe(false);
-    expect(isUiModulePending('@x/hung')).toBe(true);
+    expect(isUiModuleAwaited('@x/free')).toBe(false);
+    expect(isUiModuleAwaited('@x/hung')).toBe(true);
     expect(io.requested).toEqual([hung.entryUrl, free.entryUrl]);
   });
 
@@ -343,12 +343,91 @@ describe('ensureUiModules — modules install concurrently, each after its own p
     await vi.waitFor(() => expect(io.requested).toEqual([provider.entryUrl]));
     await new Promise((r) => setTimeout(r, 0));
     expect(io.requested).toEqual([provider.entryUrl]);
-    expect(isUiModulePending('@x/consumer')).toBe(true);
+    expect(isUiModuleAwaited('@x/consumer')).toBe(true);
     io.release(provider.entryUrl);
     await vi.waitFor(() => expect(io.requested).toEqual([provider.entryUrl, consumer.entryUrl]));
     io.release(consumer.entryUrl);
     await done;
     expect(io.installed).toEqual([provider.entryUrl, consumer.entryUrl]);
-    expect(isUiModulePending('@x/consumer')).toBe(false);
+    expect(isUiModuleAwaited('@x/consumer')).toBe(false);
+  });
+});
+
+describe('a module whose fetch failed (the host restarting) attaches with the next view — and is never imported twice', () => {
+  const g = globalThis as Record<PropertyKey, unknown>;
+  const STATE = Symbol.for('neuralis.workspace.uiModuleLoader');
+
+  beforeEach(() => {
+    delete g[STATE];
+    delete g[SHARED_MODULE_GLOBAL_KEY];
+    delete g.__neuralis_shared_module_providers__;
+    g.window = globalThis;
+  });
+
+  afterEach(() => {
+    delete g[STATE];
+    delete g.window;
+  });
+
+  const apps = descriptor({ packageId: '@acme/apps' });
+  const view = { modules: [apps], sheet: null, refused: [] };
+
+  it('a failed import is imported again by the next view, installs once, and a later view imports nothing', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const calls: string[] = [];
+    const installs: string[] = [];
+    let hostUp = false;
+    const importer = async (url: string): Promise<Record<string, unknown>> => {
+      calls.push(url);
+      if (!hostUp) throw new TypeError('Failed to fetch dynamically imported module');
+      return { installAppsHostComponents: () => { installs.push(url); } };
+    };
+    try {
+      await ensureUiModules(view, importer);
+      expect(calls).toHaveLength(1);
+      // Its surfaces keep "Loading…" and name no refusal — it is still to come.
+      expect(isUiModuleAwaited('@acme/apps')).toBe(true);
+      expect(uiModuleRefusalReason('@acme/apps')).toBeNull();
+      hostUp = true;
+      await ensureUiModules(view, importer);
+      expect(calls).toHaveLength(2);
+      expect(installs).toEqual([apps.entryUrl]);
+      expect(isUiModuleAwaited('@acme/apps')).toBe(false);
+      await ensureUiModules(view, importer);
+      expect(calls).toHaveLength(2);
+      expect(installs).toHaveLength(1);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('control: a module that RAN and failed for a named reason is not imported again', async () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const calls: string[] = [];
+    const importer = async (url: string): Promise<Record<string, unknown>> => { calls.push(url); return { HostComponents: () => undefined }; };
+    try {
+      await ensureUiModules(view, importer);
+      await ensureUiModules(view, importer);
+      expect(calls).toHaveLength(1);
+      expect(uiModuleRefusalReason('@acme/apps')).toBe('no-install-export');
+      expect(isUiModuleAwaited('@acme/apps')).toBe(false);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('awaited before the host\'s first ui view and while importing; not once a view lists no module for the package', async () => {
+    expect(isUiModuleAwaited('@acme/apps')).toBe(true);
+    let release: (() => void) | undefined;
+    const importer = (): Promise<Record<string, unknown>> => new Promise((r) => { release = () => r({ installAppsHostComponents: () => undefined }); });
+    const done = ensureUiModules(view, importer);
+    expect(isUiModuleAwaited('@acme/apps')).toBe(true);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    expect(isUiModuleAwaited('@acme/other')).toBe(false);
+    release!();
+    await done;
+    expect(isUiModuleAwaited('@acme/apps')).toBe(false);
+    await ensureUiModules({ modules: [], sheet: null, refused: [] });
+    expect(isUiModuleAwaited('@acme/gone')).toBe(false);
   });
 });

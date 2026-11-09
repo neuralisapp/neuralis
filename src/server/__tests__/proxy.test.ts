@@ -14,14 +14,18 @@
  * configured one pays no I/O per request once the state has latched.
  */
 
-import { readFileSync } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { APP_ORIGIN_FORWARD_HEADER, publishAppOriginForward } from '@neuralis/package-system/contracts';
 
 const fsMocks = vi.hoisted(() => ({ readdir: vi.fn<(dir: string) => Promise<string[]>>() }));
+// A throwaway data home: the session secret is a REAL file in it (`sessionSecretFile.ts`).
+const HOME = vi.hoisted(() => `${process.env.TMPDIR ?? '/tmp'}/nr-proxy-test-home-${process.pid}`);
 vi.mock('fs/promises', () => ({ readdir: fsMocks.readdir }));
 vi.mock('@neuralis/package-system/paths', () => ({
-  resolveNeuralisHome: () => ({ home: '/nr-proxy-test-home', appRoot: '/nr-proxy-test-home/app', projectsRoot: '/nr-proxy-test-home/projects' }),
+  resolveNeuralisHome: () => ({ home: HOME, appRoot: `${HOME}/app`, projectsRoot: `${HOME}/projects` }),
 }));
 
 import { proxy } from '../../proxy';
@@ -29,7 +33,10 @@ import { getSetupState } from '../init';
 
 const SANDBOX_PORT = '3102';
 const SETUP_STATE_SLOT = Symbol.for('@neuralis/host:setupState');
-const savedSecret = process.env.NEXTAUTH_SECRET;
+const secretFile = join(HOME, 'app', 'config', 'session-secret.key');
+const setSecret = (): void => { mkdirSync(join(HOME, 'app', 'config'), { recursive: true }); writeFileSync(secretFile, 'test-secret\n'); };
+const dropSecret = (): void => rmSync(secretFile, { force: true });
+afterAll(() => rmSync(HOME, { recursive: true, force: true }));
 
 function resetSetupLatch(): void {
   delete (globalThis as { [SETUP_STATE_SLOT]?: unknown })[SETUP_STATE_SLOT];
@@ -37,7 +44,7 @@ function resetSetupLatch(): void {
 
 /** A configured instance: the secret is set, one user record exists, and the state has latched. */
 async function latchConfigured(): Promise<void> {
-  process.env.NEXTAUTH_SECRET = 'test-secret';
+  setSecret();
   fsMocks.readdir.mockResolvedValue(['owner.json']);
   expect(await getSetupState()).toEqual({ configured: true });
 }
@@ -49,8 +56,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetSetupLatch();
-  if (savedSecret === undefined) delete process.env.NEXTAUTH_SECRET;
-  else process.env.NEXTAUTH_SECRET = savedSecret;
+  dropSecret();
 });
 
 function request(host: string, pathname: string): NextRequest {
@@ -64,6 +70,7 @@ function passedThrough(res: Response): boolean {
 
 afterEach(() => {
   delete process.env.NEURALIS_MCP_SANDBOX_PORT;
+  delete process.env.NEURALIS_MCP_SANDBOX_ORIGIN;
 });
 
 describe('proxy — the MCP sandbox-origin fence', () => {
@@ -99,6 +106,17 @@ describe('proxy — the MCP sandbox-origin fence', () => {
     expect(passedThrough(res)).toBe(true);
   });
 
+  it('a DECLARED sandbox origin is fenced by its host (a tunnel hostname has no port to compare)', async () => {
+    process.env.NEURALIS_MCP_SANDBOX_ORIGIN = 'https://sandbox.example.com';
+    for (const host of ['sandbox.example.com', 'SANDBOX.example.com']) {
+      const denied = await proxy(request(host, '/api/auth/session'));
+      expect(denied.status).toBe(404);
+      expect(passedThrough(await proxy(request(host, '/mcp-sandbox')))).toBe(true);
+    }
+    // Paired control: the app's own hostname behind the same edge passes.
+    expect(passedThrough(await proxy(request('app.example.com', '/api/auth/session')))).toBe(true);
+  });
+
   it('is a no-op when the sandbox port is unset — the request on that port passes', async () => {
     const res = await proxy(request(`localhost:${SANDBOX_PORT}`, '/api/auth/session'));
     expect(passedThrough(res)).toBe(true);
@@ -120,7 +138,7 @@ function expectGlobalSecurityHeaders(res: Response): void {
 
 describe('proxy — the setup-state fence', () => {
   it.each(['/api/packages/agent-core/agents', '/api/auth/session', '/api'])('answers %s with 503 JSON setup_required', async (pathname) => {
-    delete process.env.NEXTAUTH_SECRET;
+    dropSecret();
     const res = await proxy(request('localhost:3100', pathname));
     expect(passedThrough(res)).toBe(false);
     expect(res.status).toBe(503);
@@ -130,7 +148,7 @@ describe('proxy — the setup-state fence', () => {
   });
 
   it.each(['/', '/workspace', '/auth', '/_next/static/chunks/app.js'])('answers %s with the static setup page — no path, version or env value', async (pathname) => {
-    delete process.env.NEXTAUTH_SECRET;
+    dropSecret();
     const homeValue = '/srv/nr-home-value-7c41';
     const savedHome = process.env.NEURALIS_HOME;
     process.env.NEURALIS_HOME = homeValue;
@@ -149,7 +167,7 @@ describe('proxy — the setup-state fence', () => {
       expect(body).toContain('https://docs.neuralisapp.com/getting-started/installation#if-something-fails');
       expect(body).toContain('session secret');
       expect(body).not.toContain(homeValue);
-      expect(body).not.toContain('/nr-proxy-test-home');
+      expect(body).not.toContain(HOME);
       expect(body).not.toContain(HOST_VERSION);
       expect(body).not.toMatch(/\b\d+\.\d+\.\d+\b/);
       expect(body).not.toMatch(/<script|<link|src=/i);
@@ -164,7 +182,7 @@ describe('proxy — the setup-state fence', () => {
   });
 
   it('names the missing owner account when the secret is set but no user record exists', async () => {
-    process.env.NEXTAUTH_SECRET = 'test-secret';
+    setSecret();
     const res = await proxy(request('localhost:3100', '/workspace'));
     expect(res.status).toBe(503);
     const body = await res.text();
@@ -172,13 +190,27 @@ describe('proxy — the setup-state fence', () => {
     expect(body).toContain(FROZEN_DOCKER_RUN_LINE);
   });
 
+  it('a home an earlier release set up (owner, no secret file) names upgrade --apply and no setup command', async () => {
+    dropSecret();
+    fsMocks.readdir.mockResolvedValue(['owner.json']);
+    const res = await proxy(request('localhost:3100', '/workspace'));
+    expect(res.status).toBe(503);
+    expectGlobalSecurityHeaders(res);
+    const body = await res.text();
+    expect(body).toContain('data-neuralis-state="upgrade-required"');
+    expect(body).toContain('<pre>neuralis upgrade --apply</pre>');
+    expect(body).not.toMatch(/setup/i);
+    expect(body).not.toContain(HOME);
+    expect(body).not.toMatch(/<script|<link|src=/i);
+  });
+
   it('passes /api/health to its route, which reports the state itself', async () => {
-    delete process.env.NEXTAUTH_SECRET;
+    dropSecret();
     expect(passedThrough(await proxy(request('localhost:3100', '/api/health')))).toBe(true);
   });
 
   it('the sandbox fence still answers first on the sandbox port', async () => {
-    delete process.env.NEXTAUTH_SECRET;
+    dropSecret();
     process.env.NEURALIS_MCP_SANDBOX_PORT = SANDBOX_PORT;
     const res = await proxy(request(`localhost:${SANDBOX_PORT}`, '/workspace'));
     expect(res.status).toBe(404);
@@ -195,5 +227,203 @@ describe('proxy — the setup-state fence', () => {
       }
     }
     expect(fsMocks.readdir).not.toHaveBeenCalled();
+  });
+});
+
+describe('proxy — the app-origin forward', () => {
+  const MARKER = 'a'.repeat(64);
+  const TARGET = 'http://127.0.0.1:3101';
+  beforeEach(async () => {
+    await latchConfigured();
+    publishAppOriginForward({ paths: ['/oauth/authorize', '/oauth/agents', '/ws/terminal/', '/ws/host-terminal/'], marker: MARKER, target: TARGET });
+  });
+  afterEach(() => publishAppOriginForward(null));
+
+  function rewrittenTo(res: Response): string | null {
+    return res.headers.get('x-middleware-rewrite');
+  }
+
+  it('P1 — a declared path is rewritten to the companion server on loopback with the marker SET over a client copy', async () => {
+    const req = new NextRequest('http://localhost:3100/oauth/authorize?client_id=c&state=a%2Fb', {
+      headers: { host: 'localhost:3100', [APP_ORIGIN_FORWARD_HEADER]: 'forged', cookie: 'next-auth.session-token=x' },
+    });
+    const res = (await proxy(req)) as Response;
+    expect(rewrittenTo(res)).toBe(`${TARGET}/oauth/authorize?client_id=c&state=a%2Fb`);
+    expect(res.headers.get('x-middleware-override-headers')?.split(',')).toContain(APP_ORIGIN_FORWARD_HEADER);
+    expect(res.headers.get(`x-middleware-request-${APP_ORIGIN_FORWARD_HEADER}`)).toBe(MARKER);
+    // The cookie travels on: the companion authenticates the browser with it.
+    expect(res.headers.get('x-middleware-request-cookie')).toBe('next-auth.session-token=x');
+  });
+
+  it('P1 — a declared PREFIX forwards what is under it, never the bare prefix or a sibling name', async () => {
+    expect(rewrittenTo((await proxy(request('localhost:3100', '/ws/terminal/s1?projectId=p'))) as Response)).toBe(`${TARGET}/ws/terminal/s1?projectId=p`);
+    expect(rewrittenTo((await proxy(request('localhost:3100', '/ws/host-terminal/s2'))) as Response)).toBe(`${TARGET}/ws/host-terminal/s2`);
+    for (const pathname of ['/ws/terminal/', '/ws/terminalx/s1', '/oauth/authorize/extra', '/oauth/authorizeX', '/oauth']) {
+      const res = (await proxy(request('localhost:3100', pathname))) as Response;
+      expect(rewrittenTo(res), pathname).toBeNull();
+      expect(passedThrough(res), pathname).toBe(true);
+    }
+  });
+
+  it('P2 — the sandbox origin forwards nothing: a declared path answers its 404', async () => {
+    process.env.NEURALIS_MCP_SANDBOX_PORT = SANDBOX_PORT;
+    const res = (await proxy(request(`localhost:${SANDBOX_PORT}`, '/oauth/authorize'))) as Response;
+    expect(res.status).toBe(404);
+    expect(rewrittenTo(res)).toBeNull();
+  });
+
+  it('P3 — while the MCP origin differs from the app origin (the published set carries no issuer path), bearer endpoints, discovery, /mcp and the device link are not forwarded', async () => {
+    for (const pathname of ['/oauth/token', '/oauth/register', '/oauth/revoke', '/oauth/jwks.json', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/mcp', '/mcp', '/ws/device-link']) {
+      const res = (await proxy(request('localhost:3100', pathname))) as Response;
+      expect(rewrittenTo(res), pathname).toBeNull();
+      expect(passedThrough(res), pathname).toBe(true);
+    }
+  });
+
+  it('one address: with the issuer paths published, /mcp, the token and discovery endpoints and the device link forward with the marker; /mcp-sandbox and the sandbox origin still do not', async () => {
+    publishAppOriginForward({
+      paths: ['/oauth/authorize', '/mcp', '/oauth/token', '/oauth/register', '/oauth/revoke', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/', '/.well-known/jwks.json', '/ws/device-link'],
+      marker: MARKER,
+      target: TARGET,
+    });
+    for (const pathname of ['/mcp', '/oauth/token', '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-protected-resource', '/.well-known/jwks.json', '/ws/device-link']) {
+      const res = (await proxy(request('localhost:3100', pathname))) as Response;
+      expect(rewrittenTo(res), pathname).toBe(`${TARGET}${pathname}`);
+      expect(res.headers.get(`x-middleware-request-${APP_ORIGIN_FORWARD_HEADER}`), pathname).toBe(MARKER);
+    }
+    for (const pathname of ['/mcp-sandbox', '/mcp/x', '/mcpx']) {
+      expect(rewrittenTo((await proxy(request('localhost:3100', pathname))) as Response), pathname).toBeNull();
+    }
+    process.env.NEURALIS_MCP_SANDBOX_PORT = SANDBOX_PORT;
+    expect(((await proxy(request(`localhost:${SANDBOX_PORT}`, '/mcp'))) as Response).status).toBe(404);
+  });
+
+  it('P4 — /mcp-sandbox is not captured by the forward', async () => {
+    const res = (await proxy(request('localhost:3100', '/mcp-sandbox'))) as Response;
+    expect(rewrittenTo(res)).toBeNull();
+    expect(passedThrough(res)).toBe(true);
+  });
+
+  it('before the companion server publishes, a declared path passes to Next untouched (its 404)', async () => {
+    publishAppOriginForward(null);
+    const res = (await proxy(request('localhost:3100', '/oauth/authorize'))) as Response;
+    expect(rewrittenTo(res)).toBeNull();
+    expect(passedThrough(res)).toBe(true);
+  });
+
+  it('an unconfigured instance forwards nothing — the setup fence answers first', async () => {
+    resetSetupLatch();
+    dropSecret();
+    fsMocks.readdir.mockResolvedValue([]);
+    const res = (await proxy(request('localhost:3100', '/oauth/authorize'))) as Response;
+    expect(res.status).toBe(503);
+    expect(rewrittenTo(res)).toBeNull();
+  });
+});
+
+describe('proxy — another loopback spelling of a loopback APP_URL is redirected to it (document navigations only)', () => {
+  beforeEach(latchConfigured);
+  afterEach(() => { delete process.env.APP_URL; delete process.env.NEXTAUTH_URL; });
+  const NAV = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  function nav(host: string, path: string, headers: Record<string, string> = NAV, method = 'GET'): NextRequest {
+    return new NextRequest(`http://${host}${path}`, { method, headers: { host, ...headers } });
+  }
+
+  it('127.0.0.1 → the configured localhost spelling, path and query kept, 308, no-store', async () => {
+    process.env.APP_URL = 'http://localhost:3100';
+    const res = (await proxy(nav('127.0.0.1:3100', '/workspace?p=1'))) as Response;
+    expect(res.status).toBe(308);
+    expect(res.headers.get('location')).toBe('http://localhost:3100/workspace?p=1');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(((await proxy(nav('[::1]:3100', '/'))) as Response).headers.get('location')).toBe('http://localhost:3100/');
+    expect(((await proxy(nav('127.0.0.1:3100', '/', NAV, 'HEAD'))) as Response).status).toBe(308);
+  });
+
+  it('the reverse: a native APP_URL on 127.0.0.1 takes localhost to it; sec-fetch-dest alone is enough', async () => {
+    process.env.APP_URL = 'http://127.0.0.1:3104';
+    const res = (await proxy(nav('localhost:3104', '/auth', { 'sec-fetch-dest': 'document' }))) as Response;
+    expect(res.status).toBe(308);
+    expect(res.headers.get('location')).toBe('http://127.0.0.1:3104/auth');
+  });
+
+  it('untouched: fetches, sockets, no Sec-Fetch headers, the configured spelling, another port, a non-loopback APP_URL, a write', async () => {
+    process.env.APP_URL = 'http://localhost:3100';
+    for (const req of [
+      nav('127.0.0.1:3100', '/api/packages/x', { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }),
+      nav('127.0.0.1:3100', '/ws/terminal/s1', { 'sec-fetch-mode': 'websocket', 'sec-fetch-dest': 'websocket' }),
+      nav('127.0.0.1:3100', '/workspace', {}),
+      nav('localhost:3100', '/workspace'),
+      nav('127.0.0.1:3101', '/workspace'),
+      nav('127.0.0.1:3102', '/mcp-sandbox'),
+    ]) {
+      const res = (await proxy(req)) as Response;
+      expect(res.status, req.url).not.toBe(308);
+    }
+    process.env.APP_URL = 'http://192.168.1.20:3100';
+    expect(((await proxy(nav('localhost:3100', '/workspace'))) as Response).status).not.toBe(308);
+  });
+});
+
+describe('proxy — the cookie-request boundary gate (non-GET needs the app origin)', () => {
+  beforeEach(latchConfigured);
+  afterEach(() => { delete process.env.APP_URL; });
+
+  function write(method: string, pathname: string, headers: Record<string, string>): NextRequest {
+    return new NextRequest(`http://localhost:3100${pathname}`, {
+      method,
+      headers: { host: 'localhost:3100', 'content-type': 'text/plain', ...headers },
+      ...(method === 'GET' || method === 'HEAD' ? {} : { body: '{"name":"x"}' }),
+    });
+  }
+  const COOKIE = { cookie: 'next-auth.session-token=abc' };
+
+  it.each([
+    ['the MCP-Apps sandbox port', 'http://localhost:3102'],
+    ['the companion address (the desktop stream document)', 'http://localhost:3101'],
+    ['a tunnel sibling name', 'https://sandbox.example.com'],
+    ['a foreign page', 'https://evil.example'],
+    ['`null`', 'null'],
+  ])('PoC — a text/plain JSON POST with the session cookie from %s is refused before any route', async (_label, origin) => {
+    for (const pathname of ['/api/packages/agent-core/agents', '/api/admin/users', '/api/projects', '/api/oauth/callback', '/api/invite/accept']) {
+      const res = (await proxy(write('POST', pathname, { ...COOKIE, origin }))) as Response;
+      expect(res.status, `${origin} ${pathname}`).toBe(403);
+      expect(await res.json()).toEqual({ error: 'cross_origin_refused' });
+    }
+  });
+
+  it('every mutating verb is covered; a cookie request with NO Origin and no Sec-Fetch-Site is refused too', async () => {
+    for (const method of ['PUT', 'PATCH', 'DELETE']) {
+      expect(((await proxy(write(method, '/api/packages/agent-core/agents/a1', { ...COOKIE, origin: 'http://localhost:3102' }))) as Response).status).toBe(403);
+    }
+    expect(((await proxy(write('POST', '/api/packages/agent-core/agents', COOKIE))) as Response).status).toBe(403);
+    expect(((await proxy(write('POST', '/api/packages/agent-core/agents', { cookie: '__Secure-next-auth.session-token=abc', origin: 'https://evil.example' }))) as Response).status).toBe(403);
+  });
+
+  it('paired controls: the app origin, a same-origin fetch on another spelling, a bearer call without the cookie, a webhook, GET and OPTIONS pass', async () => {
+    const passes = async (req: NextRequest) => passedThrough((await proxy(req)) as Response);
+    expect(await passes(write('POST', '/api/packages/agent-core/agents', { ...COOKIE, origin: 'http://localhost:3100' }))).toBe(true);
+    expect(await passes(write('POST', '/api/packages/agent-core/agents', { ...COOKIE, origin: 'http://127.0.0.1:3100', 'sec-fetch-site': 'same-origin' }))).toBe(true);
+    expect(await passes(write('POST', '/api/packages/agent-core/agents', { authorization: 'Bearer nrs1.r.s', origin: 'https://evil.example' }))).toBe(true);
+    expect(await passes(write('POST', '/api/packages/agent-core/channels/webhook/telegram/x', { origin: 'https://api.telegram.org' }))).toBe(true);
+    expect(await passes(write('GET', '/api/packages/agent-core/agents', { ...COOKIE, origin: 'https://evil.example' }))).toBe(true);
+    expect(await passes(write('OPTIONS', '/api/packages/agent-core/agents', { ...COOKIE, origin: 'https://evil.example' }))).toBe(true);
+  });
+
+  it('the trusted app origin is APP_URL when declared — a request on the declared address passes, the loopback default no longer does', async () => {
+    process.env.APP_URL = 'https://app.example.com';
+    const passes = async (origin: string) => passedThrough((await proxy(write('POST', '/api/projects', { ...COOKIE, origin }))) as Response);
+    expect(await passes('https://app.example.com')).toBe(true);
+    expect(await passes('http://localhost:3100')).toBe(false);
+  });
+
+  it('the forwarded consent POST from the app origin still reaches the companion', async () => {
+    publishAppOriginForward({ paths: ['/oauth/authorize'], marker: 'b'.repeat(64), target: 'http://127.0.0.1:3101' });
+    try {
+      const res = (await proxy(write('POST', '/oauth/authorize', { ...COOKIE, origin: 'http://localhost:3100' }))) as Response;
+      expect(res.headers.get('x-middleware-rewrite')).toBe('http://127.0.0.1:3101/oauth/authorize');
+      expect(((await proxy(write('POST', '/oauth/authorize', { ...COOKIE, origin: 'http://localhost:3101' }))) as Response).status).toBe(403);
+    } finally {
+      publishAppOriginForward(null);
+    }
   });
 });

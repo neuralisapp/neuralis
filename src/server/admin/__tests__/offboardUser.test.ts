@@ -16,7 +16,7 @@ let appRoot = await mkdtemp(join(tmpdir(), 'nrs-offboard-'));
 const roots: string[] = [appRoot];
 
 vi.mock('../../config/env', () => ({
-  getEnv: () => ({ appRoot, projectsRoot: join(appRoot, 'projects-data'), auth: { secret: 'test-secret' } }),
+  getEnv: () => ({ appRoot, projectsRoot: join(appRoot, 'projects-data') }),
 }));
 
 const audit = vi.hoisted(() => ({ rows: [] as Array<Record<string, unknown>> }));

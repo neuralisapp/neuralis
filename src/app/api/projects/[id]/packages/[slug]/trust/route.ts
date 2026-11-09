@@ -1,111 +1,35 @@
 /**
- * PUT /api/projects/:id/packages/:slug/trust
+ * PUT /api/projects/:id/packages/:package/trust
  *
- * Flip a user package's trust level. Storage stays in the platform zone
- * (`ProjectRecord.packageTrust`) so agents cannot self-elevate via `fs_write`.
+ * Pin a project package's trust, or clear the pin. The body — the FRESH
+ * `canManagePackages` floor, the package resolved from the host-stamped
+ * records and refused like an absent one outside the caller's write reach, the
+ * platform-zone write, the audit row and the reload — is the ONE shared
+ * `setProjectPackageTrust`, which the admin `project-packages` route reaches
+ * for the CLI and an agent's session. This route is its cookie door.
  *
- * Body: { trust: 'trusted' | 'untrusted' | null }
- *   - 'trusted' / 'untrusted' — pin an override
- *   - null — clear the override (revert to manifest default)
- *
- * After the write, the host reloads the package so the new trust level takes
- * effect in the running runtime (WASM memory caps, allowedHosts, etc.).
+ * Body: { trust: 'trusted' | 'untrusted' | null }   (null clears the pin)
  */
 
-import { canAccessScope } from '@neuralis/package-system/contracts';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/server/auth/session';
-import { getProjectById, setPackageTrust } from '@/server/store/ProjectStore';
-import { writeAuditLog } from '@/server/store/AuditStore';
-import { getPackageRuntimeManager } from '@/server/packages/PackageRuntimeManager';
-import { resolveProjectPackageInstance } from '@/server/packages/projectPackages';
-import { getLogger } from '@/server/logging/setup';
-import { canManagePackages, resolveProjectAccess } from '@/server/projects/access';
+import { setProjectPackageTrust } from '@/server/packages/rescanProjectPackages';
+import { packageOpResponse } from '@/server/packages/packageOpResponse';
 
 type Params = { params: Promise<{ id: string; slug: string }> };
 
 export async function PUT(req: NextRequest, { params }: Params): Promise<NextResponse> {
   const session = await requireSession().catch(() => null);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const { id: projectId, slug } = await params;
-  const project = await getProjectById(projectId);
-  if (!project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-
-  const access = await resolveProjectAccess(session.id, projectId);
-  if (!access || !canManagePackages(access)) {
-    return NextResponse.json(
-      { error: 'Forbidden: package management permission required' },
-      { status: 403 },
-    );
-  }
-
-  const body = await req.json().catch(() => null);
+  const { id: projectId, slug: packageId } = await params;
+  const body = (await req.json().catch(() => null)) as { trust?: unknown } | null;
   if (!body || !('trust' in body)) {
-    return NextResponse.json(
-      { error: 'Invalid body: { trust: "trusted" | "untrusted" | null } required' },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: 'Invalid body: { trust: "trusted" | "untrusted" | null } required' }, { status: 400 });
   }
-  const trust = body.trust as unknown;
-  if (trust !== 'trusted' && trust !== 'untrusted' && trust !== null) {
-    return NextResponse.json(
-      { error: 'Invalid trust value: must be "trusted", "untrusted", or null' },
-      { status: 400 },
-    );
-  }
-
-  // Verify the package actually exists in this project before writing trust.
-  const logger = getLogger().child('package-trust');
-  const record = await resolveProjectPackageInstance(projectId, slug);
-  if (!record?.packageRoot || !canAccessScope(record.ownerScope ?? { kind: 'project' }, access.session, 'write')) {
-    return NextResponse.json(
-      { error: `Package "${slug}" not found in project "${projectId}"` },
-      { status: 404 },
-    );
-  }
-
-  // First-party packages are immutable for trust (they live outside _packages/
-  // and this route can't reach them; still, refuse defensively).
-  const manifestTrust = record.definition.access?.trust;
-  if (manifestTrust === 'first-party') {
-    return NextResponse.json(
-      { error: 'Cannot change trust of a first-party package' },
-      { status: 400 },
-    );
-  }
-
-  // Write trust to ProjectRecord (platform zone).
-  const updated = await setPackageTrust(projectId, record.packageId, trust as 'trusted' | 'untrusted' | null);
-  if (!updated) {
-    return NextResponse.json({ error: 'Failed to persist trust' }, { status: 500 });
-  }
-
-  await writeAuditLog({
-    userId: session.id,
-    action: 'package.trust.change',
-    target: `${projectId}/${slug}`,
-    details: { trust, packageId: record.packageId },
-  });
-
-  // Reload so the loader picks up the new trust immediately (affects WASM limits,
-  // cross-package API gating, and allowedHosts).
-  let reloadError: string | undefined;
   try {
-    await getPackageRuntimeManager().reloadProjectPackage(projectId, slug);
+    const result = await setProjectPackageTrust(session.id, projectId, packageId, body.trust, { interactive: true });
+    return NextResponse.json({ ok: true, trust: result.trust, ...(result.reloadFailed ? { reloadWarning: 'reload-failed' } : {}) });
   } catch (err) {
-    reloadError = err instanceof Error ? err.message : String(err);
-    logger.warn('Package reload after trust change failed', {
-      projectId,
-      slug,
-      packageId: record.packageId,
-      error: reloadError,
-    });
+    return packageOpResponse(err, 'Failed to set trust');
   }
-
-  return NextResponse.json({
-    ok: true,
-    trust,
-    ...(reloadError ? { reloadWarning: 'reload-failed' } : {}),
-  });
 }

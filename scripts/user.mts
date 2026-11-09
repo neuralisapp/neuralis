@@ -10,7 +10,7 @@
  * owner's password lost. The boundary is the host shell itself — whoever runs
  * this can already read `.env` and the storage — so it asks no credentials (the
  * person it exists for has none that work); each mutation is confirmed by typing
- * the address again and audited with the operator's OS user name.
+ * the address again and audited with the operator's OS user name (`operatorName`).
  *
  * It writes through the same lifecycle body the admin routes use
  * (`src/server/admin/offboardUser.ts`): a reset bumps the session epoch, so the
@@ -35,6 +35,21 @@ const USAGE = `Usage:
   ${spell('user enable <email>')}
   ${spell('user reset-password <email>')}`;
 
+/**
+ * The operator an audit row names: the host user a container run was started
+ * by (`NEURALIS_OPERATOR`, set by the command line's image gate), else this
+ * process's user — `uid:<n>` when the uid has no passwd entry (a container run
+ * as the host's uid).
+ */
+export function operatorName(env: Readonly<Record<string, string | undefined>>, who: () => string = () => userInfo().username): string {
+  if (env.NEURALIS_OPERATOR) return env.NEURALIS_OPERATOR;
+  try {
+    return who();
+  } catch {
+    return `uid:${process.getuid?.() ?? 'unknown'}`;
+  }
+}
+
 async function confirm(email: string, action: string): Promise<boolean> {
   const typed = await askLine(`Type ${email} again to ${action}`);
   return typed.trim().toLowerCase() === email.trim().toLowerCase();
@@ -42,8 +57,8 @@ async function confirm(email: string, action: string): Promise<boolean> {
 
 export async function run(argv: string[], ctx: CliContext): Promise<number> {
   const [command, email] = argv;
-  // The store reads its root through the host env module, which requires the
-  // session secret; on the host shell that value lives in `.env`.
+  // The store reads its root through the host env module; on the host shell the
+  // data home is named in `.env`.
   await loadHostEnv(ctx.installDir);
 
   if (command === 'list') {
@@ -59,7 +74,7 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   if ((command !== 'enable' && command !== 'reset-password') || !email) throw new CliExit(1, 'user needs a command', USAGE.split('\n'));
   const user = await findUserByEmail(email);
   if (!user || user.status === 'deleted') throw new Error(`No user with email ${email}.`);
-  const actor: UserLifecycleActor = { kind: 'cli', operator: userInfo().username };
+  const actor: UserLifecycleActor = { kind: 'cli', operator: operatorName(ctx.env) };
 
   if (command === 'enable') {
     if (user.status === 'active') {
@@ -80,7 +95,7 @@ export async function run(argv: string[], ctx: CliContext): Promise<number> {
   console.log('  Sign-ins and MCP client tokens issued before the reset are refused at their next use.');
   console.log('  Connections already open (live updates, terminals, desktop streams, a running turn) are not');
   console.log('  closed from this shell; they end when the app process restarts:');
-  console.log('  `docker compose restart neuralis` in the host folder (a host-plane terminal ends with the broker).');
+  console.log('  `docker compose restart neuralis` in the host folder (a device-plane terminal ends with the broker).');
   console.log('  A reset made in the app closes them at once.');
   if (user.status === 'disabled') console.log('  The account is still disabled — run `enable` to let it sign in.');
   return 0;

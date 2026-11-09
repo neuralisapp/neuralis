@@ -169,7 +169,7 @@ export function canReceivePackageGrant(roleName: string, role: RoleDefinition): 
  * May a BUILTIN's `defaultRoleGrants` write onto this role, when the operator
  * adds the builtin after the project exists?
  *
- * A builtin is host-assigned first-party (deps membership is the trust act), so
+ * A builtin is host-assigned native (deps membership is the trust act), so
  * — exactly as at project creation — its grants may reach `admin`. Never a
  * `'*'` role (already holds every id) and never an APEX role (owner priority or
  * stronger): its grant list is the owner's own, and a system write onto it has
@@ -178,28 +178,6 @@ export function canReceivePackageGrant(roleName: string, role: RoleDefinition): 
 export function canReceiveBuiltinGrant(roleName: string, role: RoleDefinition): boolean {
   if (role.grantedFeatures.includes('*')) return false;
   return rolePriority(roleName, role.priority) > BUILTIN_ROLE_PRIORITY.owner;
-}
-
-/**
- * Does `userId` hold `feature` in AT LEAST ONE of `projects`?
- *
- * The documented non-`SessionContext` carve-out (sibling of
- * `isOwnerStrengthOfAnyProject`): a handful of host routes are cross-project by
- * construction and therefore have no single `session.projectId` to gate on. Uses
- * the ONE `hasFeature` predicate per project — no second copy of the gate.
- */
-export function hasPlatformFeatureInAnyProject(
-  userId: string,
-  projects: ProjectRecord[],
-  feature: string,
-): boolean {
-  return projects.some((p) => {
-    const member = p.members[userId];
-    if (!member) return false;
-    const role = p.roles[member.role];
-    if (!role) return false;
-    return hasProjectFeature(role, feature);
-  });
 }
 
 /** What a member-map write changed — the audit `details` of a membership write. */

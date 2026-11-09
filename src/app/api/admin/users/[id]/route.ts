@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
 import { requireAdmin, requireProjectFeature, type AdminContext } from '@/server/auth/adminGuard';
 import { resolveRequestProjectId } from '@/server/auth/requestProject';
 import { requireSession } from '@/server/auth/session';
@@ -7,7 +6,7 @@ import { getUserById, updateUser } from '@/server/store/UserStore';
 import { listAllProjects, updateProject } from '@/server/store/ProjectStore';
 import { canAssignRole, hasFeature, rolePriority } from '@neuralis/package-system/access';
 import { writeAuditLog } from '@/server/store/AuditStore';
-import { validatePasswordComplexity } from '@/server/auth/passwordPolicy';
+import { hashPassword, validatePasswordComplexity, verifyPassword } from '@/server/auth/passwordPolicy';
 import { beginLoginAttempt, recordLoginFailure, recordLoginSuccess } from '@/server/auth/rateLimit';
 import { resolveClientAddress } from '@/server/auth/requestClient';
 import { canGovernUserRecord, diffMemberMaps, type UserRecordVerb } from '@/server/projects/access';
@@ -82,7 +81,7 @@ export async function PATCH(request: Request, { params }: RouteParams): Promise<
         );
       }
       if (gate.waitMs > 0) await new Promise((resolve) => setTimeout(resolve, gate.waitMs));
-      const valid = await bcrypt.compare(body.currentPassword, target.passwordHash);
+      const valid = await verifyPassword(body.currentPassword, target.passwordHash);
       if (!valid) {
         recordLoginFailure(target.email, address);
         return NextResponse.json({ error: 'Incorrect current password' }, { status: 403 });
@@ -94,7 +93,7 @@ export async function PATCH(request: Request, { params }: RouteParams): Promise<
         return NextResponse.json({ error: check.reason }, { status: 400 });
       }
 
-      const hash = await bcrypt.hash(body.newPassword, 12);
+      const hash = await hashPassword(body.newPassword);
       await updateUser(id, { passwordHash: hash, mustChangePassword: false });
       return NextResponse.json({ ok: true });
     }

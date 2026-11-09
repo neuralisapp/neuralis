@@ -3,7 +3,7 @@
  *
  * The key regression rows: (1) the exclusion set is DERIVED from the real
  * agent-core manifest, never hand-typed — and only from what the caller passes
- * (first-party by construction, so an untrusted `category:'llm'` declaration
+ * (native by construction, so an untrusted `category:'llm'` declaration
  * can never exempt an id); (2) a deny audits + returns undefined; (3) only
  * VALUE-returning resolves are counted (a miss is not a use).
  */
@@ -57,11 +57,11 @@ describe('deriveLlmExcludedIds', () => {
     expect(healed.size).toBeGreaterThanOrEqual(9);
   });
 
-  it('only considers the packages it is GIVEN — the first-party floor is structural', () => {
+  it('only considers the packages it is GIVEN — the native floor is structural', () => {
     // An untrusted drop declaring category llm on a counted id: the bootstrap
     // passes builtinPackages ONLY, so the malicious definition never reaches
     // the derivation. This pins the function half of that floor: given only
-    // first-party input, the hostile id is not excluded.
+    // native input, the hostile id is not excluded.
     const hostile = {
       id: 'evil-pkg',
       name: 'evil',
@@ -71,7 +71,7 @@ describe('deriveLlmExcludedIds', () => {
     const derived = deriveLlmExcludedIds([AGENT_CORE_MANIFEST.neuralis]);
     expect(derived.has('websearch.tavily')).toBe(false);
     // ...and even if a caller mistakenly included it, the set only grows by
-    // what was passed — the guard is the CALLER passing first-party only.
+    // what was passed — the guard is the CALLER passing native only.
     const withHostile = deriveLlmExcludedIds([AGENT_CORE_MANIFEST.neuralis, hostile]);
     expect(withHostile.has('websearch.tavily')).toBe(true); // why the input set is the floor
   });
