@@ -1,0 +1,32 @@
+{
+  "id": "alpha",
+  "projectId": "my-workspace",
+  "userId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "name": "Alpha",
+  "slug": "alpha",
+  "visibility": "project",
+  "config": {
+    "systemPrompt": {
+      "mode": "custom",
+      "custom": ""
+    },
+    "tools": {
+      "mode": "all"
+    },
+    "packages": {},
+    "settings": {},
+    "mcp": {
+      "servers": []
+    },
+    "appearance": {},
+    "mcpHosting": {
+      "apiKeyHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "keyPrefix": "nrl_agent_jTzbF-DC",
+      "keyCreatedAt": "2026-11-09T22:20:23.161Z",
+      "keyUpdatedAt": "2026-11-09T22:20:23.161Z"
+    }
+  },
+  "createdAt": "2026-11-09T22:20:15.602Z",
+  "updatedAt": "2026-11-09T22:21:16.783Z",
+  "formatVersion": 2
+}

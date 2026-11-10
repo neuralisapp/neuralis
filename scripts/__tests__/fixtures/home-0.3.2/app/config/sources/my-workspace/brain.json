@@ -1,0 +1,29 @@
+{
+  "source": "brain",
+  "scope": {
+    "kind": "project"
+  },
+  "connection": {
+    "kind": "brain",
+    "config": {}
+  },
+  "permissions": {
+    "default": {
+      "read": true,
+      "write": true,
+      "exec": false
+    },
+    "byRole": {
+      "viewer": {
+        "write": false
+      }
+    },
+    "paths": []
+  },
+  "description": "Vector memory — semantic search across everything synced into the brain.",
+  "createdAt": "2026-11-09T22:18:07.722Z",
+  "updatedAt": "2026-11-09T22:18:07.722Z",
+  "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "declaredRepairVersion": 1,
+  "formatVersion": 2
+}

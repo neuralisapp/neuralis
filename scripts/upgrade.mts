@@ -27,6 +27,10 @@
  * `state: 'upgrading'` (with the `from` each kind starts at) → each module's
  * idempotent apply → state cleared LAST. An interrupted run is resumed by
  * running the same command again; it re-runs every step above that `from`.
+ * Every dry run reads the disk BEFORE any module applied: a step that decides on
+ * a shape an earlier step of the same run rewrites reads each record through
+ * that step's pure record function (`source-use-grants-v1` through
+ * `subjectRecordOf`), never the raw file.
  */
 
 import { existsSync } from 'node:fs';
@@ -226,6 +230,13 @@ export function upgradeRaisedNothing(output: string): boolean {
   return output.includes(NOTHING_TO_UPGRADE);
 }
 
+/** The marker an apply prints beside each module it resumes — an earlier run wrote, so its checkpoint is the way back. */
+const RESUMING_MARKER = ' (resuming)';
+
+export function upgradeResumed(output: string): boolean {
+  return output.includes(RESUMING_MARKER);
+}
+
 export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> {
   const verdict = await opts.offline();
   if (!verdict.offline) {
@@ -244,7 +255,7 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> 
   const blockers: string[] = [];
   const remedies = new Set<string>();
   for (const { module, pending: kinds, resuming } of selection) {
-    opts.log(`${module.id}: ${kinds.map((k) => `${k.kind} → v${k.to}`).join(', ')}${resuming ? ' (resuming)' : ''}`);
+    opts.log(`${module.id}: ${kinds.map((k) => `${k.kind} → v${k.to}`).join(', ')}${resuming ? RESUMING_MARKER : ''}`);
     const plan = await module.dryRun(ctx);
     for (const line of plan.summary) opts.log(`  ${line}`);
     for (const file of plan.files) files.add(file);

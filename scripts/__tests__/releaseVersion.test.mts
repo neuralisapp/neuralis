@@ -63,6 +63,7 @@ function fixtureTree(version = '0.1.0', localDep = LOCAL_DEP_LINE): string {
   write('neuralis/scripts/rebuild.mts', "const SIDECAR_REPOSITORY = 'neuralisapp/mcp-sidecar';\n");
   write('neuralis/.env.example', `# Webtop image\nNEURALIS_MACHINE_IMAGE=neuralisapp/webtop-ubuntu-xfce:${version}\n`);
   write('web/docs/app/(home)/widgets.tsx', `export const install = { command: 'docker pull neuralisapp/neuralis:${version}' };\n`);
+  write('web/docs/lib/shared.ts', `export const repoUrl = 'https://github.com/neuralisapp/neuralis';\n\nconst desktopVersion = '${version}';\n`);
   write('neuralis/README.md', `# Neuralis\n\nThe Neuralis ${version} beta is available.\n`);
   // The first-install block names `latest` and an image-only update names no
   // version (`neuralis update` reads the release line): neither is a site.
@@ -90,7 +91,7 @@ describe('release:version --check', () => {
     const root = fixtureTree();
     const result = run('--check', '--root', root);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('28 site(s) coherent');
+    expect(result.stdout).toContain('29 site(s) coherent');
     expect(result.stdout).toContain('neuralis/README.md:3');
   });
 
@@ -130,10 +131,10 @@ describe('release:version --check', () => {
 describe('release:version <semver>', () => {
   it('rewrites every site to the new version, leaves every other byte alone', () => {
     const root = fixtureTree();
-    const before = new Map(['neuralis/package.json', 'packages/agent-core/package.json', 'neuralis/scripts/setup.mts', 'neuralis/scripts/rebuild.mts', 'neuralis/README.md', 'neuralis/.env.example', 'web/docs/app/(home)/widgets.tsx', 'neuralis/skills/neuralis-operations/SKILL.md'].map((f) => [f, read(root, f)]));
+    const before = new Map(['neuralis/package.json', 'packages/agent-core/package.json', 'neuralis/scripts/setup.mts', 'neuralis/scripts/rebuild.mts', 'neuralis/README.md', 'neuralis/.env.example', 'web/docs/app/(home)/widgets.tsx', 'web/docs/lib/shared.ts', 'neuralis/skills/neuralis-operations/SKILL.md'].map((f) => [f, read(root, f)]));
     const { written, problems } = bumpVersion(root, '0.2.0-rc.1');
     expect(problems).toEqual([]);
-    expect(written).toHaveLength(19); // 9 manifests + the desktop app's + 2 marketplaces + the Codex plugin manifest + config.ts + setup.mts + .env.example + widgets.tsx + 2 pages (convert blocks; the updating page's clone target); rebuild.mts is derived
+    expect(written).toHaveLength(20); // 9 manifests + the desktop app's + 2 marketplaces + the Codex plugin manifest + config.ts + setup.mts + .env.example + widgets.tsx + shared.ts + 2 pages (convert blocks; the updating page's clone target); rebuild.mts is derived
     expect(checkCoherence(root)).toMatchObject({ version: '0.2.0-rc.1', drift: [] });
     // Exactly the version literals moved: the `file:` line, the nested key, the
     // derived site and the prose are byte-identical once the old version is mapped.

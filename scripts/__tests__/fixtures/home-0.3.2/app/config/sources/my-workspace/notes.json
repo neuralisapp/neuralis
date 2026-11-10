@@ -1,0 +1,75 @@
+{
+  "source": "notes",
+  "scope": {
+    "kind": "project"
+  },
+  "connection": {
+    "kind": "local",
+    "config": {
+      "root": "/tmp/up041-notes"
+    }
+  },
+  "permissions": {
+    "default": {
+      "read": true,
+      "write": true,
+      "exec": false
+    },
+    "paths": [
+      {
+        "pattern": "notes://secret/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "notes://secret/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "notes://team/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "member"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "notes://mia/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        },
+        "users": [
+          "b921accd-f061-406d-8094-75795b03ce5a"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "notes://ro/**",
+        "permissions": {
+          "write": false
+        },
+        "roles": [
+          "admin"
+        ]
+      }
+    ]
+  },
+  "recognizesPackages": true,
+  "createdAt": "2026-11-09T22:20:34.684Z",
+  "updatedAt": "2026-11-09T22:20:46.539Z",
+  "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "formatVersion": 2
+}

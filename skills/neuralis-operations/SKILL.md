@@ -141,7 +141,7 @@ stopped:
 
 ```bash
 docker compose stop neuralis
-npx --yes create-neuralis@0.4.0 convert .   # the new layout; your .env, compose files and package lines stay
+npx --yes create-neuralis@0.4.1 convert .   # the new layout; your .env, compose files and package lines stay
 neuralis update --apply                 # the latest release: image tag + companions, then the stack steps of `update --apply`
 ```
 

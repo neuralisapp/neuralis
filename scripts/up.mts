@@ -32,8 +32,10 @@
  * external mode with a recorded install folder, that folder's vector-store
  * service through the one starter (`ensureCompanion`: `up -d --no-deps
  * <vectorstore>` — never the Docker app's service), then a bounded wait for its
- * `/healthz` and one keyed request (a refused key starts the host with
- * in-memory vectors, and the `ready` line says so) → the host → the sandbox
+ * `/healthz` and one keyed request (a store that does not answer or refuses the
+ * key still starts the host, and the `ready` line says so; one this run could
+ * not start is started again on the optional-companion cadence until it
+ * answers) → the host → the sandbox
  * pipe → `/api/health` 200 carrying this run's instance id. When this run
  * stops, this home's OWN Qdrant in Docker (docker mode) is stopped after the
  * host (`stopCompanion`, bounded); the Docker install's (external mode) keeps
@@ -466,6 +468,9 @@ const VECTORSTORE_STOP_BOUND_MS = 20_000;
 /** An optional child (Ollama, the tunnel connector) is retried forever, at most once per this long. */
 const OPTIONAL_RETRY_MAX_MS = 30_000;
 
+/** The optional-companion cadence: the restart delays first, then once per `OPTIONAL_RETRY_MAX_MS`. */
+const optionalRetryMs = (backoffMs: readonly number[], attempt: number): number => Math.min(backoffMs[attempt] ?? OPTIONAL_RETRY_MAX_MS, OPTIONAL_RETRY_MAX_MS);
+
 /** The request file `neuralis down` writes on Windows: the supervisor's id and the lock's stop nonce. */
 export const STOP_REQUEST_FILE = 'host.stop';
 
@@ -726,7 +731,7 @@ export async function runUp(input: {
         exited = true;
         if (run.stopped) { settle(); return; }
         const exitCode = code ?? (signal ? 128 : 1);
-        const delay = optional ? Math.min(deps.backoffMs[deaths] ?? OPTIONAL_RETRY_MAX_MS, OPTIONAL_RETRY_MAX_MS) : deps.backoffMs[deaths];
+        const delay = optional ? optionalRetryMs(deps.backoffMs, deaths) : deps.backoffMs[deaths];
         deaths += 1;
         if (optional) {
           // Never a host state: the host keeps serving while its companion comes back.
@@ -827,12 +832,50 @@ export async function runUp(input: {
     say(ok ? `The embedding model ${OLLAMA_EMBEDDING_TAG} is ready.` : `The embedding model ${OLLAMA_EMBEDDING_TAG} could not be fetched; \`ollama pull ${OLLAMA_EMBEDDING_TAG}\` fetches it by hand.`);
   };
 
-  // 5. Qdrant first: the host decides its vector backend once, at boot.
+  // 5. Qdrant first, so the host finds its vector store at boot. A configured store that does not
+  // answer is still the host's store: the host serves without it and joins it when it answers;
+  // in-memory vectors exist only where no Qdrant is configured.
   let qdrantDone: Promise<void> = Promise.resolve();
   let vectors: { store: 'qdrant' | 'memory'; reason?: 'configured' | 'unreachable' | 'unauthorized' } = config.qdrant.url ? { store: 'qdrant' } : { store: 'memory', reason: 'configured' };
   const vectorsUnreachable = (url: string, waited: boolean): void => {
-    vectors = { store: 'memory', reason: 'unreachable' };
-    say(`Qdrant did not answer on ${url}${waited ? ` within ${Math.round(deps.readyTimeoutMs / 1000)} s` : ''}; the host starts with in-memory vectors until it is restarted.`);
+    vectors = { store: 'qdrant', reason: 'unreachable' };
+    say(`Qdrant did not answer on ${url}${waited ? ` within ${Math.round(deps.readyTimeoutMs / 1000)} s` : ''}; the host starts, and search and indexing continue by themselves when the vector store answers.`);
+  };
+  const keyRefused = (url: string): void => {
+    vectors = { store: 'qdrant', reason: 'unauthorized' };
+    say(`Qdrant on ${url} refuses this app's key (QDRANT_API_KEY in ${join(configDir, '.env')}); the host starts, and search and indexing stay unavailable until the key matches. \`neuralis setup --native --yes --refresh-qdrant\` reads the Docker install's key again; the next start uses it.`);
+  };
+  /**
+   * A vector store this run could not bring up at start: one `/healthz` probe and,
+   * while it does not answer, one start of its service per step on the
+   * optional-companion cadence, until it answers, refuses the key or the run stops.
+   * The stop wakes the pending step, and the stop path joins this before it stops the store.
+   */
+  let vectorRetryDone: Promise<void> = Promise.resolve();
+  let wakeVectorRetry: () => void = () => {};
+  const retryVectorStore = async (url: string, dir: string, startFailure: string): Promise<void> => {
+    say(`Neuralis keeps starting the vector store in ${dir} until it answers.`);
+    let lastFailure = startFailure;
+    for (let attempt = 0; !run.stopped; attempt += 1) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, optionalRetryMs(deps.backoffMs, attempt));
+        wakeVectorRetry = () => { clearTimeout(timer); resolve(); };
+      });
+      if (run.stopped) return;
+      if (await deps.qdrantUp(url)) {
+        if ((await deps.qdrantKey(url, config.env.QDRANT_API_KEY?.trim() || undefined)) === 'unauthorized') keyRefused(url);
+        else {
+          vectors = { store: 'qdrant' };
+          say(`Qdrant answers on ${url} now; the host's search and indexing continue by themselves.`);
+        }
+        return;
+      }
+      if (run.stopped) return;
+      const start = await deps.companion(dir, 'vectorstore');
+      if (start.ok && start.started) say(`Started ${start.service} in ${dir}.`);
+      else if (!start.ok && start.reason !== lastFailure) say(`The vector store in ${dir} did not start: ${start.reason}.`);
+      lastFailure = start.ok ? '' : start.reason;
+    }
   };
   if (spec) {
     mkdirSync(spec.cwd, { recursive: true });
@@ -851,10 +894,11 @@ export async function runUp(input: {
     // Waited for only when its service runs (or was just started); a failed start or no folder: one probe.
     const waits = start?.ok === true;
     const answered = waits ? await until(() => deps.qdrantUp(url), deps.readyTimeoutMs, deps.pollMs, () => run.stopped) : await deps.qdrantUp(url);
-    if (!answered && !run.stopped) vectorsUnreachable(url, waits);
-    else if (answered && (await deps.qdrantKey(url, config.env.QDRANT_API_KEY?.trim() || undefined)) === 'unauthorized') {
-      vectors = { store: 'memory', reason: 'unauthorized' };
-      say(`Qdrant on ${url} refuses this app's key (QDRANT_API_KEY in ${join(configDir, '.env')}); the host starts with in-memory vectors. \`neuralis setup --native --yes --refresh-qdrant\` reads the Docker install's key again.`);
+    if (!answered && !run.stopped) {
+      vectorsUnreachable(url, waits);
+      if (dir) vectorRetryDone = retryVectorStore(url, dir, start && !start.ok ? start.reason : '');
+    } else if (answered && (await deps.qdrantKey(url, config.env.QDRANT_API_KEY?.trim() || undefined)) === 'unauthorized') {
+      keyRefused(url);
     }
   }
 
@@ -893,13 +937,16 @@ export async function runUp(input: {
   }
 
   await stopRequested;
+  wakeVectorRetry();
   // Stop: the tunnel first (no new remote requests), the host (its own shutdown drains in-flight turns), Ollama, Qdrant, then the pipe.
   await stopChild(tunnel, deps.stopTimeoutMs);
   await stopChild(host, deps.stopTimeoutMs);
   await stopChild(ollama, deps.stopTimeoutMs);
   await stopChild(qdrant, deps.stopTimeoutMs);
   if (config.ollama.mode === 'docker' && config.ollama.composeDir) await boundedStop(config.ollama.composeDir, 'embeddings');
-  // This home's own Qdrant in Docker stops with it — never the Docker install's (external mode), never `down`.
+  // This home's own Qdrant in Docker stops with it — never the Docker install's (external mode), never `down`;
+  // after a start still in flight from the retry, so nothing starts it again behind the stop.
+  await vectorRetryDone;
   if (config.qdrant.mode === 'docker' && config.qdrant.composeDir) await boundedStop(config.qdrant.composeDir, 'vectorstore');
   await Promise.all([hostDone, qdrantDone, ...companionsDone]);
   await new Promise<void>((resolve) => (pipe ? pipe.close(() => resolve()) : resolve()));

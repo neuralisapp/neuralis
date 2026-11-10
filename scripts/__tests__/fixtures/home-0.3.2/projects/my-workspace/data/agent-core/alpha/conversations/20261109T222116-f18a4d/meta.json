@@ -1,0 +1,13 @@
+{
+  "id": "20261109T222116-f18a4d",
+  "userId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "projectId": "my-workspace",
+  "agentId": "alpha",
+  "title": "Owner chat",
+  "participantUserIds": [
+    "d2bc7c36-19ba-4230-b279-2573b523de80"
+  ],
+  "createdAt": "2026-11-09T22:21:16.806Z",
+  "updatedAt": "2026-11-09T22:21:16.819Z",
+  "formatVersion": 2
+}

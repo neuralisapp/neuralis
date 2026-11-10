@@ -36,8 +36,9 @@ adopted Docker home uses that install's Qdrant (`external`: its loopback URL, ke
 from the install the home records — the one thing the adopt reads outside the home), and `up` starts
 only its vector store there, never the Docker app. `--qdrant binary` gives the app its own store,
 `--copy-vectors` copies the Docker vectors into it (cold and counted, the Docker app stopped, the same
-Qdrant version), `--refresh-qdrant` follows a changed key or port; a refused key starts the host with
-in-memory vectors and the `ready` line says so. `--no-desktop` leaves the virtual desktop off (on with
+Qdrant version), `--refresh-qdrant` follows a changed key or port; a store that does not answer or refuses the key
+still starts the host (search and indexing wait for it), and the `ready` line says so: `vectors: "qdrant"`
+with `vectorsReason: "unreachable"` or `"unauthorized"` (`"memory"` only with `"configured"`). `--no-desktop` leaves the virtual desktop off (on with
 Docker by default; `setup-and-compose.md` §What `neuralis setup` writes). The mode table, its refusals and the copy:
 §Adopting a Docker home, below.
 
@@ -83,7 +84,7 @@ whose folder still is that install) — the ONE thing the adopt reads outside th
 
 | Docker install | The desktop `.env` |
 |---|---|
-| `docker` | `external`: `http://127.0.0.1:<NEURALIS_QDRANT_PORT>`, its `QDRANT_API_KEY`, `NEURALIS_QDRANT_COMPOSE_DIR=<its folder>` — `up` runs `docker compose -p <project> up -d --no-deps <vectorstore>` there when it is down and waits for `/healthz`; it never starts the app's service and never stops the Qdrant |
+| `docker` | `external`: `http://127.0.0.1:<NEURALIS_QDRANT_PORT>`, its `QDRANT_API_KEY`, `NEURALIS_QDRANT_COMPOSE_DIR=<its folder>` — `up` runs `docker compose -p <project> up -d --no-deps <vectorstore>` there when it is down and waits for `/healthz`, and while it does not answer starts it again (one probe and one start per step, at most once per 30 s); it never starts the app's service and never stops the Qdrant |
 | `external` | `external`: its `QDRANT_URL` and key, no folder |
 | `skip` | `skip`: vectors in memory |
 | `binary` | refused: its store is `<home>/qdrant-storage`, the files the desktop's own binary would open |
@@ -101,7 +102,7 @@ and the bundle's binary on the copy must answer the same counts — a different 
 fails moves the copy aside as `qdrant-storage.failed-<time>` and names it. `--estimate-copy` prints the
 volume's size and the free space as one JSON line and writes nothing. `--refresh-qdrant` (a home
 already adopted) rewrites only the Qdrant lines from the recorded install again — a rotated key or a
-moved port; until then the host runs with in-memory vectors (`vector.qdrant.unauthorized` in its log,
+moved port; until then the host runs without search and indexing (`vector.qdrant.unauthorized` in its log,
 `vectorsReason: unauthorized` on `up`'s `ready` line). A recorded `qdrant-version.json` is left as it
 is: it describes the Docker volume's store, and a binary copy shares it — a Docker `qdrant-upgrade`
 does not move the copy.

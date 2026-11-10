@@ -9,9 +9,13 @@
 # Refresh (deliberately, as its own commit, with the new digests recorded):
 #   docker buildx imagetools inspect node:26-alpine3.24 | grep Digest
 #   docker buildx imagetools inspect alpine:3.24        | grep Digest
-# Digests taken 2026-09-24 (manifest lists — multi-arch safe). The base and the
-# helper stages share one alpine release.
-FROM node:26-alpine3.24@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS base
+# Digests taken 2026-11-10 (manifest lists — multi-arch safe; the base is Node
+# 26.13.0). The base and the helper stages share one alpine release. The
+# `landlock-dl` stage alone stays on the 2026-09-24 alpine digest: its output
+# `nrs-sandboxer` is byte-pinned per architecture in
+# `packages/cli/native/manifest.json`, so its base moves only together with
+# that manifest (`node packages/cli/scripts/native.mjs collect`).
+FROM node:26-alpine3.24@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS base
 # pnpm at EXACTLY the version the repo pins (root package.json `packageManager`;
 # packages/package-system/test/packagingDrift.test.ts holds the two equal).
 # Node 25+ ships no corepack, and the runner inherits this binary, so a pnpm call
@@ -26,7 +30,7 @@ RUN npm install -g --allow-scripts=pnpm pnpm@${PNPM_VERSION} && pnpm --version
 # Runs as a dedicated stage so the binary is fetched once and COPY'd into the
 # runner. Any failure here (network, checksum mismatch, arch support) fails the
 # image build loudly — no silent fallback.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS extism-js-dl
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS extism-js-dl
 ARG EXTISM_JS_VERSION=v1.7.0
 ARG TARGETARCH
 RUN apk add --no-cache curl ca-certificates && \
@@ -49,7 +53,7 @@ RUN apk add --no-cache curl ca-certificates && \
 # checksums are PINNED here (recorded from the release's .sha256 assets), so a
 # replaced release asset fails the build. Ships only the two binaries we
 # actually need into the runner.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS binaryen-dl
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS binaryen-dl
 ARG BINARYEN_VERSION=version_133
 ARG BINARYEN_SHA256_X86_64=2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
 ARG BINARYEN_SHA256_AARCH64=89c07ea56faf38d0fbecf36ca8ec0721756716185f265b568e133d427f299bf8
@@ -501,7 +505,8 @@ RUN chmod 1777 /neuralis
 
 USER nextjs
 
-# /api/health is 200 only for a configured, ready instance (503 `setup_required` before setup).
+# /api/health is 200 only for a configured, ready instance that serves — a package reporting
+# `degraded` included — and 503 before setup (`setup_required`), while starting, or failed.
 # A compose `healthcheck:` overrides this; it covers a container started without compose.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=50s --retries=3 CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3100}/api/health" || exit 1
 

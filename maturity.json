@@ -325,7 +325,7 @@
       "label": "preview",
       "score": 60,
       "gates": [],
-      "summary": "Neuralis runs on your own computer without Docker: one window with a tray, the same host the image runs, its vector store and this computer as your device, with installers for Windows, Linux and macOS.",
+      "summary": "Neuralis runs on your own computer without Docker: one window of tabs with a tray, the same host the image runs, its vector store and this computer as your device, with installers for Windows, Linux and macOS.",
       "limits": [
         "The installers and the self-update have not been run from a published release on a clean machine yet.",
         "The Windows and macOS builds are unsigned, and the macOS build is a preview that has not run on an installed Mac.",

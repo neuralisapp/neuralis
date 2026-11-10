@@ -1,0 +1,695 @@
+{
+  "source": "data",
+  "scope": {
+    "kind": "project"
+  },
+  "connection": {
+    "kind": "local",
+    "config": {
+      "root": "data",
+      "hostRoot": "/tmp/up041/img/h/.neuralis/projects/my-workspace/data"
+    }
+  },
+  "permissions": {
+    "default": {
+      "read": true,
+      "write": true,
+      "exec": false
+    },
+    "paths": [
+      {
+        "pattern": "data://agent-core/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/*/**",
+        "permissions": {
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/**",
+        "permissions": {
+          "write": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/**",
+        "permissions": {
+          "write": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/conversations/**",
+        "permissions": {
+          "read": true
+        },
+        "users": [
+          "$owner"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**",
+        "permissions": {
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/conversations/**",
+        "permissions": {
+          "write": true
+        },
+        "users": [
+          "$owner"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**",
+        "permissions": {
+          "write": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/$self/conversations/_staging",
+        "permissions": {
+          "read": true,
+          "write": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/$self/conversations/_staging/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/messages.jsonl",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/meta.json",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/SUMMARY.md",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/summary.md",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/_summary-revisions/**",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/shells/*/output.jsonl",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/conversations/**/inbox/*.json",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/workflows/**",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/workflows/**",
+        "permissions": {
+          "read": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/workflows/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/workflows/*/runs/**",
+        "permissions": {
+          "write": false
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/workflows/*/instruction-revisions/**",
+        "permissions": {
+          "write": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "data://agent-core/*/plans/**",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/plans/**",
+        "permissions": {
+          "read": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/plans/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/memory/**",
+        "permissions": {
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/*/memory/**",
+        "permissions": {
+          "read": false,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/memory/**",
+        "permissions": {
+          "read": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/memory/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/channels/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/channels/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/git-remotes/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/git-remotes/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/logs",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/logs/**",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/logs",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/logs",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/*/logs/**",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://agent-core/$self/logs",
+        "permissions": {
+          "read": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/$self/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/logs",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/*/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/connectors/**",
+        "permissions": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://admin/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://admin/audit",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://admin/audit/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://admin/audit",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://admin/audit/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://admin/logs",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://admin/logs/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://admin/logs",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://admin/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://brain-core/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://brain-core/logs",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://brain-core/logs/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://brain-core/logs",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://brain-core/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://brain-core/_pending/**",
+        "permissions": {
+          "read": false,
+          "write": false,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://brain-core/_pending/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://machine-core/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "data://machine-core/audit",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://machine-core/audit/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://machine-core/audit",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://machine-core/audit/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://machine-core/logs",
+        "permissions": {
+          "read": false
+        }
+      },
+      {
+        "pattern": "data://machine-core/logs/**",
+        "permissions": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "pattern": "data://machine-core/logs",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://machine-core/logs/**",
+        "permissions": {
+          "read": true
+        },
+        "roles": [
+          "owner",
+          "admin"
+        ],
+        "override": true
+      },
+      {
+        "pattern": "data://agent-core/beta/files/**",
+        "permissions": {
+          "read": true
+        },
+        "users": [
+          "b921accd-f061-406d-8094-75795b03ce5a"
+        ],
+        "override": true
+      }
+    ]
+  },
+  "description": "Project data zone — agent memory, conversations, runtime output, and audit logs.",
+  "sync": {
+    "exclude": [
+      "node_modules/**",
+      "**/node_modules/**",
+      ".git/**",
+      "**/.git/**",
+      ".brain-store/**",
+      "**/.brain-store/**",
+      "__pycache__/**",
+      "**/__pycache__/**",
+      ".next/**",
+      "**/.next/**",
+      "dist/**",
+      "**/dist/**",
+      "build/**",
+      "**/build/**",
+      "*.lock",
+      "**/*.lock",
+      "*.tsbuildinfo",
+      "**/*.tsbuildinfo",
+      "*.wasm",
+      "**/*.wasm",
+      ".env",
+      "**/.env",
+      ".env.*",
+      "**/.env.*",
+      "*.pem",
+      "**/*.pem",
+      "*.key",
+      "**/*.key",
+      "id_rsa",
+      "**/id_rsa",
+      "id_ed25519",
+      "**/id_ed25519",
+      "credentials/**",
+      "**/credentials/**",
+      ".DS_Store",
+      "**/.DS_Store",
+      "**/logs/**",
+      "**/audit/**",
+      "brain-core/_pending/**",
+      "agent-core/*/usage/**",
+      "agent-core/codex-usage.json"
+    ],
+    "trigger": "auto",
+    "alwaysActive": true,
+    "lastSync": "2026-11-09T22:22:04.130Z",
+    "status": "active",
+    "checkpoint": "2026-11-09T22:19:19.325Z",
+    "lastSyncResult": {
+      "filesAdded": 3,
+      "filesUpdated": 0,
+      "filesRemoved": 0,
+      "chunksRemoved": 0,
+      "filesSkipped": 0,
+      "durationMs": 55,
+      "embeddingDegraded": [
+        "disabled"
+      ]
+    },
+    "stats": {
+      "indexedCount": 0,
+      "unindexedCount": 0,
+      "filesCount": 0,
+      "computedAt": "2026-11-09T22:19:19.346Z"
+    }
+  },
+  "createdAt": "2026-11-09T22:18:18.967Z",
+  "updatedAt": "2026-11-09T22:22:04.130Z",
+  "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "baselineRepairVersion": 5,
+  "formatVersion": 2
+}

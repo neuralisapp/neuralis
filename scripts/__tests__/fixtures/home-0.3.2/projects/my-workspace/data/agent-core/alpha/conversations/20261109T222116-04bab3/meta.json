@@ -1,0 +1,13 @@
+{
+  "id": "20261109T222116-04bab3",
+  "userId": "b921accd-f061-406d-8094-75795b03ce5a",
+  "projectId": "my-workspace",
+  "agentId": "alpha",
+  "title": "Mia on alpha",
+  "participantUserIds": [
+    "b921accd-f061-406d-8094-75795b03ce5a"
+  ],
+  "createdAt": "2026-11-09T22:21:16.837Z",
+  "updatedAt": "2026-11-09T22:21:16.846Z",
+  "formatVersion": 2
+}

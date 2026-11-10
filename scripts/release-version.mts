@@ -111,6 +111,8 @@ export const SITES: readonly Site[] = [
   { file: 'neuralis/scripts/setup.mts', kind: 'companion', label: `default ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 2 },
   { file: 'neuralis/.env.example', kind: 'companion', label: `template ${WEBTOP}`, pattern: tagPattern(WEBTOP), expected: 1 },
   { file: 'web/docs/app/(home)/widgets.tsx', kind: 'image', label: `install command ${HOST_IMAGE}`, pattern: tagPattern(HOST_IMAGE), expected: 1 },
+  // The landing's desktop downloads link this release's GitHub installers; the file names and URLs derive from it.
+  { file: 'web/docs/lib/shared.ts', kind: 'version', label: 'desktop download version', pattern: /^const desktopVersion = '([^']+)';$/gm, expected: 1 },
   // The operations skill's and the updating page's one-time 0.1.0-folder conversion runs the release's own scaffolder.
   ...['neuralis/skills/neuralis-operations/SKILL.md', 'web/docs/content/docs/getting-started/updating.mdx'].map((file): Site => ({
     file,

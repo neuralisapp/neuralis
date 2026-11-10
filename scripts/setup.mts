@@ -244,7 +244,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.4.0',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.4.1',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -2353,7 +2353,7 @@ function composeInputFromExisting(
     tunnel: tunnelDomainOf(envVars) !== null,
     neuralisHome: hostHome,
     machine: {
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.4.0'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.4.1'),
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
       sidecarPort: Number(envVars.NEURALIS_MACHINE_SIDECAR_PORT) || 9400,
       cdpPort: Number(envVars.NEURALIS_MACHINE_CDP_PORT) || 9222,

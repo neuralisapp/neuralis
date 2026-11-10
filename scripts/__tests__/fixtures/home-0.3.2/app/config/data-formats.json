@@ -1,0 +1,142 @@
+{
+  "agent-core/agent": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/channel": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/codex-usage": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/connector-config": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/conversation-messages": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/conversation-meta": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/conversation-summary": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/daily-quota": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/delegate-run": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/device-registry": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/git-remote": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/host-source-config": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/identity-backup": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/inbox": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/oauth-flows": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/oauth-tokens": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/package-data-zone": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/pending-interactions": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/shell-run": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/usage-events": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/workflow-entry": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "agent-core/workflow-run": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/audit-log": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/credential": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/credential-usage": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/credential-use-rules": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/platform-config": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/project": {
+    "version": 4,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/project-purged": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/route-log": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "neuralis/user": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:17.703Z"
+  },
+  "brain-core/embedding-lock": {
+    "version": 3,
+    "raisedAt": "2026-11-09T22:18:18.513Z"
+  },
+  "brain-core/source-config": {
+    "version": 2,
+    "raisedAt": "2026-11-09T22:18:18.526Z"
+  },
+  "brain-core/pending-changes": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:18.536Z"
+  },
+  "brain-core/vector-proof": {
+    "version": 1,
+    "raisedAt": "2026-11-09T22:18:18.546Z"
+  }
+}

@@ -1,0 +1,216 @@
+{
+  "id": "my-workspace",
+  "name": "My Workspace",
+  "ownerId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "members": {
+    "d2bc7c36-19ba-4230-b279-2573b523de80": {
+      "userId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+      "name": "owner",
+      "email": "owner@up041.test",
+      "role": "owner",
+      "position": "Owner",
+      "tier": 1,
+      "addedAt": "2026-11-09T22:18:07.721Z"
+    },
+    "b921accd-f061-406d-8094-75795b03ce5a": {
+      "userId": "b921accd-f061-406d-8094-75795b03ce5a",
+      "name": "Member Mia",
+      "email": "member@up041.test",
+      "role": "member",
+      "position": "",
+      "tier": 20,
+      "addedAt": "2026-11-09T22:20:15.290Z"
+    }
+  },
+  "roles": {
+    "owner": {
+      "agents": "*",
+      "canInvite": true,
+      "canManageRoles": true,
+      "grantedFeatures": [
+        "*"
+      ],
+      "priority": 1
+    },
+    "admin": {
+      "agents": "*",
+      "canInvite": true,
+      "canManageRoles": true,
+      "grantedFeatures": [
+        "channels.connect",
+        "channels.manage",
+        "core.agents",
+        "core.connectors",
+        "core.conversation.fork",
+        "core.execute",
+        "core.logs",
+        "core.observe",
+        "core.prompt-polish",
+        "core.web",
+        "credentials.self",
+        "device.own",
+        "exec.device",
+        "exec.local",
+        "exec.machine",
+        "exec.unconfined",
+        "files.read",
+        "files.readOthers",
+        "files.search",
+        "files.write",
+        "files.writeOthers",
+        "git.connect",
+        "machine.control",
+        "machine.read",
+        "mcp.apps",
+        "mcp.connect",
+        "mcp.sidecar",
+        "packages.author",
+        "packages.manage",
+        "packages.registry",
+        "project.agents.assign",
+        "project.audit",
+        "project.canvas",
+        "project.credentials",
+        "project.credentials.write",
+        "project.dashboard",
+        "project.limits",
+        "project.members",
+        "project.members.invite",
+        "project.roles",
+        "project.sources",
+        "sources.mount",
+        "sources.policy",
+        "sources.privileged",
+        "sources.sync",
+        "terminal.device",
+        "terminal.local",
+        "terminal.supervise",
+        "terminal.unconfined",
+        "workflow.dispatch",
+        "workflow.read",
+        "workflow.write"
+      ],
+      "priority": 2
+    },
+    "manager": {
+      "agents": "*",
+      "canInvite": false,
+      "canManageRoles": false,
+      "grantedFeatures": [
+        "channels.connect",
+        "core.agents",
+        "core.execute",
+        "core.observe",
+        "core.prompt-polish",
+        "core.web",
+        "credentials.self",
+        "device.own",
+        "exec.local",
+        "files.read",
+        "files.search",
+        "files.write",
+        "git.connect",
+        "machine.control",
+        "machine.read",
+        "mcp.connect",
+        "packages.author",
+        "packages.registry",
+        "project.dashboard",
+        "sources.mount",
+        "sources.sync",
+        "terminal.local",
+        "workflow.dispatch",
+        "workflow.read",
+        "workflow.write"
+      ],
+      "priority": 10
+    },
+    "member": {
+      "agents": "own",
+      "canInvite": false,
+      "canManageRoles": false,
+      "grantedFeatures": [
+        "channels.connect",
+        "core.agents",
+        "core.execute",
+        "core.observe",
+        "core.prompt-polish",
+        "core.web",
+        "credentials.self",
+        "device.own",
+        "exec.local",
+        "files.read",
+        "files.search",
+        "git.connect",
+        "machine.read",
+        "mcp.connect",
+        "packages.registry",
+        "project.dashboard",
+        "terminal.local",
+        "workflow.read",
+        "workflow.write"
+      ],
+      "priority": 20
+    },
+    "viewer": {
+      "agents": "view",
+      "canInvite": false,
+      "canManageRoles": false,
+      "grantedFeatures": [
+        "core.agents",
+        "core.observe",
+        "files.read",
+        "project.dashboard",
+        "workflow.read"
+      ],
+      "priority": 30
+    },
+    "reviewer": {
+      "canInvite": false,
+      "canManageRoles": false,
+      "grantedFeatures": [
+        "channels.connect",
+        "core.agents",
+        "core.execute",
+        "core.observe",
+        "core.prompt-polish",
+        "core.web",
+        "credentials.self",
+        "device.own",
+        "exec.local",
+        "files.read",
+        "files.search",
+        "git.connect",
+        "machine.read",
+        "mcp.connect",
+        "packages.registry",
+        "project.dashboard",
+        "terminal.local",
+        "workflow.read",
+        "workflow.write"
+      ],
+      "priority": 25,
+      "agents": "own"
+    }
+  },
+  "createdAt": "2026-11-09T22:18:07.721Z",
+  "updatedAt": "2026-11-09T22:22:34.925Z",
+  "roleGrantVersion": 21,
+  "agentOwnership": {
+    "alpha": {
+      "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+      "assignedTo": [
+        "b921accd-f061-406d-8094-75795b03ce5a",
+        "9a7904f7-fd12-4d71-bec1-60ef2a30712c"
+      ]
+    }
+  },
+  "limits": {
+    "spend": {
+      "projectTotal": null,
+      "byRole": {},
+      "byUser": {},
+      "byAgent": {}
+    }
+  }
+}

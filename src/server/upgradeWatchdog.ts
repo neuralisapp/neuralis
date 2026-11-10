@@ -29,7 +29,7 @@
  *     host-terminal proxy (`agent-core/src/hostBroker/mountHostTerminalCompanion.ts`).
  *     Each `return`s on paths the others own, so an unowned path is ignored by
  *     all three.
- *   - `:3100` (the app) — `next@16.4.3`'s `start-server.js:236` registers an
+ *   - `:3100` (the app) — `next@16.4.5`'s `start-server.js:236` registers an
  *     `'upgrade'` listener **unconditionally**, and its body destroys only on
  *     *throw*; an unclaimed path resolves and retains the socket.
  *

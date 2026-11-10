@@ -734,7 +734,7 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
         expect(o.cwd).toBe(dir); // every step runs in the install folder
         expect(args).not.toContain('-f'); // a -f would skip the override file
         calls.push(line);
-        if (opts.fail && line.includes(opts.fail)) return { code: 1, stdout: '', stderr: 'boom' };
+        if (opts.fail && line.includes(opts.fail)) return { code: 1, stdout: line === 'neuralis upgrade --apply' ? opts.upgradePrints ?? '' : '', stderr: 'boom' };
         if (line.endsWith('config --format json --no-interpolate')) return { code: 0, stdout: MODEL, stderr: '' };
         if (line.endsWith('ps --status running --services')) return { code: 0, stdout: `${(opts.running ?? ['neuralis', 'qdrant']).join('\n')}\n`, stderr: '' };
         if (line === 'neuralis upgrade --apply') return { code: 0, stdout: opts.upgradePrints ?? `  ${checkpointTakenLine('cp-1')}\n`, stderr: '' };
@@ -773,11 +773,32 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
     expect(fake.calls.some((c) => / stop .*qdrant|down/.test(c))).toBe(false);
   });
 
+  it('a new build that serves degraded (200 `degraded`) is ready, with a note — never "starting" until the timeout', async () => {
+    const dir = stackFolder();
+    const fake = fakeStack(dir, { health: [{ kind: 'starting', detail: 'HTTP 503 initializing' }, { kind: 'ready', degraded: true }] });
+    expect(await applyStack(input(dir), fake.ports)).toMatchObject({ ok: true, done: ['compose', 'stop', 'vector store', 'upgrade', 'recreate', 'health'], seconds: 2 });
+    expect(fake.logged.some((l) => l.includes('a package reports degraded health'))).toBe(true);
+  });
+
   it('an upgrade that raised nothing is reported as such: success carries upgradeRan false, no checkpoint', async () => {
     const dir = stackFolder();
     const fake = fakeStack(dir, { upgradePrints: '  Nothing to upgrade: every offline data format is current.\n' });
     const outcome = await applyStack(input(dir), fake.ports);
     expect(outcome).toMatchObject({ ok: true, checkpoint: null, upgradeRan: false });
+  });
+
+  it('a failed upgrade wrote data only after its checkpoint or inside a resumed run: upgradeRan follows those two signals', async () => {
+    const cases: Array<[string, boolean]> = [
+      ['  Blocking (module: project · kind · file · field · reference · reason):\n    m: x\n', false],
+      ['  Refusing to upgrade: the app answers\n', false],
+      [`  ${checkpointTakenLine('cp-9')}\n  m: crashed\n`, true],
+      ['  m: test/a → v2 (resuming)\n  Blocking (module: project · kind · file · field · reference · reason):\n', true],
+    ];
+    for (const [upgradePrints, ran] of cases) {
+      const dir = stackFolder();
+      const fake = fakeStack(dir, { fail: 'upgrade --apply', upgradePrints });
+      expect(await applyStack(input(dir), fake.ports)).toMatchObject({ ok: false, step: 'upgrade', upgradeRan: ran });
+    }
   });
 
   it('a stopped vector store is started before the upgrade; a stopped app is not stopped again; operator packages rebuild', async () => {
@@ -900,11 +921,11 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
     const folder = fakeFolder('0.2.0');
     writeFileSync(join(folder.installDir, 'docker-compose.yml'), 'name: neuralis-x\n');
     writeFileSync(join(folder.installDir, '.env'), 'NEURALIS_COMPOSE_PROJECT=neuralis-x\n');
-    const run = async (fail: string): Promise<string> => {
+    const run = async (fail: string, upgradePrints?: string): Promise<string> => {
       const logged: string[] = [];
       const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logged.push(args.join(' ')); });
       try {
-        expect(await runStack({ ctx: cliContext(folder), layout: 'folder', previous: '0.1.0', moved: ['.env NEURALIS_IMAGE_TAG 0.1.0 → 0.2.0'] }, fakeStack(folder.installDir, { fail }).ports)).toBe(1);
+        expect(await runStack({ ctx: cliContext(folder), layout: 'folder', previous: '0.1.0', moved: ['.env NEURALIS_IMAGE_TAG 0.1.0 → 0.2.0'] }, fakeStack(folder.installDir, { fail, ...(upgradePrints ? { upgradePrints } : {}) }).ports)).toBe(1);
       } finally {
         log.mockRestore();
       }
@@ -914,8 +935,10 @@ describe('update --apply runs the stack sequence itself, and stops at the first 
     expect(unreadable).toContain('done before it : .env NEURALIS_IMAGE_TAG 0.1.0 → 0.2.0, docker-compose.yml regenerated — nothing after it ran');
     expect(unreadable).toContain('data           : nothing to put back — no upgrade ran this time');
     expect(unreadable).not.toContain('a resumed upgrade keeps');
-    // PAIRED CONTROL: an upgrade that ran (and failed) keeps the checkpoint advice.
-    expect(await run('upgrade --apply')).toContain('a resumed upgrade keeps its first run\'s');
+    // An upgrade that stopped before its checkpoint wrote nothing either.
+    expect(await run('upgrade --apply')).toContain('data           : nothing to put back — no upgrade ran this time');
+    // PAIRED CONTROL: a resumed upgrade that failed keeps the first run's checkpoint advice.
+    expect(await run('upgrade --apply', '  m: test/a → v2 (resuming)\n')).toContain('a resumed upgrade keeps its first run\'s');
   });
 
   it('the dry run names every command the apply runs, with the folder\'s project and services', () => {
@@ -1214,6 +1237,8 @@ exit 0
     expect(answers.refused).toEqual({ kind: 'refused', code: 'upgrade_required' });
     expect(answers.calls[0]).toMatch(/^compose -p neuralis-x exec -T neuralis node -e fetch\('http:\/\/127\.0\.0\.1:3100\/api\/health'/);
     expect(await withFakeDocker({ FAKE_HEALTH: '200 {"status":"ready"}' }, () => IMAGE_PORTS.health(target))).toEqual({ kind: 'ready' });
+    expect(await withFakeDocker({ FAKE_HEALTH: '200 {"status":"degraded","health":"degraded"}' }, () => IMAGE_PORTS.health(target))).toEqual({ kind: 'ready', degraded: true });
+    expect(await withFakeDocker({ FAKE_HEALTH: '503 {"status":"degraded","health":"failed"}' }, () => IMAGE_PORTS.health(target))).toEqual({ kind: 'starting', detail: 'HTTP 503 degraded' });
     expect(await withFakeDocker({ FAKE_HEALTH: '0 ECONNREFUSED' }, () => IMAGE_PORTS.health(target))).toEqual({ kind: 'starting', detail: 'ECONNREFUSED' });
     expect((await withFakeDocker({ FAKE_EXEC_CODE: '1' }, () => IMAGE_PORTS.health(target))).kind).toBe('starting');
   });

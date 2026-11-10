@@ -23,14 +23,23 @@ beforeEach(() => {
   mocks.health.mockResolvedValue({ status: 'ok', packages: [], refused: [] });
 });
 describe('GET /api/health', () => {
-  it('reports ready only for a booted, healthy runtime', async () => {
+  it('reports ready for a booted, healthy runtime', async () => {
     const readyAt = Date.now();
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt });
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'ready', health: 'ok', readyAt, refusedBuiltins: 0 });
   });
-  it.each(['starting', 'degraded', 'failed'] as const)('a package health %s makes readiness unavailable', async (status) => {
+  it('a degraded package keeps a serving host at 200 and says degraded in the body', async () => {
+    mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt: Date.now() });
+    mocks.health.mockResolvedValue({ status: 'degraded', packages: [{ packageId: 'provider', status: 'degraded', checks: [] }], refused: [] });
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ status: 'degraded', health: 'degraded', refusedBuiltins: 0 });
+    expect(JSON.stringify(body)).not.toMatch(/provider/);
+  });
+  it.each(['starting', 'failed'] as const)('a package health %s makes readiness unavailable', async (status) => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready' });
     mocks.health.mockResolvedValue({ status, packages: [{ packageId: 'provider', status, checks: [] }], refused: [] });
     const response = await GET();
@@ -77,7 +86,9 @@ describe('GET /api/health', () => {
   it('a health hook failure gives a classified failure', async () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready' });
     mocks.health.mockRejectedValueOnce(new Error('/private/token secret'));
-    expect(await (await GET()).json()).toEqual({ status: 'degraded', health: 'failed', instanceId: ID });
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: 'degraded', health: 'failed', instanceId: ID });
   });
   it('every answer carries the one per-process instance id (the data-home lock\'s liveness question), and only that', async () => {
     mocks.getBootstrapStatus.mockReturnValue({ ...base, phase: 'ready', readyAt: Date.now() });

@@ -39,6 +39,9 @@ import {
   type OfflineUpgradePlan,
 } from '@neuralis/package-system/data';
 import { globToRegExp } from '@neuralis/package-system/policies';
+// The step before this one in the source-config chain. A dry run reads the disk before that step
+// applied, so a record below its version is read the way that step will have written it.
+import { subjectRecordOf } from './source-uri-subject-v1.mts';
 
 /** The kinds and formats THIS step writes — pinned, never the live declarations. */
 const SOURCE_CONFIG_KIND = 'brain-core/source-config';
@@ -282,9 +285,10 @@ export async function inspectUseGrants(ctx: Pick<OfflineUpgradeContext, 'appRoot
     for (const name of (await entries(join(sourcesBase, projectId))).filter((entry) => entry.endsWith('.json'))) {
       const path = join(sourcesBase, projectId, name);
       if (!(await stat(path)).isFile()) continue;
-      const record = await readJson(path);
+      const stored = await readJson(path);
       const file = relative(ctx.home, path);
-      if (!isObject(record)) throw new Error(`${path} is not a source config`);
+      if (!isObject(stored)) throw new Error(`${path} is not a source config`);
+      const record = subjectRecordOf(stored).next ?? stored;
       const isData = record.source === 'data';
       dataSeen ||= isData;
       if (typeof record.formatVersion === 'number' && record.formatVersion >= SOURCE_STEP_VERSION) {
@@ -343,7 +347,7 @@ export function planOf(home: string, found: UseGrantsInspection): OfflineUpgrade
       `legacy OAuth pending folders: ${removed.length} removed, ${kept.length} kept${kept.length > 0 ? ` (hold content: ${kept.map((row) => relative(home, row.dir)).join(', ')})` : ''}`,
     ],
     ...(found.blockers.length > 0
-      ? { blockers: { lines: found.blockers, remedy: 'start the previous build once so its source repair restores the agent-folder rows, move a listed grant row after them, name the listed agent, or fix the listed file — then run this again' } }
+      ? { blockers: { lines: found.blockers, remedy: 'add the listed agent-folder write row back to the listed data config, move a listed grant row after it, name the listed agent, or fix the listed file — then run this again' } }
       : {}),
   };
 }

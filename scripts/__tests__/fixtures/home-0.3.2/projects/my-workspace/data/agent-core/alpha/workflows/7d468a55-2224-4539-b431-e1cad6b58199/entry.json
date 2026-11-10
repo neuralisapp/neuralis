@@ -1,0 +1,45 @@
+{
+  "id": "7d468a55-2224-4539-b431-e1cad6b58199",
+  "projectId": "my-workspace",
+  "agentId": "alpha",
+  "title": "Private one",
+  "instructionTemplate": "Summarise yesterday into {{WORKFLOW_STATE_URI}}/digest.md",
+  "stateMode": "fresh",
+  "triggers": [
+    {
+      "kind": "schedule",
+      "schedule": {
+        "type": "cron",
+        "cron": "0 9 * * *",
+        "timezone": "UTC"
+      },
+      "id": "t1-da4927de"
+    }
+  ],
+  "executionPolicy": {
+    "maxConcurrent": 1,
+    "maxRuntimeMs": 3600000
+  },
+  "visibility": "private",
+  "status": "draft",
+  "creator": {
+    "userId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+    "projectId": "my-workspace",
+    "role": "owner",
+    "priority": 1,
+    "rolePriorities": {
+      "owner": 1,
+      "admin": 2,
+      "manager": 10,
+      "member": 20,
+      "viewer": 30
+    },
+    "grantedFeatures": [
+      "*"
+    ],
+    "agentAccess": "*"
+  },
+  "createdAt": "2026-11-09T22:22:02.082Z",
+  "updatedAt": "2026-11-09T22:22:02.082Z",
+  "formatVersion": 2
+}

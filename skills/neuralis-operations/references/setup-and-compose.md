@@ -262,8 +262,8 @@ qdrant log no longer prints `Telemetry reporting enabled`.
 `neuralis setup` (it mints and preserves the key), or add a
 `QDRANT_API_KEY=<random>` line to `.env` by hand, then
 `neuralis setup --compose-only` and `docker compose up -d`. One recreate carries
-both containers. A mistyped key does not kill the boot: the app falls back to in-memory
-vectors and logs `vector.qdrant.unauthorized` until the key matches. A NATIVE
+both containers. A mistyped key does not kill the boot: the app serves, search and indexing
+stay unavailable, and it logs `vector.qdrant.unauthorized` until the key matches. A NATIVE
 (binary-mode) Qdrant that is already running keeps accepting keyless requests until it
 is stopped and started again — the key rides its spawn environment.
 
@@ -366,7 +366,8 @@ the wizard first asks its ONE question (§What setup asks; natively, it download
 macOS or Windows, checks it against its pinned sha256 and starts it);
 `--advanced` also offers an external URL. With Docker answering, a native run's default Qdrant is
 the compose service, and the next steps start it first (`docker compose up -d qdrant`). Without a reachable Qdrant the host still
-starts in a degraded in-memory vector mode and re-probes in the background.
+starts and serves (`/api/health` 200, body `degraded`): search and indexing answer that the vector store
+is not available yet and continue by themselves once it answers.
 
 The desktop app's host — `neuralis up`, adopting a home a Docker install set up, its vectors: `desktop-and-native-host.md`.
 

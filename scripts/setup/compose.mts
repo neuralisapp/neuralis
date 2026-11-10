@@ -680,7 +680,8 @@ export function buildComposeContent(input: ComposeEmitInput, stamp: { date: stri
 
   lines.push(
     '    # Readiness: /api/health is 200 only once the in-process agent-core',
-    '    # bootstrap completes — not merely when the HTTP server binds. wget, not',
+    '    # bootstrap completes — not merely when the HTTP server binds — and while',
+    '    # the host serves (a package reporting degraded included). wget, not',
     '    # a node process: one small fork per probe.',
     '    healthcheck:',
     '      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3100/api/health || exit 1"]',

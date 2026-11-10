@@ -1,0 +1,6 @@
+{"id":"m1","role":"user","content":[{"type":"text","text":"list my laptop home"}],"ts":"2026-11-09T22:30:00.000Z","seq":1,"userId":"d2bc7c36-19ba-4230-b279-2573b523de80"}
+{"id":"m2","role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"execute","input":{"action":"shell","command":"ls ~","uri":"hostfs://laptop/"}}],"ts":"2026-11-09T22:30:01.000Z","seq":2}
+{"id":"m3","role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"Desktop\nDocuments","structuredContent":{"ok":true,"plane":"host","device":"dev_abc123","exitCode":0}}],"ts":"2026-11-09T22:30:02.000Z","seq":3}
+{"id":"m4","role":"assistant","content":[{"type":"tool_use","id":"tu2","name":"execute","input":{"action":"shell","command":"rm -rf /","uri":"hostfs://laptop/"}}],"ts":"2026-11-09T22:30:03.000Z","seq":4}
+{"id":"m5","role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":"refused: host_plane_denied","is_error":true,"structuredContent":{"ok":false,"code":"host_plane_denied","plane":"host","device":"dev_abc123"}}],"ts":"2026-11-09T22:30:04.000Z","seq":5}
+{"id":"m6","role":"assistant","content":[{"type":"text","text":"The device refused it (\"code\":\"host_plane_denied\" in v1 terms)."}],"ts":"2026-11-09T22:30:05.000Z","seq":6}

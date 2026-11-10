@@ -1,0 +1,47 @@
+{
+  "source": "laptop",
+  "scope": {
+    "kind": "user",
+    "userId": "d2bc7c36-19ba-4230-b279-2573b523de80"
+  },
+  "connection": {
+    "kind": "host",
+    "config": {
+      "root": "/home/owner",
+      "device": "dev_abc123"
+    }
+  },
+  "permissions": {
+    "default": {
+      "read": true,
+      "write": true,
+      "exec": true
+    },
+    "paths": [
+      {
+        "pattern": "laptop://.ssh/**",
+        "permissions": {
+          "read": false
+        },
+        "floor": true
+      },
+      {
+        "pattern": "laptop://work/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": true
+        },
+        "roles": [
+          "owner"
+        ],
+        "override": true
+      }
+    ]
+  },
+  "recognizesPackages": false,
+  "createdAt": "2026-11-09T22:33:00.000Z",
+  "updatedAt": "2026-11-09T22:33:00.000Z",
+  "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "formatVersion": 2
+}

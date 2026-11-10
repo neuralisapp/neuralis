@@ -1,0 +1,12 @@
+{
+  "id": "9a7904f7-fd12-4d71-bec1-60ef2a30712c",
+  "email": "gone@up041.test",
+  "name": "Gone Gil",
+  "passwordHash": "fixture-not-a-hash",
+  "status": "active",
+  "mustChangePassword": false,
+  "invitedBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "createdAt": "2026-11-09T22:20:15.569Z",
+  "updatedAt": "2026-11-09T22:22:02.375Z",
+  "lastLoginAt": "2026-11-09T22:22:02.374Z"
+}

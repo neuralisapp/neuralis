@@ -1,0 +1,32 @@
+{
+  "id": "sh1",
+  "shellId": "sh1",
+  "pid": 0,
+  "owner": {
+    "userId": "d2bc7c36-19ba-4230-b279-2573b523de80",
+    "projectId": "my-workspace",
+    "agentId": "alpha",
+    "conversationId": "20261109T222116-f18a4d"
+  },
+  "toolUseId": "tu-sh1",
+  "input": {
+    "action": "shell",
+    "command": "tail -n 5 log",
+    "background": true
+  },
+  "command": "tail -n 5 log",
+  "cwd": "/home/owner",
+  "plane": "host",
+  "device": "dev_abc123",
+  "source": "laptop",
+  "status": "exited",
+  "startedAt": 1794262000000,
+  "outputBytes": 12,
+  "outputRows": 1,
+  "truncated": false,
+  "createdAt": "2026-11-09T22:31:00.000Z",
+  "updatedAt": "2026-11-09T22:32:00.000Z",
+  "exitedAt": 1794262060000,
+  "exitCode": 0,
+  "reportedAt": "2026-11-09T22:32:01.000Z"
+}

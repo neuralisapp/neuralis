@@ -12,8 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts';
 import { __resetPackageAssetScopeForTests } from '../packageAssetScope';
 import {
+  isPackageAppPictureLoaded,
   isRenderedVisible,
   observePackageAppIconVisibility,
+  packageAppPictureLoadKey,
   runPackageAppIconLifecycle,
 } from '../PackageAppIcon';
 import { buildPackageDockItems } from '../dockRuntime';
@@ -248,5 +250,30 @@ describe('dock projection — the primitive image descriptor', () => {
   it('no declaration → no descriptor', () => {
     const [item] = buildPackageDockItems(snapshotWith());
     expect(item?.image).toBeUndefined();
+  });
+});
+
+describe('the glyph stays until the picture has loaded', () => {
+  // The component's coordinate: [projectId, agentId, packageId, dockId, declaration, generation].
+  const coordinate = (generation: number) => JSON.stringify(['p1', 'a1', '@acme/app', 'dock', 'sha-1', generation]);
+  const url = '/api/package-app/_scope/h1/shared/dock.png';
+
+  it('no url, or a url whose bytes have not loaded yet, keeps the glyph', () => {
+    expect(isPackageAppPictureLoaded(null, coordinate(0), null)).toBe(false);
+    expect(isPackageAppPictureLoaded(null, coordinate(0), url)).toBe(false);
+  });
+
+  it('the load recorded for this coordinate and url paints the picture', () => {
+    const loaded = packageAppPictureLoadKey(coordinate(0), url);
+    expect(isPackageAppPictureLoaded(loaded, coordinate(0), url)).toBe(true);
+    // The scope dropped (offscreen, revoked): no url, the glyph again.
+    expect(isPackageAppPictureLoaded(loaded, coordinate(0), null)).toBe(false);
+  });
+
+  it('a new url or a new scope generation shows the glyph until its own load', () => {
+    const loaded = packageAppPictureLoadKey(coordinate(0), url);
+    expect(isPackageAppPictureLoaded(loaded, coordinate(0), '/api/package-app/_scope/h2/shared/dock.png')).toBe(false);
+    expect(isPackageAppPictureLoaded(loaded, coordinate(1), url)).toBe(false);
+    expect(isPackageAppPictureLoaded(packageAppPictureLoadKey(coordinate(1), url), coordinate(1), url)).toBe(true);
   });
 });

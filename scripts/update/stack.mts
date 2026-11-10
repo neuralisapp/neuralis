@@ -27,13 +27,14 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
 import { companionUpArgs, composeDetail, readComposeStack, type ComposeStack, type DockerExec, type ExecResult } from '../host-broker/helper.mts';
-import { checkpointFromUpgradeOutput, upgradeRaisedNothing } from '../upgrade.mts';
+import { checkpointFromUpgradeOutput, upgradeRaisedNothing, upgradeResumed } from '../upgrade.mts';
 import { composeRunArgs } from '../cli/registry.mts';
 
 export type { ComposeStack, ExecResult };
 
 export type HealthAnswer =
-  | { kind: 'ready' }
+  /** `degraded`: the app serves while a package reports a partial state (a vector store not reachable yet). */
+  | { kind: 'ready'; degraded?: true }
   /** The build refused to start; `code` is the health route's closed-set class (`upgrade_required`, …). */
   | { kind: 'refused'; code: string }
   | { kind: 'starting'; detail: string }
@@ -56,8 +57,10 @@ export type StepName = 'compose' | 'stop' | 'vector store' | 'upgrade' | 'recrea
 /**
  * `regenerated`: the compose file was rewritten (it may be before the `compose`
  * step itself completes — the read that follows can still fail).
- * `upgradeRan`: on a stop, the upgrade step was started (a checkpoint, or its absence, means
- * something); on success, it raised a data format (false: it answered "nothing to upgrade").
+ * `upgradeRan`: on a stop, the upgrade step was started and may have written (a checkpoint, or
+ * its absence, means something; false: it stopped before its checkpoint, outside a resumed run, so
+ * nothing was written); on success,
+ * it raised a data format (false: it answered "nothing to upgrade").
  */
 export type ApplyOutcome =
   | { ok: true; checkpoint: string | null; done: StepName[]; seconds: number; app: string; regenerated: true; upgradeRan: boolean }
@@ -166,7 +169,11 @@ export async function applyStack(
     ? await ports.exec('docker', composeRunArgs({ project: input.project, app: stack.app }, 'upgrade', ['--apply'], { tty: false, operator: undefined, binds: input.upgradeBinds ?? [] }), { cwd, tee: true }).catch(spawnFailure)
     : await neuralis(['upgrade', '--apply']);
   checkpoint = checkpointFromUpgradeOutput(upgrade.stdout);
-  if (upgrade.code !== 0) return stop('upgrade', `upgrade --apply exited ${upgrade.code}`);
+  if (upgrade.code !== 0) {
+    // Data may have moved only after a checkpoint or inside a resumed run; any earlier stop wrote nothing.
+    upgradeRan = checkpoint !== null || upgradeResumed(upgrade.stdout);
+    return stop('upgrade', `upgrade --apply exited ${upgrade.code}`);
+  }
   upgradeRan = !upgradeRaisedNothing(upgrade.stdout);
   done.push('upgrade');
 
@@ -182,6 +189,7 @@ export async function applyStack(
   for (;;) {
     last = await ports.health(target);
     if (last.kind === 'ready') {
+      if (last.degraded) ports.log('the app serves, and a package reports degraded health (a vector store that is not reachable yet, for one) — Admin health names which');
       done.push('health');
       return { ok: true, checkpoint, done, seconds: Math.round((ports.now() - started) / 1000), app: stack.app, regenerated: true, upgradeRan };
     }
@@ -200,6 +208,7 @@ function spawnFailure(err: unknown): ExecResult {
 /** The health route's answer, read the same way through HTTP or through `compose exec`. */
 function healthOf(status: number, body: { status?: unknown; code?: unknown; phase?: unknown } | null): HealthAnswer {
   if (status === 200 && body?.status === 'ready') return { kind: 'ready' };
+  if (status === 200 && body?.status === 'degraded') return { kind: 'ready', degraded: true };
   if (body?.status === 'error') return { kind: 'refused', code: typeof body.code === 'string' ? body.code : 'bootstrap_failed' };
   return { kind: 'starting', detail: `HTTP ${status}${typeof body?.status === 'string' ? ` ${body.status}` : ''}${typeof body?.phase === 'string' ? ` (${body.phase})` : ''}` };
 }

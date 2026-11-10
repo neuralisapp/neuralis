@@ -1,0 +1,26 @@
+{
+  "id": "beta",
+  "projectId": "my-workspace",
+  "userId": "b921accd-f061-406d-8094-75795b03ce5a",
+  "name": "",
+  "slug": "beta",
+  "visibility": "private",
+  "config": {
+    "systemPrompt": {
+      "mode": "custom",
+      "custom": ""
+    },
+    "tools": {
+      "mode": "all"
+    },
+    "packages": {},
+    "settings": {},
+    "mcp": {
+      "servers": []
+    },
+    "appearance": {}
+  },
+  "createdAt": "2026-11-09T22:20:23.115Z",
+  "updatedAt": "2026-11-09T22:20:23.115Z",
+  "formatVersion": 2
+}

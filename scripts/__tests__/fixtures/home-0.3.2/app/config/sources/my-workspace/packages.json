@@ -1,0 +1,220 @@
+{
+  "source": "packages",
+  "scope": {
+    "kind": "project"
+  },
+  "connection": {
+    "kind": "local",
+    "config": {
+      "root": "_packages",
+      "hostRoot": "/tmp/up041/img/h/.neuralis/projects/my-workspace/_packages"
+    }
+  },
+  "permissions": {
+    "default": {
+      "read": true,
+      "write": true,
+      "exec": false
+    },
+    "paths": [
+      {
+        "pattern": "packages://*/tools/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://*/files/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://*/assets/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://*/src/**",
+        "permissions": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "pattern": "packages://agent-core/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "packages://agent-core/tools/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/skills/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/instructions/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/rules/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/agents/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/assets/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://agent-core/src/**",
+        "permissions": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "pattern": "packages://brain-core/**",
+        "permissions": {
+          "read": true,
+          "write": true,
+          "exec": false
+        }
+      },
+      {
+        "pattern": "packages://brain-core/tools/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/skills/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/agents/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/rules/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/docs/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/assets/**",
+        "permissions": {
+          "read": true,
+          "write": true
+        }
+      },
+      {
+        "pattern": "packages://brain-core/src/**",
+        "permissions": {
+          "read": true,
+          "write": false
+        }
+      }
+    ]
+  },
+  "description": "Project package drop-zone (_packages/) — WASM and source packages load from here.",
+  "sync": {
+    "exclude": [
+      "node_modules/**",
+      "**/node_modules/**",
+      ".git/**",
+      "**/.git/**",
+      "dist/**",
+      "**/dist/**",
+      "build/**",
+      "**/build/**",
+      "*.tsbuildinfo",
+      "**/*.tsbuildinfo",
+      "*.wasm",
+      "**/*.wasm",
+      ".env",
+      "**/.env",
+      ".env.*",
+      "**/.env.*",
+      "*.pem",
+      "**/*.pem",
+      "*.key",
+      "**/*.key",
+      "id_rsa",
+      "**/id_rsa",
+      "id_ed25519",
+      "**/id_ed25519",
+      "credentials/**",
+      "**/credentials/**"
+    ],
+    "trigger": "auto",
+    "alwaysActive": true,
+    "lastSync": "2026-11-09T22:19:19.348Z",
+    "status": "active",
+    "checkpoint": "2026-11-09T22:19:19.327Z",
+    "lastSyncResult": {
+      "filesAdded": 0,
+      "filesUpdated": 0,
+      "filesRemoved": 0,
+      "chunksRemoved": 0,
+      "filesSkipped": 0,
+      "durationMs": 21
+    },
+    "stats": {
+      "indexedCount": 0,
+      "unindexedCount": 0,
+      "filesCount": 0,
+      "computedAt": "2026-11-09T22:19:19.348Z"
+    }
+  },
+  "createdAt": "2026-11-09T22:18:07.722Z",
+  "updatedAt": "2026-11-09T22:19:19.348Z",
+  "createdBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "declaredRepairVersion": 1,
+  "formatVersion": 2,
+  "baselineRepairVersion": 5
+}

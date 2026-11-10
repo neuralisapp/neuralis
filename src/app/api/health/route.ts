@@ -28,13 +28,17 @@ export async function GET(): Promise<NextResponse> {
   try {
     const health = await runtime.health();
     const ready = health.status === 'ok';
+    // A `degraded` package still serves (a vector store that is not reachable yet, a
+    // slow health hook): 200, so compose keeps the container healthy and `up` reports
+    // it. A `starting` or `failed` aggregate is not serving yet: 503.
+    const serving = ready || health.status === 'degraded';
     // A refused builtin does not enter `status` (the platform runs without
     // it); the COUNT tells an orchestrator the instance is partial. Never the
     // names — Admin health names them for the operator.
     return NextResponse.json({
       status: ready ? 'ready' : 'degraded', health: health.status, refusedBuiltins: health.refused.length,
       readyAt: state.readyAt, uptimeMs: Date.now() - state.startedAt, instanceId,
-    }, { status: ready ? 200 : 503 });
+    }, { status: serving ? 200 : 503 });
   } catch {
     return NextResponse.json({ status: 'degraded', health: 'failed', instanceId }, { status: 503 });
   }

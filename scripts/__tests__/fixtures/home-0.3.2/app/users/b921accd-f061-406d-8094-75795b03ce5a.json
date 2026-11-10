@@ -1,0 +1,12 @@
+{
+  "id": "b921accd-f061-406d-8094-75795b03ce5a",
+  "email": "member@up041.test",
+  "name": "Member Mia",
+  "passwordHash": "fixture-not-a-hash",
+  "status": "active",
+  "mustChangePassword": false,
+  "invitedBy": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "createdAt": "2026-11-09T22:20:15.278Z",
+  "updatedAt": "2026-11-09T22:21:16.419Z",
+  "lastLoginAt": "2026-11-09T22:21:16.418Z"
+}

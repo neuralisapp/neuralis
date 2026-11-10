@@ -1,0 +1,7 @@
+{
+  "embeddingModelId": "gemini:gemini-embedding-2-preview",
+  "embeddingDimension": 3072,
+  "embeddingEnabled": false,
+  "machineDesktopVariant": "ubuntu-xfce",
+  "machineImage": "neuralisapp/webtop-ubuntu-xfce:0.3.2"
+}

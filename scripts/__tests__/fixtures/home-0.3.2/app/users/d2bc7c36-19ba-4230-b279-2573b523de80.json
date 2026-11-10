@@ -1,0 +1,11 @@
+{
+  "id": "d2bc7c36-19ba-4230-b279-2573b523de80",
+  "email": "owner@up041.test",
+  "name": "owner",
+  "passwordHash": "fixture-not-a-hash",
+  "status": "active",
+  "mustChangePassword": false,
+  "createdAt": "2026-11-09T22:18:07.720Z",
+  "updatedAt": "2026-11-09T22:22:34.902Z",
+  "lastLoginAt": "2026-11-09T22:22:34.902Z"
+}

@@ -14,7 +14,9 @@ import type { PackageAppImage } from './dockRuntime';
  * menu, inbox, notification popover).
  *
  * It renders a FIXED `size`×`size` box that shows `fallback` (the declared
- * glyph) until the picture's bytes arrive, and whenever they cannot: no image
+ * glyph) until the picture's bytes have loaded for the current coordinate and
+ * url — the `<img>` is mounted meanwhile out of layout and transparent, so it
+ * makes the one request it always made — and whenever they cannot: no image
  * declared, the consumer is off-screen or inside a hidden/closed ancestor, the
  * scope is refused (not visible, or the icon capacity answer), revoked, or the
  * bytes fail to decode. The box never changes size, so a late picture never
@@ -50,6 +52,9 @@ export function PackageAppIcon(props: {
   const coordinateKey = JSON.stringify([projectId, agentId, packageId, dockId, declaration, generation]);
   const [brokenKey, setBrokenKey] = useState<string | null>(null);
   const active = visible && brokenKey !== coordinateKey;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const picture = url && active ? url : null;
+  const loaded = isPackageAppPictureLoaded(loadedKey, coordinateKey, picture);
 
   useEffect(() => {
     const element = boxRef.current;
@@ -84,25 +89,40 @@ export function PackageAppIcon(props: {
         alignItems: 'center',
         justifyContent: 'center',
         overflow: 'hidden',
+        position: 'relative',
       }}
     >
-      {url && active ? (
+      {picture ? (
         <img
-          src={url}
+          src={picture}
           alt=""
           width={size}
           height={size}
           decoding="async"
           draggable={false}
           referrerPolicy="no-referrer"
-          style={{ width: size, height: size, objectFit: 'contain' }}
+          style={loaded
+            ? { width: size, height: size, objectFit: 'contain' }
+            : { width: size, height: size, objectFit: 'contain', position: 'absolute', inset: 0, opacity: 0 }}
+          onLoad={() => setLoadedKey(packageAppPictureLoadKey(coordinateKey, picture))}
           onError={() => setBrokenKey(coordinateKey)}
         />
-      ) : (
-        fallback
-      )}
+      ) : null}
+      {loaded ? null : fallback}
     </span>
   );
+}
+
+/** What a picture's `onLoad` records: the coordinate it loaded for (scope generation included) and its url. */
+export const packageAppPictureLoadKey = (coordinateKey: string, url: string): string => JSON.stringify([coordinateKey, url]);
+
+/**
+ * Does the picture replace the glyph? Only once its bytes loaded for THIS
+ * coordinate (scope generation included) and url — a new url or a new
+ * generation shows the glyph again until its own load.
+ */
+export function isPackageAppPictureLoaded(loadedKey: string | null, coordinateKey: string, url: string | null): boolean {
+  return url !== null && loadedKey === packageAppPictureLoadKey(coordinateKey, url);
 }
 
 export type PackageAppIconLifecycleParams = {

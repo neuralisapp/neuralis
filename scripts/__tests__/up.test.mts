@@ -732,42 +732,100 @@ describe('up with Qdrant in Docker — this home\'s own compose file, or the Doc
     expect((await readStatus({ NEURALIS_HOME: w.home }, FAST)).qdrant).toEqual({ mode: 'external', state: 'stopped' });
   }, 30_000);
 
-  it('a key the Docker Qdrant refuses: the host still starts, the ready line says memory/unauthorized and the log names --refresh-qdrant', async () => {
+  it('a key the Docker Qdrant refuses: the host still starts, the ready line says qdrant/unauthorized and the log names --refresh-qdrant', async () => {
     const q = await dockerQdrant();
     const w = await world({ qdrantLines: ['BRAIN_INFRA_MODE=local', 'QDRANT_MODE=external', `QDRANT_URL=${q.url}`, 'QDRANT_API_KEY=rotated-away'] });
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps: { ...FAST, companion: async () => { throw new Error('no folder recorded: never called'); } }, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(lines(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'memory', vectorsReason: 'unauthorized' });
+    expect(lines(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'qdrant', vectorsReason: 'unauthorized' });
+    expect(run.err.join('')).toContain('the host starts, and search and indexing stay unavailable until the key matches');
     expect(run.err.join('')).toContain('--refresh-qdrant');
+    expect(run.err.join('')).not.toContain('in-memory');
     run.stdin.end();
     expect(await done).toBe(EXIT.OK);
     await q.close();
   }, 30_000);
 
-  it('docker mode: the vector store of THIS home\'s compose file (beside its .env) is started; a failed start is named and the host starts with in-memory vectors', async () => {
+  it('docker mode: the vector store of THIS home\'s compose file (beside its .env) is started; a failed start is named, the host starts on qdrant/unreachable, the store is started again on the optional cadence — bounded, and the stop ends it', async () => {
     const [qport] = await freePorts(1);
     // The host dies once: a host restart under this run must stop nothing.
     const w = await world({ qdrantLines: ['BRAIN_INFRA_MODE=local', 'QDRANT_MODE=docker', `NEURALIS_QDRANT_PORT=${qport}`, 'QDRANT_API_KEY=dkey', 'NEURALIS_COMPOSE_PROJECT=neuralis-desktop-x'], env: { FAKE_HOST_CRASHES: '1' } });
+    const dir = join(w.home, 'app', 'config');
     const asked: string[] = [];
     const stops: string[] = [];
-    const deps: UpDeps = { ...FAST, companion: async (dir) => { asked.push(dir); return { ok: false, reason: 'no Docker CLI on this machine' }; }, companionStop: async (dir) => { stops.push(dir); return { ok: true, service: 'qdrant', stopped: true }; } };
+    const probes: string[] = [];
+    const deps: UpDeps = {
+      ...FAST,
+      qdrantUp: async (url) => { probes.push(url); return false; },
+      companion: async (d) => { asked.push(d); return { ok: false, reason: 'no Docker CLI on this machine' }; },
+      companionStop: async (d) => { stops.push(d); return { ok: true, service: 'qdrant', stopped: true }; },
+    };
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(asked).toEqual([join(w.home, 'app', 'config')]);
-    expect(run.err.join('')).toContain(`The vector store in ${join(w.home, 'app', 'config')} did not start: no Docker CLI on this machine`);
+    expect(asked[0]).toBe(dir);
     expect(lines(run.out).map((l) => l.state)).toEqual(['restarting', 'ready']);
-    expect(lines(run.out)[1]).toMatchObject({ vectors: 'memory', vectorsReason: 'unreachable' });
+    expect(lines(run.out)[1]).toMatchObject({ vectors: 'qdrant', vectorsReason: 'unreachable' });
     // A failed start is not waited for: one probe, then the host (no `within N s` wait).
-    expect(run.err.join('')).toContain(`Qdrant did not answer on http://127.0.0.1:${qport}; the host starts with in-memory vectors`);
+    expect(run.err.join('')).toContain(`Qdrant did not answer on http://127.0.0.1:${qport}; the host starts, and search and indexing continue by themselves when the vector store answers.`);
+    expect(run.err.join('')).not.toContain('in-memory');
+    expect(run.err.join('')).toContain(`Neuralis keeps starting the vector store in ${dir} until it answers.`);
+    // The cadence: the two test backoff steps (40 ms), then the 30 s step — one probe + one start each, nothing more.
+    await waitFor(() => asked.length >= 3);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(asked).toEqual([dir, dir, dir]);
+    expect(probes).toHaveLength(3);
+    // The same failure is named once, not once per step.
+    expect(run.err.join('').split(`The vector store in ${dir} did not start: no Docker CLI on this machine`)).toHaveLength(2);
     // The host restart (its child exited, this process started it again) stopped nothing.
     expect(stops).toEqual([]);
+    const stoppedAt = Date.now();
     run.stdin.end();
     expect(await done).toBe(EXIT.OK);
+    // The stop wakes the pending 30 s step instead of waiting it out, and starts nothing behind it.
+    expect(Date.now() - stoppedAt).toBeLessThan(10_000);
+    expect(asked).toHaveLength(3);
     // The full stop: this home's own store, after the host.
-    expect(stops).toEqual([join(w.home, 'app', 'config')]);
-    expect(run.err.join('')).toContain(`Stopped qdrant in ${join(w.home, 'app', 'config')}.`);
+    expect(stops).toEqual([dir]);
+    expect(run.err.join('')).toContain(`Stopped qdrant in ${dir}.`);
+  }, 30_000);
+
+  it.each([
+    ['answers', 'dkey', 'Qdrant answers on'],
+    ['refuses the key', 'rotated-away', 'search and indexing stay unavailable until the key matches'],
+  ] as const)('docker mode: the retry stops on the first step the store %s', async (_what, key, said) => {
+    const [qport] = await freePorts(1);
+    const w = await world({ qdrantLines: ['BRAIN_INFRA_MODE=local', 'QDRANT_MODE=docker', `NEURALIS_QDRANT_PORT=${qport}`, `QDRANT_API_KEY=${key}`, 'NEURALIS_COMPOSE_PROJECT=neuralis-desktop-x'] });
+    const http = await import('node:http');
+    // The store's service: down at start; the retry's first start brings it up.
+    const store = http.createServer((req, res) => {
+      if (req.url === '/healthz') { res.end('ok'); return; }
+      const ok = req.headers['api-key'] === 'dkey';
+      res.writeHead(ok ? 200 : 401, { 'content-type': 'application/json' });
+      res.end(ok ? '{"result":{"collections":[]}}' : '{}');
+    });
+    const asked: string[] = [];
+    const deps: UpDeps = {
+      ...FAST,
+      companion: async (d) => {
+        asked.push(d);
+        if (asked.length === 1) return { ok: false, reason: 'Docker is starting' };
+        await new Promise<void>((resolve) => store.listen(qport, '127.0.0.1', resolve));
+        return { ok: true, service: 'qdrant', started: true };
+      },
+    };
+    const run = io(w.home);
+    const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
+    await waitFor(() => run.err.join('').includes(said));
+    await waitFor(() => run.out.join('').includes('"ready"'));
+    await new Promise((r) => setTimeout(r, 300));
+    // Initial start + the retry's one start; the next step's probe answered and ended it.
+    expect(asked).toHaveLength(2);
+    expect(run.err.join('')).toContain(`Started qdrant in ${join(w.home, 'app', 'config')}.`);
+    run.stdin.end();
+    expect(await done).toBe(EXIT.OK);
+    await new Promise<void>((resolve) => store.close(() => resolve()));
   }, 30_000);
 });
 
