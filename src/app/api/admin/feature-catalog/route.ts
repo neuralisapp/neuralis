@@ -12,22 +12,32 @@ import {
   passesProjectAndOwnerScope,
   type PackageVisibilityScope,
 } from '@/server/packages/packageVisibility';
+import { loadReadHiddenView } from '@/server/packages/packageReadFloor';
+import { BUILTIN_PACKAGE_IDS } from '@/server/host/bootstrap';
+import { isManifestReadHidden, isPlatformTierFeature } from '@neuralis/package-system/access';
+import type { PackageDefinition } from '@neuralis/package-system/contracts';
 
-/** One feature with human metadata (C9) + the contributions it gates (consumers). */
+/** One feature with human metadata + the contributions it gates (consumers). */
 export type FeatureCatalogEntry = {
   id: string;
   title?: string;
   description?: string;
   /** What this feature controls (tools/skills/commands/widgets/docks). Derived, not stored. */
   consumers: FeatureConsumerSummary;
+  /** The NON-builtin packages that declare this id too (or alone) — shown on the row, never hidden. */
+  declaredBy?: string[];
 };
 
+/** The features that share an id's first segment (`files.read` → `files`). */
 export type FeatureCatalogGroup = {
-  packageId: string;
-  packageName: string;
-  /** Sorted feature ids (kept for backward-compatible consumers). */
+  /** The first segment of every id in the group. */
+  key: string;
+  /** The segment, capitalized — the header the Roles editor shows. */
+  title: string;
+  /** Crosses the project boundary (the kernel tier label); such groups sort last. */
+  platformTier: boolean;
+  /** Sorted feature ids. */
   features: string[];
-  /** Rich per-feature metadata + consumers (C9). */
   entries: FeatureCatalogEntry[];
 };
 
@@ -35,7 +45,40 @@ export type FeatureCatalogResponse = {
   groups: FeatureCatalogGroup[];
 };
 
-/** GET /api/admin/feature-catalog — runtime feature list grouped by package. */
+type Declared = { title?: string; description?: string; metaFromBuiltin: boolean; declaredBy: string[] };
+
+/**
+ * One entry per id over every declaring package: a builtin's title and
+ * description win; any other declarer is NAMED on the entry, so a drop cannot
+ * dress its own id — or a builtin's — in a builtin's words unseen.
+ */
+function collectDeclarations(definitions: PackageDefinition[], overrides: Record<string, string>): Map<string, Declared> {
+  const byId = new Map<string, Declared>();
+  const declare = (pkg: PackageDefinition, id: string, meta?: { title?: string; description?: string }): void => {
+    const builtin = BUILTIN_PACKAGE_IDS.has(pkg.id);
+    const row = byId.get(id) ?? { metaFromBuiltin: false, declaredBy: [] };
+    byId.set(id, row);
+    if (!builtin && !row.declaredBy.includes(pkg.name)) row.declaredBy.push(pkg.name);
+    if (!meta || row.metaFromBuiltin) return;
+    if (builtin || (row.title === undefined && row.description === undefined)) {
+      row.title = meta.title;
+      row.description = meta.description;
+      row.metaFromBuiltin = builtin;
+    }
+  };
+  for (const pkg of definitions) {
+    for (const feature of normalizeProvidedFeatures(pkg.requires?.providesFeatures)) declare(pkg, feature.id, feature);
+    // A declared base-access gate (`requires.accessFeature`) is grantable even when it is not in `providesFeatures`.
+    const declaredAccess = pkg.requires?.accessFeature;
+    if (declaredAccess) declare(pkg, declaredAccess);
+    // An override-ATTACHED base-access feature lives in no manifest: it stays grantable (a package whose only gate it is).
+    const overrideAccess = overrides[pkg.id];
+    if (overrideAccess) declare(pkg, overrideAccess);
+  }
+  return byId;
+}
+
+/** GET /api/admin/feature-catalog — the project's grantable features, grouped by the id's first segment. */
 export async function GET(request: Request): Promise<NextResponse> {
   try {
     // R2b — project-aware: a base-access feature ATTACHED via the per-project
@@ -44,10 +87,10 @@ export async function GET(request: Request): Promise<NextResponse> {
     // editor. `requireAdmin(projectId)` already loads the ProjectRecord; reuse
     // `ctx.project` (no second store read).
     //
-    // O-2 — the `X-Project-Id` header is now REQUIRED. Both callers already send
-    // it (the admin Roles editor and brain-core's access-feature picker); the
-    // "no header ⇒ the caller's first project" fallback returned a catalog whose
-    // override-attached entries belonged to a project the caller never named.
+    // O-2 — the `X-Project-Id` header is REQUIRED; the one caller, the admin
+    // package's Roles editors, sends it. The "no header ⇒ the caller's first
+    // project" fallback returned a catalog whose override-attached entries
+    // belonged to a project the caller never named.
     const resolved = resolveRequestProjectId(request);
     if (!resolved.ok) {
       return NextResponse.json({ error: resolved.error }, { status: resolved.status });
@@ -73,10 +116,13 @@ export async function GET(request: Request): Promise<NextResponse> {
       role: ctx.member.role,
       grantedFeatures: ctx.memberRole.grantedFeatures,
       packageAccessFeature: overrides,
+      readHidden: await loadReadHiddenView(ctx.session, resolved.projectId),
     };
     const definitions = registry
       .listPackages()
-      .filter((definition) => passesProjectAndOwnerScope(definition, scope));
+      .filter((definition) => passesProjectAndOwnerScope(definition, scope))
+      // A source package whose manifest the admin cannot read names nothing here.
+      .filter((definition) => !isManifestReadHidden(scope.readHidden, definition.id));
 
     // The consumers index is built over the SAME filtered set. It used to span
     // ALL packages, justified as "a feature may be referenced by a contribution
@@ -90,43 +136,31 @@ export async function GET(request: Request): Promise<NextResponse> {
     // — see featureConsumersIndex scope note + the test-time audit.
     const consumersIndex = buildFeatureConsumersIndex(definitions);
 
-    const groups: FeatureCatalogGroup[] = definitions
-      .map((pkg) => {
-        const provided = normalizeProvidedFeatures(pkg.requires?.providesFeatures);
-        const entries: FeatureCatalogEntry[] = provided
-          .map((f) => ({
-            id: f.id,
-            title: f.title,
-            description: f.description,
-            consumers: summarizeConsumers(consumersIndex.get(f.id)),
-          }))
-          .sort((a, b) => a.id.localeCompare(b.id));
-        // R2b — surface a declared base-access gate (`requires.accessFeature`) as
-        // a grantable feature under its declaring package, even when it isn't in
-        // `providesFeatures`, so an owner can grant base access to a role.
-        const af = pkg.requires?.accessFeature;
-        if (af && !entries.some((e) => e.id === af)) {
-          entries.push({ id: af, consumers: summarizeConsumers(consumersIndex.get(af)) });
-          entries.sort((a, b) => a.id.localeCompare(b.id));
-        }
-        // R2b — an override-ATTACHED base-access feature (no manifest declaration)
-        // surfaces under its declaring package's group so the owner can grant it.
-        // A package whose ONLY gate is the override now has entries.length === 1
-        // and survives the empty-group filter below.
-        const overrideAf = overrides[pkg.id];
-        if (overrideAf && !entries.some((e) => e.id === overrideAf)) {
-          entries.push({ id: overrideAf, consumers: summarizeConsumers(consumersIndex.get(overrideAf)) });
-          entries.sort((a, b) => a.id.localeCompare(b.id));
-        }
+    const bySegment = new Map<string, FeatureCatalogEntry[]>();
+    for (const [id, declared] of collectDeclarations(definitions, overrides)) {
+      const segment = id.split('.')[0]!;
+      const entry: FeatureCatalogEntry = {
+        id,
+        ...(declared.title !== undefined ? { title: declared.title } : {}),
+        ...(declared.description !== undefined ? { description: declared.description } : {}),
+        consumers: summarizeConsumers(consumersIndex.get(id)),
+        ...(declared.declaredBy.length > 0 ? { declaredBy: declared.declaredBy } : {}),
+      };
+      bySegment.set(segment, [...(bySegment.get(segment) ?? []), entry]);
+    }
+    const groups: FeatureCatalogGroup[] = [...bySegment]
+      .map(([segment, entries]) => {
+        entries.sort((a, b) => a.id.localeCompare(b.id));
         return {
-          packageId: pkg.id,
-          packageName: pkg.name,
-          features: entries.map((e) => e.id),
+          key: segment,
+          title: segment.charAt(0).toUpperCase() + segment.slice(1),
+          platformTier: entries.every((entry) => isPlatformTierFeature(entry.id)),
+          features: entries.map((entry) => entry.id),
           entries,
         };
       })
-      .filter((g) => g.features.length > 0)
-      .sort((a, b) => a.packageName.localeCompare(b.packageName));
+      // Project-tier groups alphabetically, then the platform tier.
+      .sort((a, b) => Number(a.platformTier) - Number(b.platformTier) || a.key.localeCompare(b.key));
 
     return NextResponse.json({ groups } satisfies FeatureCatalogResponse);
   } catch (err) {

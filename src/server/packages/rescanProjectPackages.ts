@@ -19,7 +19,7 @@
  * keys on a plain `(userId, projectId)`.
  */
 
-import { collectAllFeatures } from '@neuralis/package-system';
+import { collectAllFeatures, frontmatterText } from '@neuralis/package-system';
 import { canAccessScope, parsePackageInstanceId } from '@neuralis/package-system/contracts';
 import type { InviteLinkProvenance, PackageTrust, ProjectPackageBuildResult, ProjectPackageRow } from '@neuralis/package-system/contracts';
 import { buildWasmPackage, hasSourceCode, hasWasmToolchain } from '@neuralis/package-system/runtime/wasm-build';
@@ -27,17 +27,28 @@ import { getPackageRuntimeManager, type PackageLoadError } from './PackageRuntim
 import {
   ensureProjectPackagesLoaded,
   listAllActivatedPackages,
+  listDisabledPackageRows,
   packageOriginDevice,
   resetProjectPackageActivation,
   resolveProjectPackageInstance,
   resyncProjectPackages,
 } from './projectPackages';
-import { getCommunityPackageRegistry } from './runtime';
+import { getCommunityPackageRegistry, getCommunityPackageRuntime } from './runtime';
+import { loadReadHiddenView, loadVisibleDisabledPackageIds } from './packageReadFloor';
+import { applyReadFloor, isManifestReadHidden } from '@neuralis/package-system/access';
 import { BUILTIN_PACKAGE_IDS, resolveGuestPdkPath } from '../host/builtinSlots';
 import { getLogger } from '../logging/setup';
 import { setPackageAccessFeature as storeAccessFeature, setPackageTrust as storeTrust } from '../store/ProjectStore';
 import { writeAuditLog } from '../store/AuditStore';
 import { canManagePackages, resolveProjectAccess, type ProjectAccessContext } from '../projects/access';
+
+/** The kernel's identifier length (manifest ids, credential ids, surface ids). */
+const SHOWN_TEXT_MAX = 128;
+
+/** A manifest field nobody validated, as one capped line (`undefined` when empty). */
+function shownManifestText(value: string | undefined): string | undefined {
+  return frontmatterText(value)?.slice(0, SHOWN_TEXT_MAX);
+}
 
 /** Result of a successful {@link rescanProjectPackages} call (keystone-lattice parity). */
 export type PackageRescanResult = {
@@ -142,6 +153,8 @@ export async function clearProjectPackageCaches(userId: string, projectId: strin
  * drop zone, each source package folder and the native packages (whose only
  * per-project setting is the access feature) — from what is loaded now: the
  * scanner records and the runtime's host-stamped definitions, no disk read.
+ * A switched-off source's package folders list as `source-disabled` rows
+ * (manifest name and version) for a caller who reads that source.
  */
 export async function listProjectPackageRows(userId: string, projectId: string): Promise<ProjectPackageRow[]> {
   const access = await assertCanManagePackages(userId, projectId);
@@ -152,6 +165,15 @@ export async function listProjectPackageRows(userId: string, projectId: string):
   const trustOverrides = access.project.packageTrust ?? {};
   const featureOverrides = access.project.packageAccessFeature ?? {};
   const rows: ProjectPackageRow[] = [];
+  // The read floor: a source package the caller cannot read is absent; one
+  // whose `package.json` they cannot read lists under its folder name only.
+  const readHidden = await loadReadHiddenView(access.session, projectId);
+  const shownName = new Map<string, string>();
+  if (readHidden.hiddenFileKeys.size > 0) {
+    for (const pkg of applyReadFloor(getCommunityPackageRuntime().getSnapshot(), readHidden).packages) {
+      if (isManifestReadHidden(readHidden, pkg.id)) shownName.set(pkg.id, pkg.name);
+    }
+  }
   // Asked once per listing, and only when a row needs a build.
   let toolchain: boolean | undefined;
   const buildState = (): 'ready' | 'toolchain-missing' => ((toolchain ??= hasWasmToolchain()) ? 'ready' : 'toolchain-missing');
@@ -161,17 +183,18 @@ export async function listProjectPackageRows(userId: string, projectId: string):
     const status = loader.getStatus(id);
     const needsBuild = definition.runtime?.type === 'wasm' && status?.status === 'partial' && status.reason === 'build-missing';
     const override = featureOverrides[id];
-    const manifestFeature = definition.requires?.accessFeature;
+    const folderName = shownName.get(id);
+    const manifestFeature = folderName ? undefined : definition.requires?.accessFeature;
     return {
       id,
-      name: definition.name || id,
-      ...(definition.version ? { version: definition.version } : {}),
-      ...(definition.description ? { description: definition.description } : {}),
+      name: folderName ?? (definition.name || id),
+      ...(definition.version && !folderName ? { version: definition.version } : {}),
+      ...(definition.description && !folderName ? { description: definition.description } : {}),
       slot,
       origin,
       trust,
       ...(trustOverrides[id] ? { trustOverride: trustOverrides[id] } : {}),
-      ...(definition.runtime?.type ? { runtime: definition.runtime.type } : {}),
+      ...(definition.runtime?.type && !folderName ? { runtime: definition.runtime.type } : {}),
       status: !status ? 'loading' : status.status === 'partial' ? 'partial' : status.status === 'error' ? 'error' : 'loaded',
       ...(status?.status === 'partial' ? { partialReason: status.reason ?? 'runtime-unavailable' } : {}),
       ...(needsBuild ? { build: buildState() } : {}),
@@ -180,17 +203,41 @@ export async function listProjectPackageRows(userId: string, projectId: string):
     };
   };
   for (const info of listAllActivatedPackages(projectId)) {
+    if (info.sourceDisabled) continue; // listed below, behind the source's own read
     const ownerScope = manager.getPackageOwnerScope(projectId, info.packageId) ?? { kind: 'project' as const };
     // A member's or another agent's package is absent, never marked, for a caller outside that scope.
     if (!canAccessScope(ownerScope, access.session, 'read', manager.getPackageOwnerOrigin(projectId, info.packageId))) continue;
+    if (readHidden.hiddenPackageIds.has(info.packageId)) continue;
     const origin = parsePackageInstanceId(info.packageId)?.originUri ?? info.packageId;
     const definition = registry.getPackage(info.packageId);
     const built = row(info.packageId, definition?.access?.trust === 'trusted' ? 'trusted' : 'untrusted', origin.startsWith('packages://') ? 'project' : 'source', origin);
     if (!built) continue;
     const device = built.slot === 'source' ? packageOriginDevice(projectId, origin) : undefined;
     if (device) built.device = device;
-    const grants = ownerScope.kind === 'project' ? definition?.requires?.defaultRoleGrants : undefined;
+    const grants = ownerScope.kind === 'project' && !shownName.has(info.packageId) ? definition?.requires?.defaultRoleGrants : undefined;
     rows.push(grants && Object.keys(grants).length > 0 ? { ...built, defaultRoleGrants: grants } : built);
+  }
+  // A switched-off source's folders: shown only where this session reads the
+  // source at source level AND the folder's manifest on the path axis —
+  // brain-core's answers, never the row's scope (fail closed).
+  const listed = listDisabledPackageRows(projectId);
+  const visible = await loadVisibleDisabledPackageIds(access.session, projectId, listed);
+  for (const pkg of listed) {
+    if (!visible.has(pkg.packageId)) continue;
+    const override = trustOverrides[pkg.packageId];
+    // An unloaded manifest's own words: one line, capped like an identifier.
+    const version = shownManifestText(pkg.version);
+    rows.push({
+      id: pkg.packageId,
+      name: shownManifestText(pkg.name) ?? pkg.packageId,
+      ...(version ? { version } : {}),
+      slot: pkg.originUri.startsWith('packages://') ? 'project' : 'source',
+      origin: pkg.originUri,
+      trust: override ?? 'untrusted',
+      ...(override ? { trustOverride: override } : {}),
+      status: 'source-disabled',
+      ownerScope: pkg.ownerScope,
+    });
   }
   for (const id of BUILTIN_PACKAGE_IDS) {
     const built = row(id, 'native', 'native', id);

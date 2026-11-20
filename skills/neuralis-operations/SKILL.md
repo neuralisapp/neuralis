@@ -53,7 +53,7 @@ app container cannot run any of this: the container cannot recreate itself. Say 
 rather than trying.
 
 **Running these yourself requires the host-access plane** — the server running as a paired
-device (`neuralis device`), `device.own` on it as its owner (`exec.device` for anyone
+device (`neuralis device`), `device.own` on it as its owner (`device.others` for anyone
 else's), and the target path inside that device's
 ceiling. None of that can be arranged from inside the platform; it is a deliberate floor,
 described in `references/host-plane.md`. Without it, report the command for a human to run
@@ -141,7 +141,7 @@ stopped:
 
 ```bash
 docker compose stop neuralis
-npx --yes create-neuralis@0.4.1 convert .   # the new layout; your .env, compose files and package lines stay
+npx --yes create-neuralis@0.4.2 convert .   # the new layout; your .env, compose files and package lines stay
 neuralis update --apply                 # the latest release: image tag + companions, then the stack steps of `update --apply`
 ```
 

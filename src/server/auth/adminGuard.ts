@@ -2,6 +2,7 @@ import { requireSession, type SessionUser } from './session';
 import type { ProjectRecord } from '../store/ProjectStore';
 import type { ProjectMember, RoleDefinition } from '../store/projectTypes';
 import { hasFeature } from '@neuralis/package-system/access';
+import type { SessionContext } from '@neuralis/package-system/contracts';
 import { resolveMember } from './memberSession';
 
 /**
@@ -35,6 +36,8 @@ export type AdminContext = {
   memberRole: RoleDefinition;
   /** Caller's ordinal role priority (lower = stronger). Gates role assignment. */
   callerPriority: number;
+  /** The caller's ONE session in this project — the identity a read verdict is asked for. */
+  session: SessionContext;
 };
 
 /**
@@ -58,6 +61,7 @@ async function resolveAdminContext(projectId: string): Promise<AdminContext> {
     member: resolved.member,
     memberRole: resolved.roleDef,
     callerPriority: resolved.session.priority,
+    session: resolved.session,
   };
 }
 

@@ -153,7 +153,7 @@ describe('two-word-features-v1 — the stored ids take their two-word names', ()
     expect(files(f.home)).toEqual(done);
   });
 
-  it('ONE --apply carries a v19/v2 record through v3, v4 and v5: new ids, {22, 5}, the v3 write was {20, 3}, and device.own survives', { timeout: 60_000 }, async () => {
+  it('ONE --apply carries a v19/v2 record through v3, v4, v5 and v6: new ids, {23, 6}, the v3 write was {20, 3}, and device.own survives', { timeout: 60_000 }, async () => {
     const f = fixture();
     const project = join(f.appRoot, 'projects', 'main.json');
     write(project, {
@@ -172,6 +172,7 @@ describe('two-word-features-v1 — the stored ids take their two-word names', ()
 
     let afterDeviceStep: Record<string, any> | null = null;
     let afterFeatureStep: Record<string, any> | null = null;
+    let afterAgentsStep: Record<string, any> | null = null;
     const outcome = await runUpgrade({
       appRuns: 'docker',
       apply: true,
@@ -181,16 +182,19 @@ describe('two-word-features-v1 — the stored ids take their two-word names', ()
       log: (line) => {
         if (line === 'source-device-v1: applied.') afterDeviceStep = json(project);
         if (line === 'two-word-features-v1: applied.') afterFeatureStep = json(project);
+        if (line === 'written-role-agents-v1: applied.') afterAgentsStep = json(project);
       },
     });
     expect(outcome).toMatchObject({ applied: true, pending: ['neuralis/project'] });
     expect(afterDeviceStep).toMatchObject({ roleGrantVersion: 20, formatVersion: 3 });
     const done = json(project);
     expect(afterFeatureStep).toMatchObject({ roleGrantVersion: 21, formatVersion: 4 });
-    expect(done).toMatchObject({ roleGrantVersion: 22, formatVersion: 5 });
-    expect(done.roles.admin.grantedFeatures).toEqual(['core.agents', 'files.read', 'exec.device', 'device.own']);
+    expect(afterAgentsStep).toMatchObject({ roleGrantVersion: 22, formatVersion: 5 });
+    expect(afterAgentsStep!.roles.admin.grantedFeatures).toEqual(['core.agents', 'files.read', 'exec.device', 'device.own']);
     // The v4 apply re-read the record the v3 apply wrote — never its own dry-run snapshot.
-    expect(done.roles.admin.grantedFeatures).toContain('device.own');
+    expect(done).toMatchObject({ roleGrantVersion: 23, formatVersion: 6 });
+    // v6: a lone half of the other-members'-computers pair is dropped (named in the audit log), device.own stays.
+    expect(done.roles.admin.grantedFeatures).toEqual(['core.agents', 'files.read', 'device.own']);
     expect(done.roles.member.grantedFeatures).toEqual(['files.read', 'device.own']);
   });
 });

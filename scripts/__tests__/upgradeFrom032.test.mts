@@ -14,7 +14,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { pendingUpgrades, runUpgrade, UPGRADES_DIR } from '../upgrade.mts';
@@ -44,6 +44,11 @@ describe('upgrading a real 0.3.2 home through every shipped module', { timeout: 
     const home = mkdtempSync(join(tmpdir(), 'nrs-upgrade-032-'));
     dirs.push(home);
     cpSync(FIXTURE, home, { recursive: true });
+    // A hand-built role that held only the absorbed half of a merged right: the chain merges it and names it, never stops.
+    const projectFile = join(home, 'app', 'projects', 'my-workspace.json');
+    const record = JSON.parse(readFileSync(projectFile, 'utf8')) as { roles: Record<string, unknown> };
+    record.roles.searcher = { agents: 'own', canInvite: false, canManageRoles: false, grantedFeatures: ['core.agents', 'files.search'], priority: 25 };
+    writeFileSync(projectFile, JSON.stringify(record, null, 2));
     const roots = { home, appRoot: join(home, 'app'), projectsRoot: join(home, 'projects') };
     const saved = process.env.NEXTAUTH_SECRET;
     process.env.NEXTAUTH_SECRET = 'fixture-session-secret-0-3-2';
@@ -57,6 +62,7 @@ describe('upgrading a real 0.3.2 home through every shipped module', { timeout: 
       const before = snapshot(home, () => false);
       const dry = await run(false);
       expect(dry.logs.join('\n')).not.toContain('Blocking');
+      expect(dry.logs.join('\n')).toContain('role searcher: held files.search without files.read — now holds files.read');
       expect(snapshot(home, () => false)).toEqual(before);
 
       const applied = await run(true);
@@ -67,7 +73,8 @@ describe('upgrading a real 0.3.2 home through every shipped module', { timeout: 
       const manifest = JSON.parse(readFileSync(join(home, 'checkpoints', applied.outcome.checkpoint!, 'manifest.json'), 'utf8')) as { roots: { path: string }[]; files: { path: string }[] };
       expect(new Set(manifest.files.map((file) => file.path)).size).toBe(manifest.files.length);
       const after = snapshot(home, (rel) => rel === 'checkpoints');
-      const touched = [...new Set([...before.keys(), ...after.keys()])].filter((rel) => before.get(rel) !== after.get(rel) && rel !== 'app/config/data-formats.json');
+      // The audit log is append-only and never part of the way back (a restore keeps what was recorded).
+      const touched = [...new Set([...before.keys(), ...after.keys()])].filter((rel) => before.get(rel) !== after.get(rel) && rel !== 'app/config/data-formats.json' && rel !== 'app/logs/audit.jsonl');
       expect(touched.length).toBeGreaterThan(0);
       const uncovered = touched.filter((rel) => !manifest.roots.some((root) => rel === root.path || rel.startsWith(`${root.path}/`)));
       expect(uncovered).toEqual([]);
@@ -76,6 +83,10 @@ describe('upgrading a real 0.3.2 home through every shipped module', { timeout: 
       const data = JSON.parse(readFileSync(join(roots.appRoot, 'config', 'sources', 'my-workspace', 'data.json'), 'utf8')) as { formatVersion: number; permissions: { paths: Record<string, unknown>[] } };
       expect(data.formatVersion).toBeGreaterThanOrEqual(7);
       expect(data.permissions.paths.filter((rule) => rule.roles !== undefined && (rule.roles as string[]).every((name) => name === 'owner' || name === 'admin'))).toEqual([]);
+
+      const merged = JSON.parse(readFileSync(projectFile, 'utf8')) as { roles: Record<string, { grantedFeatures: string[] }> };
+      expect(merged.roles.searcher!.grantedFeatures).toEqual(['core.agents', 'files.read']);
+      expect(readFileSync(join(roots.appRoot, 'logs', 'audit.jsonl'), 'utf8')).toContain('"role":"searcher"');
 
       const settled = snapshot(home, () => false);
       const again = await run(true);

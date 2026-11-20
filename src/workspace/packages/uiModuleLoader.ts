@@ -437,6 +437,8 @@ function startModules(view: PackageUiAttachments, importer: ModuleImporter): Pro
   );
   for (const skip of plan.skipped) {
     console.error(`[package-ui] ${skip.packageId} not installed: ${skip.reason.code} (${skip.reason.id})`);
+    // Named where the package's surfaces render: a consumer whose provider is absent is not a silent blank.
+    s.attachFailed.set(skip.packageId, `${skip.reason.code}: ${skip.reason.id}`);
   }
   const providerOf = new Map<string, string>();
   for (const d of candidates) for (const id of d.provides ?? []) providerOf.set(id, d.packageId);
@@ -467,6 +469,7 @@ function startModules(view: PackageUiAttachments, importer: ModuleImporter): Pro
         try {
           await Promise.all(providers);
           await installModule(descriptor, tracked);
+          s.attachFailed.delete(id);
         } catch (error) {
           console.error(`[package-ui] ${id} failed to attach`, error);
           const reason = (error as { reason?: unknown } | null)?.reason;

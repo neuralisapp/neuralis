@@ -11,7 +11,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { PackageSourceRoot } from '@neuralis/package-system/contracts';
-import { selectFlaggedPackageRoots } from '../projectPackages';
+import { selectDisabledPackageFolders, selectFlaggedPackageRoots } from '../projectPackages';
 import { getProjectPackageScanner, getScannerForDir } from '../ProjectPackageScanner';
 
 function root(overrides: Partial<PackageSourceRoot>): PackageSourceRoot {
@@ -31,21 +31,21 @@ function root(overrides: Partial<PackageSourceRoot>): PackageSourceRoot {
 describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
   it('selects a project-scope, enabled folder whose whole source is a package folder, with its scope', () => {
     expect(selectFlaggedPackageRoots([root({})])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' },
+      { kind: 'folder', dir: '/projects/p1/acme', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' },
     ]);
   });
 
   it('R2b — a user-scoped flagged source is INCLUDED, carrying its user scope', () => {
     const userScoped = root({ slug: 'pkg-alice', scope: { kind: 'user', userId: 'alice' } });
     expect(selectFlaggedPackageRoots([userScoped])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'user', userId: 'alice' }, plane: 'local', uriRoot: 'acme://' },
+      { kind: 'folder', dir: '/projects/p1/acme', ownerScope: { kind: 'user', userId: 'alice' }, plane: 'local', uriRoot: 'acme://' },
     ]);
   });
 
   it('R2b — an agent-scoped flagged source is INCLUDED, carrying its agent scope', () => {
     const agentScoped = root({ slug: 'pkg-a1', scope: { kind: 'agent', userId: 'alice', agentId: 'a1' } });
     expect(selectFlaggedPackageRoots([agentScoped])).toEqual([
-      { dir: '/projects/p1/acme', ownerScope: { kind: 'agent', userId: 'alice', agentId: 'a1' }, plane: 'local', uriRoot: 'acme://' },
+      { kind: 'folder', dir: '/projects/p1/acme', ownerScope: { kind: 'agent', userId: 'alice', agentId: 'a1' }, plane: 'local', uriRoot: 'acme://' },
     ]);
   });
 
@@ -55,8 +55,8 @@ describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
 
   it('scans each listed package folder under the source root, its uri root following', () => {
     expect(selectFlaggedPackageRoots([root({ packageFolders: ['tools/pkgs', 'skills'] })])).toEqual([
-      { dir: '/projects/p1/acme/tools/pkgs', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://tools/pkgs' },
-      { dir: '/projects/p1/acme/skills', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://skills' },
+      { kind: 'folder', dir: '/projects/p1/acme/tools/pkgs', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://tools/pkgs' },
+      { kind: 'folder', dir: '/projects/p1/acme/skills', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://skills' },
     ]);
   });
 
@@ -65,7 +65,7 @@ describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
   // every other device — the host never opens a remote device's folder.
   it('a device folder this host may open is scanned in place; another device\'s (an empty root) never is', () => {
     expect(selectFlaggedPackageRoots([root({ slug: 'laptop', plane: 'device', containerRoot: '/home/me/work', uriRoot: 'laptop://' })])).toEqual([
-      { dir: '/home/me/work', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://' },
+      { kind: 'folder', dir: '/home/me/work', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://' },
     ]);
     expect(selectFlaggedPackageRoots([root({ slug: 'remote', containerRoot: '', uriRoot: 'remote://' })])).toEqual([]);
   });
@@ -78,7 +78,7 @@ describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
     expect(selectFlaggedPackageRoots([root({ kind: 'brain', containerRoot: '' })])).toEqual([]);
   });
 
-  it('skips the default `packages` drop-zone (C3 handles it unconditionally)', () => {
+  it('skips the default `packages` drop-zone (it follows its source from its fixed path)', () => {
     expect(selectFlaggedPackageRoots([root({ slug: 'packages' })])).toEqual([]);
   });
 
@@ -93,9 +93,27 @@ describe('selectFlaggedPackageRoots — the C2/R2b selection', () => {
       root({ slug: 'b', containerRoot: '/p/b', enabled: false }),
     ]);
     expect(dirs).toEqual([
-      { dir: '/p/a', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' },
-      { dir: '/p/alice', ownerScope: { kind: 'user', userId: 'alice' }, plane: 'local', uriRoot: 'acme://' },
+      { kind: 'folder', dir: '/p/a', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' },
+      { kind: 'folder', dir: '/p/alice', ownerScope: { kind: 'user', userId: 'alice' }, plane: 'local', uriRoot: 'acme://' },
     ]);
+  });
+});
+
+describe('selectDisabledPackageFolders — what a switched-off source lists', () => {
+  it('lists each package folder of a disabled source on this disk, with its scope and slug; never an enabled one', () => {
+    const off = root({ slug: 'mine', enabled: false, scope: { kind: 'user', userId: 'alice' }, packageFolders: ['pkgs', ''] });
+    expect(selectDisabledPackageFolders([off, root({ slug: 'on' })])).toEqual([
+      { sourceSlug: 'mine', dir: '/projects/p1/acme/pkgs', ownerScope: { kind: 'user', userId: 'alice' }, uriRoot: 'acme://pkgs' },
+      { sourceSlug: 'mine', dir: '/projects/p1/acme', ownerScope: { kind: 'user', userId: 'alice' }, uriRoot: 'acme://' },
+    ]);
+  });
+
+  it('skips the drop zone\'s own source, a folder with no root here (another device) and a folder that is not source-relative', () => {
+    expect(selectDisabledPackageFolders([
+      root({ slug: 'packages', enabled: false }),
+      root({ slug: 'remote', enabled: false, containerRoot: '' }),
+      root({ slug: 'bad', enabled: false, packageFolders: ['../escape'] }),
+    ])).toEqual([]);
   });
 });
 

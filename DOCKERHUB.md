@@ -1,10 +1,14 @@
-![Neuralis — build your AI workforce: self-hosted, multi-agent, multiplayer](https://docs.neuralisapp.com/img/neuralis-banner.jpg)
+![Neuralis — self-hosted AI operating system for your team and agents](https://docs.neuralisapp.com/img/neuralis-banner.jpg)
 
-**Your agents. Your infrastructure. One package protocol.**
+**Self-hosted AI operating system for your team and agents.**
+
+Build a campaign dashboard with an agent, then use it together in a shared project.
+
+[Watch the film](https://www.youtube.com/watch?v=yzsJvKtSxm4) · [Try the interactive demo](https://neuralisapp.com/demo?story=campaign-report) — in your browser, with sample data
 
 [Website](https://neuralisapp.com) · [Documentation](https://docs.neuralisapp.com) · [Install](https://docs.neuralisapp.com/getting-started/installation) · [Releases](https://github.com/neuralisapp/neuralis/releases) · [Docker Hub](https://hub.docker.com/r/neuralisapp/neuralis) · [npm](https://www.npmjs.com/package/neuralis) · [X](https://x.com/neuralis_app) · [Threads](https://www.threads.com/@neuralis_app) · [YouTube](https://www.youtube.com/@neuralis_app)
 
-Runs on Linux and Windows (WSL2) with Docker, from source on Linux and macOS, or as a desktop app on Windows, Linux and macOS (preview) · License: FSL-1.1-ALv2
+Runs on Linux and Windows (WSL2) with Docker, from source on Linux and macOS, or as a desktop app on Windows, Linux and macOS (preview) · [Source-available under FSL-1.1-ALv2](https://docs.neuralisapp.com/enterprise/licensing) · Apache-2.0 package contract
 
 Neuralis is a self-hosted, multi-agent and multiplayer AI platform built around one package protocol. It gives organizations a shared place to run agents, work with their knowledge and extend the workspace on infrastructure they control. Models, tools, files and everyday applications meet inside projects with explicit identities and permissions.
 
@@ -21,7 +25,7 @@ An agent has a persistent identity, memory, access to a scoped filesystem and a 
 | Native, from a clone (no Docker) | Linux, macOS | git, Node.js 26 or newer and, on Linux, python3, make and a C++ compiler; on macOS the terminal's native module ships prebuilt. Vector store: setup downloads and starts Qdrant on Linux, connects to a Qdrant you run, or runs in-memory only. |
 | Desktop app | Windows 11 x64, Linux x64 | Nothing else: the app carries Node.js, the host and its vector store ([desktop app](https://docs.neuralisapp.com/getting-started/desktop-app)). Installers for Windows 11 x64 (unsigned: SmartScreen asks first), Linux x64 and arm64 (AppImage, deb) and macOS (a preview, untested: an unsigned Intel build). Docker is optional: for the virtual desktop, or to keep the vectors in Docker. Neuralis' own skills run on Node; a bash-script skill (an imported agentskills.io bundle) still needs Git for Windows on a Windows device. |
 
-Ubuntu's own `nodejs` package is older than 26: install 26 from NodeSource or with `sudo snap install node --classic --channel=26`. Natively on Windows the desktop app runs; its shell sandbox is still pending verification there, so until it proves itself on a machine that computer serves its owner alone. The release checks of the published version pass on Linux (Docker and native) and, for the native host from a clone, on macOS (Apple silicon and Intel).
+Ubuntu's own `nodejs` package is older than 26: install 26 from NodeSource or with `sudo snap install node --classic --channel=26`. Natively on Windows the desktop app runs; its shell sandbox is still pending verification there, so until it proves itself on a machine that computer runs only its owner's own commands, started without the sandbox on a pairing the owner approved there. The release checks of the published version pass on Linux (Docker and native) and, for the native host from a clone, on macOS (Apple silicon and Intel).
 
 ## Quick start
 
@@ -64,8 +68,6 @@ The [installation guide](https://docs.neuralisapp.com/getting-started/installati
 ![A configured Neuralis workspace with Calendar and Chat open](https://docs.neuralisapp.com/img/getting-started/workspace-1.webp)
 
 *A configured installation with Calendar and Chat beside each other. The workspace, agent choices and installed packages reflect this installation.*
-
-[Watch the workspace demo](https://neuralisapp.com/media/hero-desktop.mp4): connect a sample channel, schedule a briefing and open a package-contract Launch board. This scripted demonstration uses local sample data.
 
 ## A workspace for people and agents
 
@@ -112,7 +114,7 @@ Neuralis is intended for organizations running on their own machines, on-premise
 
 Requests from people, agents, scheduled workflows, skill scripts, the `neuralis` command-line client and external MCP clients pass the same deny-by-default boundaries. Identity, project membership, feature grants, package trust and path policies each have a role. Audit records make sensitive actions inspectable.
 
-Today sign-in uses email and password; OIDC and SAML single sign-on are not available. A project administrator — or an agent with the invite skill — can invite a person by a one-time link bound to their email and role (valid for `inviteLinkTtlHours`, 7 days by default): the person chooses their own password, or joins with the account they already have. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane reaches a machine only after its owner pairs it as a device; anyone else's commands run there only while the OS sandbox confines them — Landlock on Linux, Seatbelt on macOS, Microsoft Execution Containers on Windows 11 (pending verification) — once it has proven itself on that machine; an unconfined device serves its owner alone. Review the [security model](https://docs.neuralisapp.com/enterprise/security) and [deployment guide](https://docs.neuralisapp.com/enterprise/deployment) before choosing a topology.
+Today sign-in uses email and password; OIDC and SAML single sign-on are not available. A project administrator — or an agent with the invite skill — can invite a person by a one-time link bound to their email and role (valid for `inviteLinkTtlHours`, 7 days by default): the person chooses their own password, or joins with the account they already have. Confined shells depend on a Linux kernel with Landlock support. The optional host access plane reaches a machine only after its owner pairs it as a device; anyone else's commands run there only while the OS sandbox confines them — Landlock on Linux, Seatbelt on macOS, Microsoft Execution Containers on Windows 11 (pending verification) — once it has proven itself on that machine; a machine whose sandbox has not proven itself serves its owner alone. Review the [security model](https://docs.neuralisapp.com/enterprise/security) and [deployment guide](https://docs.neuralisapp.com/enterprise/deployment) before choosing a topology.
 
 ## Start with a deployment that fits
 
@@ -134,15 +136,15 @@ As of 2026-11-02. Scores measure development against documented promises and pla
 | Host (neuralis) | stable | 90 | Sign-in is email and password; single sign-on (OIDC, SAML) is not available. |
 | Install channels | beta | 70 | The beta is published; the Docker image channel's update (`neuralis update`) is live-verified, while npm and clone updates and all-channel non-localhost login remain unverified. Native ARM runtime acceptance is not recorded. |
 | Desktop app | preview | 60 | The installers and the self-update have not been run from a published release on a clean machine yet. |
-| Neuralis CLI | stable | 90 | On macOS the device service and the OS sandbox are built but not yet run on hardware; on Windows the sandbox is measured on one Windows 11 machine; until the sandbox proves itself on a machine, its device serves its owner alone. |
-| Devices | stable | 85 | Other members' commands run on a device only under its OS sandbox; that sandbox is proven on Linux and measured on one Windows 11 machine, while on macOS, or wherever it has not proved itself, a device serves its owner alone. |
+| Neuralis CLI | stable | 90 | On macOS the device service and the OS sandbox are built but not yet run on hardware; on Windows the sandbox is measured on one Windows 11 machine; until the sandbox proves itself on a machine, its device runs only its owner's own starts without the sandbox, on a pairing the owner approved there. |
+| Devices | stable | 85 | Other members' commands run on a device only under its OS sandbox; that sandbox is proven on Linux and measured on one Windows 11 machine, while on macOS, or wherever it has not proved itself, a device runs only its owner's own starts without the sandbox, on a pairing the owner approved there. |
 | Platform: Linux | experimental | 85 | No run on a standalone Linux host is recorded; the live-tested setup is Docker on WSL2. |
 | Platform: Windows with WSL2 | stable | 90 | Use an in-distro Docker engine. |
 | Platform: macOS | experimental | 50 | Neuralis has not been run on macOS so far. |
 | Platform: Windows (native) | preview | 55 | The Windows shell sandbox is measured on one Windows 11 machine only, and skill scripts still need a bash, which does not run inside it yet. |
 | Enterprise security and governance | stable | 90 | Give the host access plane only to a single trusted operator's machine. |
 | Sign-in | stable | 85 | Single sign-on (OIDC, SAML) is not available; sign-in is email and password. |
-| MCP | stable | 85 | Keep the MCP port private unless remote MCP clients are intended. |
+| MCP | stable | 90 | Keep the MCP port private unless remote MCP clients are intended. |
 | Workflows and scheduling | beta | 75 | Workflows run in a single process; a second replica would run every schedule twice. |
 | Messaging channels | preview | 55 | Telegram and WhatsApp are the only messaging platforms. |
 | Ecosystem import | stable | 85 | Imported content is markdown only: hooks and MCP server definitions in a foreign layout are not loaded. |
@@ -150,4 +152,4 @@ As of 2026-11-02. Scores measure development against documented promises and pla
 
 ## License
 
-Neuralis uses FSL-1.1-ALv2, with each version converting to Apache-2.0 two years after release. The package-system contract layer is Apache-2.0. See [licensing](https://docs.neuralisapp.com/enterprise/licensing) for terms and the distinction between the platform and packages you build against its contract.
+Neuralis uses FSL-1.1-ALv2, with each version converting to Apache-2.0 two years after it is first made available. The package-system contract layer is Apache-2.0. See [licensing](https://docs.neuralisapp.com/enterprise/licensing) for terms and the distinction between the platform and packages you build against its contract. Each image and the desktop app carry their third-party notices: `/usr/share/licenses/neuralis/`, `/neuralis/_runtime/` and `/usr/local/lib/neuralis-cli/` in this image, `/usr/share/doc/neuralis/` in the companion images, `resources/licenses/` in the desktop app, and `THIRD_PARTY_NOTICES.md` in the CLI's npm package. The source code of the components licensed under the GNU GPL or LGPL is available on request at team@neuralisapp.com for three years from the release date (the written offer in each notices file).

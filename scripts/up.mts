@@ -4,8 +4,8 @@
  * install kind) supervised by this one process instead of a container and a
  * compose file.
  *
- *   neuralis up --foreground   start Qdrant and the host, print ONE JSON `ready` line on stdout (a
- *                              `locked` line naming the holder instead when another host holds the
+ *   neuralis up --foreground   start Qdrant and the host, print JSON state lines on stdout (`starting` steps,
+ *                              ONE `ready`; a `locked` line naming the holder when another host holds the
  *                              home), supervise until SIGTERM/SIGINT or stdin closes (the desktop app's form)
  *   neuralis up                the same, detached; its output goes to <home>/app/logs/host.log
  *   neuralis down              stop the host holding this data home (its lock's process), wait ≤ 30 s;
@@ -28,7 +28,10 @@
  * `setup --native --yes` adopts) → pending offline upgrades (`UPGRADE_REQUIRED`) →
  * every port free (`PORT_TAKEN`) → the confinement helper (verified, else the
  * confined local shell stays dark and the log names why) → Qdrant: the
- * binary in binary mode; in docker mode (this home's own compose file) and
+ * binary in binary mode, held first against the home's recorded version
+ * (`qdrant-upgrade/bundleHop.mts`: one minor behind → a cold copy, then the
+ * start, then the record; further → not started, `vectorsReason: version`);
+ * in docker mode (this home's own compose file) and
  * external mode with a recorded install folder, that folder's vector-store
  * service through the one starter (`ensureCompanion`: `up -d --no-deps
  * <vectorstore>` — never the Docker app's service), then a bounded wait for its
@@ -110,6 +113,7 @@ import { listenProbe, PORT_ROLES, UPGRADE_DOCKER_FIRST, type PortClaim, type Por
 import { parseEnvContent, qdrantBinaryPorts, type QdrantPorts } from './setup/envFile.mts';
 import { authoredEnv, downloadPinned, ollamaAnswers, pullOllamaModel, qdrantBinarySpawn, type PullProgress } from './setup/services.mts';
 import { EXIT_UPGRADE_REQUIRED } from './upgrade.mts';
+import { prepareBundleQdrant, PROCESS_BUNDLE_HOP_PORTS, recordBundleHop, type BundleHopPorts } from './qdrant-upgrade/bundleHop.mts';
 
 /** The `neuralis up` exit codes — the contract the desktop app reads. */
 export const EXIT = {
@@ -309,7 +313,8 @@ export function verifyBundledHelper(resources: string, platform: NodeJS.Platform
 
 // ── The run ──────────────────────────────────────────────────
 
-export type HealthAnswer = { status: number; instanceId: string | null; state: string | null; code: string | null };
+/** `phase`: the host's bootstrap phase while it answers `initializing` (503). */
+export type HealthAnswer = { status: number; instanceId: string | null; state: string | null; code: string | null; phase?: string | null };
 
 /** Everything a run reads from the world — injectable for tests. */
 export interface UpDeps {
@@ -344,6 +349,8 @@ export interface UpDeps {
    * supervisor must not keep. Its exit code and output.
    */
   upgradeCheck(packageDir: string, home: string): { status: number | null; output: string };
+  /** The bundle's Qdrant against the home's recorded version: the cold copy, the free space, the server's version. */
+  qdrantHop: BundleHopPorts;
   /** Restart delays per child; a death beyond the list ends the run. */
   backoffMs: readonly number[];
   /** How long the host and Qdrant each get to answer at start (and after a restart). */
@@ -360,9 +367,9 @@ export const PROCESS_UP_DEPS: UpDeps = {
   async health(app) {
     try {
       const response = await fetch(new URL('/api/health', app), { signal: AbortSignal.timeout(2_000), redirect: 'error' });
-      const body = (await response.json()) as { instanceId?: unknown; status?: unknown; code?: unknown };
+      const body = (await response.json()) as { instanceId?: unknown; status?: unknown; code?: unknown; phase?: unknown };
       const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
-      return { status: response.status, instanceId: text(body.instanceId), state: text(body.status), code: text(body.code) };
+      return { status: response.status, instanceId: text(body.instanceId), state: text(body.status), code: text(body.code), phase: text(body.phase) };
     } catch {
       return null;
     }
@@ -414,6 +421,7 @@ export const PROCESS_UP_DEPS: UpDeps = {
     });
     return { status: res.error ? null : res.status, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
   },
+  qdrantHop: PROCESS_BUNDLE_HOP_PORTS,
   backoffMs: [1_000, 2_000, 4_000, 8_000, 16_000],
   // The host's own bootstrap (every package's init) takes about a minute on a cold start.
   readyTimeoutMs: 180_000,
@@ -424,7 +432,9 @@ export const PROCESS_UP_DEPS: UpDeps = {
 
 type Io = Pick<CliContext, 'stdout' | 'stderr' | 'env' | 'stdin'>;
 
-/** One JSON state line on stdout — the only thing `up --foreground` writes there. */
+/** One JSON state line on stdout — the only thing `up --foreground` writes there: `starting` steps
+ *  (`checked` · `database` · `packages`, each only when its signal happened), then `ready` / `restarting` /
+ *  `failed` / `locked`. */
 function emit(io: Io, line: Record<string, unknown>): void {
   io.stdout(`${JSON.stringify(line)}\n`);
 }
@@ -678,6 +688,8 @@ export async function runUp(input: {
   // 4. The confinement helper: exported only when proven.
   const helper = deps.verifyHelper(resources);
   if (!helper.ok) say(`Confined local shells are unavailable on this machine: ${helper.reason}.`);
+  // The start's steps, each a real signal (a window shows them): this machine checked, the vector store answering, the host loading its packages.
+  emit(io, { state: 'starting', step: 'checked' });
 
   const run = { stopped: false };
   let stopResolve: () => void = () => {};
@@ -836,7 +848,7 @@ export async function runUp(input: {
   // answer is still the host's store: the host serves without it and joins it when it answers;
   // in-memory vectors exist only where no Qdrant is configured.
   let qdrantDone: Promise<void> = Promise.resolve();
-  let vectors: { store: 'qdrant' | 'memory'; reason?: 'configured' | 'unreachable' | 'unauthorized' } = config.qdrant.url ? { store: 'qdrant' } : { store: 'memory', reason: 'configured' };
+  let vectors: { store: 'qdrant' | 'memory'; reason?: 'configured' | 'unreachable' | 'unauthorized' | 'version' } = config.qdrant.url ? { store: 'qdrant' } : { store: 'memory', reason: 'configured' };
   const vectorsUnreachable = (url: string, waited: boolean): void => {
     vectors = { store: 'qdrant', reason: 'unreachable' };
     say(`Qdrant did not answer on ${url}${waited ? ` within ${Math.round(deps.readyTimeoutMs / 1000)} s` : ''}; the host starts, and search and indexing continue by themselves when the vector store answers.`);
@@ -877,13 +889,19 @@ export async function runUp(input: {
       lastFailure = start.ok ? '' : start.reason;
     }
   };
-  if (spec) {
+  // The bundle's Qdrant against the home's recorded version, before it starts (the port probe proved none runs here).
+  const hop = spec ? await prepareBundleQdrant(deps.qdrantHop, home, say) : null;
+  if (spec && hop?.kind === 'refuse') {
+    vectors = { store: 'qdrant', reason: 'version' };
+    say(`${hop.reason} The host starts.`);
+  } else if (spec) {
     mkdirSync(spec.cwd, { recursive: true });
     let firstReady: () => void = () => {};
     const qdrantFirstReady = new Promise<void>((resolve) => { firstReady = resolve; });
     qdrantDone = supervise('qdrant', () => spawn(layout.qdrant, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }), () => deps.qdrantUp(qdrantUrl), () => firstReady());
-    const answered = await Promise.race([qdrantFirstReady.then(() => true), stopRequested.then(() => true), sleep(deps.readyTimeoutMs).then(() => false)]);
-    if (!answered) vectorsUnreachable(qdrantUrl, true);
+    const answered = await Promise.race([qdrantFirstReady.then(() => 'ready' as const), stopRequested.then(() => 'stopped' as const), sleep(deps.readyTimeoutMs).then(() => 'timeout' as const)]);
+    if (answered === 'timeout') vectorsUnreachable(qdrantUrl, true);
+    else if (answered === 'ready' && hop?.kind === 'hop') say(await recordBundleHop(deps.qdrantHop, home, hop, qdrantUrl, config.env.QDRANT_API_KEY?.trim() || undefined));
   } else if (config.qdrant.url && !run.stopped) {
     // A Qdrant in Docker (this home's own, or the Docker install's): its vector-store service only.
     const url = config.qdrant.url;
@@ -902,8 +920,11 @@ export async function runUp(input: {
     }
   }
 
+  if (!run.stopped && vectors.store === 'qdrant' && vectors.reason === undefined) emit(io, { state: 'starting', step: 'database' });
+
   // 6–8. The host, the sandbox origin, then the one ready line per readiness.
   let hostDone: Promise<void> = Promise.resolve();
+  let loadingSaid = false;
   if (!run.stopped) {
     hostDone = supervise('host', () => spawn(process.execPath, [layout.server], { cwd: layout.runtime, env: hostEnv, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true }), async () => {
       const answer = await deps.health(origins(config).app);
@@ -915,6 +936,7 @@ export async function runUp(input: {
         requestStop();
         return false;
       }
+      if (answer.state === 'initializing' && answer.phase && !loadingSaid) { loadingSaid = true; emit(io, { state: 'starting', step: 'packages' }); }
       return answer.status === 200;
     }, () => {
       setState('ready');

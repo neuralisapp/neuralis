@@ -13,6 +13,21 @@
  * and stamps trust from the runtime, never the manifest.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+  // brain-core's source-level + path answer for the request's own session (its own arms: packageReadFloor.test.ts).
+  loadVisibleDisabledPackageIds: async (session: { userId: string }, _projectId: string, rows: Array<{ packageId: string; sourceSlug: string }>) => {
+    if (rows.length > 0) h.disabledAsks.push(session.userId);
+    const slugs = new Set(h.readableDisabled.get(session.userId) ?? []);
+    return new Set(rows.filter((row) => slugs.has(row.sourceSlug)).map((row) => row.packageId));
+  },
+}));
 import type { PackageDefinition, SourceScope } from '@neuralis/package-system/contracts';
 import { packageInstanceId } from '@neuralis/package-system/contracts';
 
@@ -33,6 +48,9 @@ const h = vi.hoisted(() => ({
   hasSource: true,
   toolchain: true,
   buildError: null as Error | null,
+  disabledRows: [] as Array<{ packageId: string; sourceSlug: string; name: string; version?: string; originUri: string; ownerScope: unknown }>,
+  readableDisabled: new Map<string, string[]>(),
+  disabledAsks: [] as string[],
 }));
 
 vi.mock('@/server/auth/session', () => ({ requireSession: async () => ({ id: 'u1' }) }));
@@ -57,7 +75,11 @@ vi.mock('@/server/store/AuditStore', () => ({ writeAuditLog: async (entry: Recor
 vi.mock('@/server/packages/projectPackages', () => ({
   resolveProjectPackageInstance: async (_projectId: string, packageId: string) => h.records.get(packageId) ?? null,
   ensureProjectPackagesLoaded: async () => {},
-  listAllActivatedPackages: () => h.activated.map((packageId) => ({ packageId, source: 'local-dir', sourceRoot: '/srv/secret/path' })),
+  listAllActivatedPackages: () => [
+    ...h.activated.map((packageId) => ({ packageId, source: 'local-dir', sourceRoot: '/srv/secret/path' })),
+    ...h.disabledRows.map((row) => ({ packageId: row.packageId, source: 'local-dir', sourceDisabled: true, sourceSlug: row.sourceSlug })),
+  ],
+  listDisabledPackageRows: () => h.disabledRows,
   resetProjectPackageActivation: () => {},
   resyncProjectPackages: async () => ({ scanned: 0, errors: [] }),
 }));
@@ -117,6 +139,9 @@ beforeEach(() => {
   h.project.packageAccessFeature = {};
   for (const map of [h.records, h.registry, h.owners, h.origins, h.status]) map.clear();
   h.activated = [];
+  h.disabledRows = [];
+  h.readableDisabled.clear();
+  h.disabledAsks = [];
   h.trustWrites = [];
   h.featureWrites = [];
   h.audit = [];
@@ -282,5 +307,52 @@ describe('list', () => {
     }
     h.granted = ['packages.manage'];
     expect(await ids(), 'owner').toContain(MINE);
+  });
+});
+
+describe('list — the package folders of a switched-off source', () => {
+  const OFF_OWN = packageInstanceId({ originUri: 'off://pkgs/tool', projectId: 'p1', scope: { kind: 'project' } });
+  const OFF_PRIVATE = packageInstanceId({ originUri: 'mine://pkgs/secret', projectId: 'p1', scope: { kind: 'user', userId: 'u2' } });
+  const listed = async () => ((await (await LIST(post(), params())).json()) as { packages: Array<Record<string, unknown>> }).packages;
+
+  beforeEach(() => {
+    h.disabledRows = [
+      { packageId: OFF_OWN, sourceSlug: 'off', name: 'Tool', version: '1.2.0', originUri: 'off://pkgs/tool', ownerScope: { kind: 'project' } },
+      { packageId: OFF_PRIVATE, sourceSlug: 'mine', name: 'Secret', originUri: 'mine://pkgs/secret', ownerScope: { kind: 'user', userId: 'u2' } },
+    ];
+  });
+
+  it('a row shows for a source this session reads at source level — manifest name and version, never loaded, no action', async () => {
+    h.readableDisabled.set('u1', ['off']);
+    const rows = await listed();
+    expect(rows.map((p) => p.id)).toEqual([OWN, OFF_OWN, '@neuralis/brain-core']);
+    expect(rows[1]).toEqual({ id: OFF_OWN, name: 'Tool', version: '1.2.0', slot: 'source', origin: 'off://pkgs/tool', trust: 'untrusted', status: 'source-disabled', ownerScope: { kind: 'project' } });
+    expect(h.disabledAsks).toEqual(['u1']);
+  });
+
+  it('a package manager who is not the owner of a member\'s switched-off source sees none of its rows — the verdict gates, not the role (paired: its owner does)', async () => {
+    h.granted = ['*'];
+    h.readableDisabled.set('u1', ['off']);
+    expect((await listed()).map((p) => p.id)).not.toContain(OFF_PRIVATE);
+    h.readableDisabled.set('u1', ['off', 'mine']);
+    expect((await listed()).map((p) => p.id)).toContain(OFF_PRIVATE);
+  });
+
+  it('a manifest\'s name and version reach the list as one capped line', async () => {
+    h.readableDisabled.set('u1', ['off']);
+    h.disabledRows[0] = { ...h.disabledRows[0]!, name: `Evil\nName\u2028${'x'.repeat(300)}`, version: '\n\t ' };
+    const row = (await listed()).find((p) => p.id === OFF_OWN)!;
+    expect(row.name).toBe(`Evil Name ${'x'.repeat(118)}`);
+    expect(row).not.toHaveProperty('version');
+  });
+
+  it('an unanswered verdict lists no row, though the row\'s scope is the project\'s', async () => {
+    expect((await listed()).map((p) => p.id)).toEqual([OWN, '@neuralis/brain-core']);
+  });
+
+  it('asks nothing when no source is switched off', async () => {
+    h.disabledRows = [];
+    await listed();
+    expect(h.disabledAsks).toEqual([]);
   });
 });

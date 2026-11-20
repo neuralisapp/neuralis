@@ -9,13 +9,13 @@
 # Refresh (deliberately, as its own commit, with the new digests recorded):
 #   docker buildx imagetools inspect node:26-alpine3.24 | grep Digest
 #   docker buildx imagetools inspect alpine:3.24        | grep Digest
-# Digests taken 2026-11-10 (manifest lists — multi-arch safe; the base is Node
-# 26.13.0). The base and the helper stages share one alpine release. The
+# Digests taken 2026-11-18 (manifest lists — multi-arch safe; the base is Node
+# 26.13.1). The base and the helper stages share one alpine release. The
 # `landlock-dl` stage alone stays on the 2026-09-24 alpine digest: its output
 # `nrs-sandboxer` is byte-pinned per architecture in
 # `packages/cli/native/manifest.json`, so its base moves only together with
 # that manifest (`node packages/cli/scripts/native.mjs collect`).
-FROM node:26-alpine3.24@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS base
+FROM node:26-alpine3.24@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS base
 # pnpm at EXACTLY the version the repo pins (root package.json `packageManager`;
 # packages/package-system/test/packagingDrift.test.ts holds the two equal).
 # Node 25+ ships no corepack, and the runner inherits this binary, so a pnpm call
@@ -75,7 +75,7 @@ RUN apk add --no-cache curl ca-certificates tar && \
 # ── landlock sandboxer build stage ──────────
 # The OS-enforcement helper: a tiny, dependency-free, musl-static binary that
 # turns on a Landlock LSM filesystem sandbox for LOWER-TRUST agent shells, then
-# execve()s the command. Owner/admin (exec.unconfined) run WITHOUT it (bare
+# execve()s the command. Owner/admin (server.unconfined) run WITHOUT it (bare
 # spawn) — the helper is only spawned for confined agents. Compiled from the
 # VENDORED source (no external download → lowest supply-chain risk).
 #
@@ -261,6 +261,10 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
     fi
 
 COPY tsconfig.base.json ./
+# The CLI build writes its third-party notices with the host's generator and
+# licence policy (`packages/cli/tsup.config.ts`), before the host folder is here.
+COPY neuralis/scripts/build/third-party-notices.mjs neuralis/scripts/build/third-party-notices.mjs
+COPY neuralis/scripts/build/third-party neuralis/scripts/build/third-party
 
 # ── Build every workspace package, in dependency order ──
 # The platform's packages and every local folder package build the same way:
@@ -371,25 +375,6 @@ RUN node neuralis/scripts/build/standalone-runtime.mts \
 FROM base AS runner
 WORKDIR /neuralis
 
-# ── Version identity ────────────────────────────────────────
-# A running deployment could not say what it was. The labels are for whoever
-# inspects the image; NEURALIS_VERSION/REVISION are the same values reaching
-# the PROCESS, because a label is invisible from inside the container and the
-# admin environment table reads process env. Both surfaces are authenticated —
-# the anonymous health endpoint deliberately carries no version, since an exact
-# version on a public endpoint is a CVE-targeting aid for self-hosted installs.
-ARG NEURALIS_VERSION=0.0.0-dev
-ARG NEURALIS_REVISION=unknown
-LABEL org.opencontainers.image.title="neuralisapp/neuralis" \
-      org.opencontainers.image.description="Neuralis — self-hosted multi-LLM agent platform." \
-      org.opencontainers.image.vendor="Eszes LLC" \
-      org.opencontainers.image.licenses="FSL-1.1-ALv2" \
-      org.opencontainers.image.source="https://github.com/neuralisapp/neuralis" \
-      org.opencontainers.image.version="${NEURALIS_VERSION}" \
-      org.opencontainers.image.revision="${NEURALIS_REVISION}"
-ENV NEURALIS_VERSION=${NEURALIS_VERSION}
-ENV NEURALIS_REVISION=${NEURALIS_REVISION}
-
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEURALIS_HOME=/.neuralis
@@ -403,8 +388,6 @@ ENV HOSTNAME=0.0.0.0
 # channels (next start) take the same value via the --keepAliveTimeout flag in
 # package.json. See docs/architect/realtime-transport.md.
 ENV KEEP_ALIVE_TIMEOUT=55000
-
-ARG UV_VERSION=0.12.21
 
 # Skill-runtime baseline (W4D + W4E skill protocol — Anthropic-compat).
 # Imported skills activate through `execute action="skill"`, render a SKILL.md
@@ -426,12 +409,10 @@ RUN apk add --no-cache \
       python3 py3-pip py3-virtualenv \
       ffmpeg poppler-utils \
       make github-cli docker-cli docker-cli-compose && \
-    python3 -m pip install --break-system-packages --no-cache-dir "uv==${UV_VERSION}" && \
     rg --version >/dev/null && git --version >/dev/null && grep --version >/dev/null && \
     curl --version >/dev/null && wget --version >/dev/null && \
     jq --version >/dev/null && yq --version >/dev/null && \
     python3 --version >/dev/null && python3 -m pip --version >/dev/null && \
-    uv --version >/dev/null && \
     openssl version >/dev/null && file --version >/dev/null && \
     ffmpeg -version >/dev/null && ffprobe -version >/dev/null && \
     which pdftotext >/dev/null && which pdftoppm >/dev/null && \
@@ -443,6 +424,12 @@ RUN apk add --no-cache \
 # depends on it). poppler-utils: pdftotext/pdftoppm for brain-core's PDF
 # read path — it was silently absent from the image (the LocalDiskConnector
 # degrade path masked it in prod; owner-approved rider, media Inc 3'c).
+
+# uv/uvx for imported Python skills, in its OWN layer below the system packages:
+# a uv bump rebuilds only this layer, never the ~180-package one above.
+ARG UV_VERSION=0.13.9
+RUN python3 -m pip install --break-system-packages --no-cache-dir "uv==${UV_VERSION}" && \
+    uv --version >/dev/null
 
 # extism-js + binaryen (wasm-merge, wasm-opt) — the WASM build toolchain for
 # user packages. Copied from dedicated fetch stages (pinned, checksum-verified).
@@ -467,13 +454,27 @@ RUN ( nrs-sandboxer --selftest || [ $? -eq 91 ] )
 # `neuralis request …` with its session ticket (Landlock reads `/usr`). It is not
 # a host dependency; the host's operator command line stays
 # `node /neuralis/bin/neuralis.mjs <verb>`.
-COPY --from=builder /src/packages/cli/package.json /src/packages/cli/LICENSE.md /src/packages/cli/.mcp.json /usr/local/lib/neuralis-cli/
+COPY --from=builder /src/packages/cli/package.json /src/packages/cli/LICENSE.md /src/packages/cli/THIRD_PARTY_NOTICES.md /src/packages/cli/.mcp.json /usr/local/lib/neuralis-cli/
 COPY --from=builder /src/packages/cli/dist /usr/local/lib/neuralis-cli/dist
 COPY --from=builder /src/packages/cli/skills /usr/local/lib/neuralis-cli/skills
 COPY --from=builder /src/packages/cli/.claude-plugin /usr/local/lib/neuralis-cli/.claude-plugin
 COPY --from=builder /src/packages/cli/.codex-plugin /usr/local/lib/neuralis-cli/.codex-plugin
 RUN ln -s /usr/local/lib/neuralis-cli/dist/neuralis.mjs /usr/local/bin/neuralis && \
     neuralis --version
+
+# The image's third-party notices, after the last package install: every apk
+# package from the image's own database, the global npm tree (npm, pnpm),
+# Node.js, and the prebuilt binaries copied in above, each licence text from the
+# package or pinned in `neuralis/scripts/build/third-party/` (generator mounted,
+# never a layer). It fails the build on a component the licence policy cannot
+# account for. The host tree's notices are `_runtime/THIRD_PARTY_NOTICES.md`,
+# the CLI's sit beside it in /usr/local/lib/neuralis-cli/.
+RUN --mount=type=bind,source=neuralis/scripts/build,target=/tmp/notices \
+    node /tmp/notices/third-party-notices.mjs --title "The Neuralis image (neuralisapp/neuralis)" \
+      --os apk /lib/apk/db/installed --tree /usr/local/lib/node_modules \
+      --binary node --binary uv --binary extism-js --binary binaryen --binary musl \
+      --also /neuralis/_runtime/THIRD_PARTY_NOTICES.md --also /usr/local/lib/neuralis-cli/THIRD_PARTY_NOTICES.md \
+      --out /usr/share/licenses/neuralis/THIRD_PARTY_NOTICES.md
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
@@ -516,5 +517,28 @@ EXPOSE 3100 3101
 # dependency whose package.json carries a `neuralis` block (any scope).
 # Override only for slim images that ship fewer builtins (FULL package ids):
 #   ENV NEURALIS_BUILTINS=@neuralis/agent-core,@neuralis/brain-core
+
+# ── Version identity ────────────────────────────────────────
+# A running deployment could not say what it was. The labels are for whoever
+# inspects the image; NEURALIS_VERSION/REVISION are the same values reaching
+# the PROCESS, because a label is invisible from inside the container and the
+# admin environment table reads process env. Both surfaces are authenticated —
+# the anonymous health endpoint deliberately carries no version, since an exact
+# version on a public endpoint is a CVE-targeting aid for self-hosted installs.
+# It sits LAST on purpose: REVISION changes with every commit, and every layer
+# after it would be rebuilt — keep the system packages above it cached.
+# `licenses` carries the SPDX id of OUR code in the image; the third-party
+# components keep their own terms (/usr/share/licenses/neuralis/).
+ARG NEURALIS_VERSION=0.0.0-dev
+ARG NEURALIS_REVISION=unknown
+LABEL org.opencontainers.image.title="neuralisapp/neuralis" \
+      org.opencontainers.image.description="Neuralis — self-hosted multi-LLM agent platform." \
+      org.opencontainers.image.vendor="Eszes LLC" \
+      org.opencontainers.image.licenses="FSL-1.1-ALv2" \
+      org.opencontainers.image.source="https://github.com/neuralisapp/neuralis" \
+      org.opencontainers.image.version="${NEURALIS_VERSION}" \
+      org.opencontainers.image.revision="${NEURALIS_REVISION}"
+ENV NEURALIS_VERSION=${NEURALIS_VERSION}
+ENV NEURALIS_REVISION=${NEURALIS_REVISION}
 
 CMD ["node", "_runtime/server.js"]

@@ -15,7 +15,7 @@ import { createSourceDeviceUpgrade, DEVICE_OWNER_ENV } from '../source-device-v1
 import { runUpgrade, UPGRADES_DIR } from '../../upgrade.mts';
 // The app's registry reader and the CLI's identity reader — the two consumers this module writes for.
 import { DeviceRegistry } from '../../../../packages/agent-core/src/hostBroker/devices/registry.ts';
-import { devicePaths, moveLegacyLayout, moveSingleHostLayout, readPairedHosts } from '../../../../packages/cli/src/device/paths.ts';
+import { devicePaths, moveLegacyLayout, movePairingsLayout, moveSingleHostLayout, readPairings } from '../../../../packages/cli/src/device/paths.ts';
 
 const dirs: string[] = [];
 afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
@@ -116,11 +116,19 @@ describe("source-device-v1 — the server's host access onto paired devices", ()
     expect(json(join(f.projectsRoot, 'main', 'data', 'agent-core', 'a1', 'conversations', 'c1', 'shells', 's1', 'meta.json')).device).toBe(device!.id);
     expect(json(join(f.projectsRoot, 'main', 'data', 'agent-core', 'a1', 'conversations', 'c1', 'shells', 's2', 'meta.json')).device).toBeUndefined();
 
-    // The CLI adopts the identity — `neuralis device install`'s two moves, then its reader: it links without pairing.
+    // The CLI adopts the identity — the device start's moves (one-host folder → per host → per pairing), then its reader: it links without pairing.
     const paths = devicePaths({ NEURALIS_HOME: f.home }, '/nowhere', 'linux');
     moveLegacyLayout(paths);
     moveSingleHostLayout(paths, 'linux');
-    expect(readPairedHosts(paths).hosts.map((h) => h.device)).toEqual([{ host: expect.any(String), link: 'ws://127.0.0.1:3101/ws/device-link', deviceId: device!.id, name: 'Neuralis server' }]);
+    // This home has no ceiling, so the step never loads one: the broker's ceiling loader stays out of this
+    // script's type graph (the CLI suite runs the step with the real loader). The one id here is the pairing key.
+    await movePairingsLayout(paths, 'linux', {
+      backup: async () => null,
+      ownerCeilingOf: () => { throw new Error('this home has no ceiling to load'); },
+      isPairingKey: (id) => id === device!.id,
+      now: Date.now,
+    });
+    expect(readPairings(paths).pairings.map((h) => h.device)).toEqual([{ host: expect.any(String), link: 'ws://127.0.0.1:3101/ws/device-link', deviceId: device!.id, name: 'Neuralis server' }]);
 
     const project = json(join(f.appRoot, 'projects', 'main.json'));
     expect(project).toMatchObject({ roleGrantVersion: 20, formatVersion: 3 });

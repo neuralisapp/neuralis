@@ -48,6 +48,7 @@ import { meetsRequires } from '@neuralis/package-system/access';
 import { resolveMember } from '../auth/memberSession';
 import { getCommunityPackageRegistry } from '../packages/runtime';
 import { isPackageDefinitionVisible } from '../packages/packageVisibility';
+import { loadPackageReadVerdict, NO_READ_HIDDEN } from '../packages/packageReadFloor';
 import type { ProjectRecord } from '../store/projectTypes';
 import { getLogger } from '../logging/setup';
 import { eventWireType } from '@neuralis/package-system/contracts';
@@ -83,19 +84,23 @@ function slot(): MaterializerSlot {
 
 /**
  * May this member read events of this package at all? The same ladder the
- * workspace snapshot applies (project install scope + base-access feature) —
- * a package hidden from them never notifies them, and its rows are dropped on
- * read. `'missing'`: the package is not loaded, so nothing can be said.
+ * workspace snapshot applies (project install scope + base-access feature +
+ * the read verdict on a source package's `package.json`) — a package hidden
+ * from them never notifies them, and its rows are dropped on read.
+ * `'missing'`: the package is not loaded, so nothing can be said;
+ * `'unjudged'`: the read verdict was unavailable — hidden, never a drop.
  */
-function eventPackageVisibility(
+async function eventPackageVisibility(
   packageId: string,
   session: SessionContext,
   project: Pick<ProjectRecord, 'packageAccessFeature'>,
-): 'visible' | 'denied' | 'missing' {
+): Promise<'visible' | 'denied' | 'missing' | 'unjudged'> {
   const definition = getCommunityPackageRegistry().getPackage(packageId);
   if (!definition) return 'missing';
+  const read = await loadPackageReadVerdict(session, session.projectId, packageId);
+  if (read === 'unjudged') return 'unjudged';
   const grantedFeatures = [...(session.grantedFeatures ?? [])];
-  const visible = isPackageDefinitionVisible(
+  const visible = read === 'visible' && isPackageDefinitionVisible(
     definition,
     {
       host: 'neuralis-workspace',
@@ -104,6 +109,8 @@ function eventPackageVisibility(
       role: session.role,
       grantedFeatures,
       packageAccessFeature: project.packageAccessFeature,
+      // The read verdict was asked above; the ladder runs the rest.
+      readHidden: NO_READ_HIDDEN,
     },
     grantedFeatures,
   );
@@ -111,12 +118,12 @@ function eventPackageVisibility(
 }
 
 /** {@link eventPackageVisibility} as a yes/no — a package that is not loaded is a no. */
-export function isEventPackageVisible(
+export async function isEventPackageVisible(
   packageId: string,
   session: SessionContext,
   project: Pick<ProjectRecord, 'packageAccessFeature'>,
-): boolean {
-  return eventPackageVisibility(packageId, session, project) === 'visible';
+): Promise<boolean> {
+  return (await eventPackageVisibility(packageId, session, project)) === 'visible';
 }
 
 export type EventReadVerdict = 'visible' | 'denied' | 'indeterminate';
@@ -141,8 +148,8 @@ export async function mayReadEvent(
   session: SessionContext,
   project: Pick<ProjectRecord, 'packageAccessFeature'>,
 ): Promise<EventReadVerdict> {
-  const packageVerdict = eventPackageVisibility(packageId, session, project);
-  if (packageVerdict === 'missing') return 'indeterminate';
+  const packageVerdict = await eventPackageVisibility(packageId, session, project);
+  if (packageVerdict === 'missing' || packageVerdict === 'unjudged') return 'indeterminate';
   if (packageVerdict === 'denied') return 'denied';
   if (!meetsRequires(session, declaration.requires)) return 'denied';
   try {

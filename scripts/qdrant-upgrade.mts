@@ -8,7 +8,6 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { statfs } from 'node:fs/promises';
 import { join } from 'node:path';
 import { authoredBaseEnv, installKindOf, resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { appPort, checkOffline, composeProbe, httpProbe } from './checkpoint.mts';
@@ -47,6 +46,7 @@ import {
   runDockerUpgrade,
   loadRecord,
   rollbackBinary,
+  freeBytesOf,
   processExec as exec,
   type BaseContext,
   type Exec,
@@ -62,11 +62,12 @@ import {
 /**
  * The desktop app runs the Qdrant binary its own build ships, under its supervisor: a binary
  * staged in `<home>/bin` would raise the storage beyond what that binary reads. Its Qdrant
- * moves with the app's own update; a Docker-mode Qdrant beside the app upgrades here.
+ * moves with the app's own update — the next start hops the store one minor after a cold copy
+ * (`qdrant-upgrade/bundleHop.mts`); a Docker-mode Qdrant beside the app upgrades here.
  */
 export function desktopBinaryRefusal(desktop: boolean, mode: 'docker' | 'binary'): string | null {
   if (!desktop || mode !== 'binary') return null;
-  return 'Refusing: the desktop app runs the Qdrant its own build ships — a new Qdrant arrives with the app\'s update (the app checks at start; the tray has "Check for updates…"). Nothing was changed.';
+  return 'Refusing: the desktop app runs the Qdrant its own build ships — a new Qdrant arrives with the app\'s update, and the app\'s next start moves the store to it after a cold copy in qdrant-backups (the app checks for updates at start; the tray has "Check for updates…"). Nothing was changed.';
 }
 
 export function composeQdrantApi(run: Exec, composeProject: string, cwd: string): QdrantApi {
@@ -221,10 +222,7 @@ async function upgradeQdrant(argv: string[], cliCtx: CliContext): Promise<number
     exec,
     // An image-only folder runs this in a one-shot container: the host loopback is not its own.
     liveQdrant: installLayout(neuralisDir, cliCtx.packageDir) === 'image' ? () => composeQdrantApi(exec, composeProject, neuralisDir) : () => hostQdrantApi(liveUrl, apiKey),
-    freeBytes: async (dir) => {
-      const fs = await statfs(dir);
-      return fs.bavail * fs.bsize;
-    },
+    freeBytes: freeBytesOf,
     log: (line) => console.log(`  ${dot} ${line}`),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => new Date(),

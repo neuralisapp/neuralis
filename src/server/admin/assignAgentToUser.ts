@@ -14,7 +14,7 @@
  *
  * Floor = the LIVE role's `canManageRoles` FLAG — identical to the host's
  * privileged `PATCH /api/projects/[id]` gate that carries the same write from
- * the Agents tab. The route's `project.agents.assign` feature is reachability
+ * the Agents tab. The route's `project.members` feature is reachability
  * only; feature-without-flag denies (flag-AND-feature — strictly stronger than
  * the flag alone, never weaker).
  *

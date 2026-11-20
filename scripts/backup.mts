@@ -6,7 +6,6 @@
  */
 
 import { existsSync } from 'node:fs';
-import { statfs } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { appPort, checkOffline, composeProbe, httpProbe } from './checkpoint.mts';
@@ -16,7 +15,7 @@ import { detectIsClone, loadHostEnv, resolveConfigDir } from './setup/detect.mts
 import { hostQdrantUrl, readEnvFile } from './setup/envFile.mts';
 import { askLine } from './setup/ownerCheck.mts';
 import { qdrantImageRef, qdrantStatePath, readQdrantState } from './setup/qdrantVersion.mts';
-import { processExec } from './qdrant-upgrade/upgrade.mts';
+import { freeBytesOf, processExec } from './qdrant-upgrade/upgrade.mts';
 import {
   defaultBackupRoot,
   listBackups,
@@ -98,10 +97,7 @@ function ports(install: InstallFacts, qdrantUrl: string): BackupPorts {
   return {
     exec: processExec,
     log: (line) => console.log(`  ${line}`),
-    freeBytes: async (dir) => {
-      const fs = await statfs(dir);
-      return fs.bavail * fs.bsize;
-    },
+    freeBytes: freeBytesOf,
     now: () => new Date(),
     monotonicMs: () => performance.now(),
     composeRunning: composeProbe,

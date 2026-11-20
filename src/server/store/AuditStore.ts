@@ -39,6 +39,10 @@ export type AuditAction =
   | 'project.archive'
   | 'project.restore'
   | 'project.delete'
+  // The offline upgrade that gave each right one feature id: one row per stored
+  // role that held only part of a merged group (what it held, what it gained,
+  // what it holds now).
+  | 'role.features_merged'
   | 'agent.create'
   | 'agent.update'
   | 'agent.delete'

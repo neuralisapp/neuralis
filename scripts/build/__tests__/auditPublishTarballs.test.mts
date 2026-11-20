@@ -26,8 +26,8 @@ afterEach(() => {
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** One minimal tarball per publishable package; `extra` adds files to the named package. */
-function tarballSet(extra: Record<string, Record<string, string>> = {}, omit: string[] = [], modes: Record<string, Record<string, number>> = {}): string {
+/** One minimal tarball per publishable package (the CLI with its notices); `extra` adds files to the named package, `null` removes one. */
+function tarballSet(extra: Record<string, Record<string, string | null>> = {}, omit: string[] = [], modes: Record<string, Record<string, number>> = {}): string {
   const out = mkdtempSync(join(tmpdir(), 'audit-tarballs-'));
   scratchDirs.push(out);
   for (const rel of PUBLISHABLE) {
@@ -35,12 +35,14 @@ function tarballSet(extra: Record<string, Record<string, string>> = {}, omit: st
     if (omit.includes(name)) continue;
     const stage = mkdtempSync(join(tmpdir(), 'audit-stage-'));
     scratchDirs.push(stage);
-    const files: Record<string, string> = {
+    const files: Record<string, string | null> = {
       'package.json': JSON.stringify({ name, version: '0.0.0-test' }),
       'index.js': 'export {};\n',
+      ...(name === '@neuralis/cli' ? { 'THIRD_PARTY_NOTICES.md': '# Third-party notices\n' } : {}),
       ...(extra[name] ?? {}),
     };
     for (const [file, content] of Object.entries(files)) {
+      if (content === null) continue;
       mkdirSync(dirname(join(stage, 'package', file)), { recursive: true });
       writeFileSync(join(stage, 'package', file), content);
       const mode = modes[name]?.[file];
@@ -149,6 +151,67 @@ describe('audit-publish-tarballs --tarballs', () => {
     expect(lost.stderr).not.toContain('node-pty/LICENSE');
     // PAIRED CONTROL: the same tarball with the bit (what npm pack writes) is clean.
     expect(audit(['--tarballs', tarballSet({ '@neuralis/cli': files }, [], { '@neuralis/cli': { [helper]: 0o755 } })]).status).toBe(0);
+  });
+
+  it('the CLI tarball must carry THIRD_PARTY_NOTICES.md naming every package its build metafile inlined', async () => {
+    const { writeNotices } = (await import(join(repoRoot, 'neuralis', 'scripts', 'build', 'third-party-notices.mjs'))) as {
+      writeNotices(args: { title: string; tree: string[]; metafile: string[]; apk: string | null; binary: string[]; out: string }): unknown;
+    };
+    const work = mkdtempSync(join(tmpdir(), 'audit-notices-'));
+    scratchDirs.push(work);
+    for (const [pkg, licence] of [['left-pad', 'MIT'], ['right-pad', 'ISC']]) {
+      mkdirSync(join(work, 'node_modules', pkg), { recursive: true });
+      writeFileSync(join(work, 'node_modules', pkg, 'package.json'), JSON.stringify({ name: pkg, version: '1.0.0', license: licence }));
+      writeFileSync(join(work, 'node_modules', pkg, 'LICENSE'), `${licence} licence of ${pkg}\n`);
+    }
+    const metafile = join(work, '.build', 'metafile-esm.json');
+    mkdirSync(dirname(metafile), { recursive: true });
+    writeFileSync(metafile, JSON.stringify({ base: '..', inputs: { 'node_modules/left-pad/index.js': {}, 'node_modules/right-pad/index.js': {}, 'src/index.ts': {} } }));
+    writeNotices({ title: 'fixture CLI', tree: [], metafile: [metafile], apk: null, binary: [], out: join(work, 'NOTICES.md') });
+    const notices = readFileSync(join(work, 'NOTICES.md'), 'utf8');
+    const flag = ['--notices-metafile', `@neuralis/cli=${metafile}`];
+    expect(audit(['--tarballs', tarballSet({ '@neuralis/cli': { 'THIRD_PARTY_NOTICES.md': notices } }), ...flag]).status).toBe(0);
+    // One variable each: a package's section removed; the file left out of the tarball.
+    const gap = audit(['--tarballs', tarballSet({ '@neuralis/cli': { 'THIRD_PARTY_NOTICES.md': notices.replace('## right-pad 1.0.0\n', '## other 0\n') } }), ...flag]);
+    expect(gap.status).toBe(1);
+    expect(gap.stderr).toContain('THIRD_PARTY_NOTICES.md — npm right-pad@1.0.0: no section');
+    const missing = audit(['--tarballs', tarballSet({ '@neuralis/cli': { 'THIRD_PARTY_NOTICES.md': null } })]);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('THIRD_PARTY_NOTICES.md is missing');
+  });
+
+  it('the per-push workspace audit checks the same notices: present and naming every inlined package', async () => {
+    const mod = (await import(join(repoRoot, 'neuralis', 'scripts', 'build', 'audit-publish-tarballs.mjs'))) as {
+      auditWorkspaceTrees(findings: string[], opts: unknown, at: { root: string; packages: string[] }): number;
+      privateMarkers(args: { roots: string[] }): unknown;
+    };
+    const { writeNotices } = (await import(join(repoRoot, 'neuralis', 'scripts', 'build', 'third-party-notices.mjs'))) as {
+      writeNotices(args: { title: string; tree: string[]; metafile: string[]; apk: string | null; binary: string[]; out: string }): unknown;
+    };
+    const root = mkdtempSync(join(tmpdir(), 'audit-workspace-'));
+    scratchDirs.push(root);
+    const cli = join(root, 'cli');
+    mkdirSync(join(cli, 'node_modules', 'left-pad'), { recursive: true });
+    writeFileSync(join(cli, 'package.json'), JSON.stringify({ name: '@neuralis/cli', version: '0.0.0-test', files: ['index.js', 'THIRD_PARTY_NOTICES.md'] }));
+    writeFileSync(join(cli, 'index.js'), 'export {};\n');
+    writeFileSync(join(cli, 'node_modules', 'left-pad', 'package.json'), JSON.stringify({ name: 'left-pad', version: '1.0.0', license: 'MIT' }));
+    writeFileSync(join(cli, 'node_modules', 'left-pad', 'LICENSE'), 'MIT licence of left-pad\n');
+    const metafile = join(cli, '.build', 'metafile-esm.json');
+    mkdirSync(dirname(metafile), { recursive: true });
+    writeFileSync(metafile, JSON.stringify({ base: '..', inputs: { 'node_modules/left-pad/index.js': {} } }));
+    const notices = join(cli, 'THIRD_PARTY_NOTICES.md');
+    writeNotices({ title: 'fixture CLI', tree: [], metafile: [metafile], apk: null, binary: [], out: notices });
+    const findingsOf = (): string[] => {
+      const findings: string[] = [];
+      mod.auditWorkspaceTrees(findings, { strict: false, markers: mod.privateMarkers({ roots: [] }), metafiles: { '@neuralis/cli': metafile } }, { root, packages: ['cli'] });
+      return findings;
+    };
+    expect(findingsOf()).toEqual([]);
+    // One variable each: a package's section removed; the file removed.
+    writeFileSync(notices, readFileSync(notices, 'utf8').replace('## left-pad 1.0.0\n', '## other 0\n'));
+    expect(findingsOf()).toEqual(['cli: THIRD_PARTY_NOTICES.md — npm left-pad@1.0.0: no section']);
+    rmSync(notices);
+    expect(findingsOf()).toEqual(['cli: THIRD_PARTY_NOTICES.md is missing — the package bundles third-party code']);
   });
 
   it('exits 2 on a flag without a value', () => {

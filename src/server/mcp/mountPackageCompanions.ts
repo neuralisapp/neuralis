@@ -22,7 +22,7 @@
  *     session cookie) → membership → **`machine.read`** through
  *     `authorizeStreamAccess` (SF-MC1).
  *   - agent-core (host terminal): additionally the device gate — the device's
- *     owner with `device.own`, or `terminal.device` on a live-`sandboxed` device.
+ *     owner with `device.own`, or `device.others` on a live-`sandboxed` device.
  *   - agent-core (device link): no session at all — the device's own secret,
  *     compared by hash; the link carries answers, never a call.
  *

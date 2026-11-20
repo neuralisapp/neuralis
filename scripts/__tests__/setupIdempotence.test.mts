@@ -35,7 +35,7 @@ import {
 import { projectIdFromName } from '../../src/lib/utils';
 import { detectDocker as runsInContainer } from '@neuralis/package-system/paths';
 import {
-  answeringQdrant, bindMountOf, busyPortRefusal, detectDocker, dockerRunProbe, findBusyPorts, listenProbe, listPublishedPorts, nextFreePorts, pickPortProbe, settleLoopbackPorts, portClaims, qdrantOwnership, resolveConfigDir, resolveHostHome, setupRefusal,
+  answeringQdrant, bindMountOf, busyPortRefusal, detectDocker, dockerRunProbe, findBusyPorts, listenProbe, listPublishedPorts, nextFreePorts, pickPortProbe, portCheck, settleLoopbackPorts, portClaims, qdrantOwnership, resolveConfigDir, resolveHostHome, setupRefusal,
   type AsyncProgramRunner, type PortClaim, type PortProbe, type PublishedPort,
 } from '../setup/detect.mts';
 import { run as runSetup } from '../setup.mts';
@@ -838,6 +838,29 @@ describe('host ports: every busy one named, this install\'s own never busy, a fr
     // Paired controls: the own project's ports are never busy; no Docker (no table) and a free probe → nothing.
     expect(await findBusyPorts(claims, { ownProject: 'neuralis', published, probe: async () => [], probeFirst: true })).toEqual([]);
     expect(await findBusyPorts(claims, { ownProject: null, published: async () => null, probe: async () => [], probeFirst: true })).toEqual([]);
+  });
+
+  it('a `docker info` past its timeout still reads Docker\'s table: the own running stack is not busy, a stranger on 3100 is refused by name', async () => {
+    const timedOut = Object.assign(new Error('spawnSync docker ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    const env = detectDocker(() => ({ stdout: '', stderr: '', status: null, error: timedOut }));
+    expect(env).toMatchObject({ available: false, cause: 'daemon' });
+    const ps = (project: string): AsyncProgramRunner => async (_file, args) => {
+      expect(args[0]).toBe('ps');
+      return { stdout: `${project}\t${project}-neuralis-1\t0.0.0.0:3100-3102->3100-3102/tcp\n`, stderr: '', status: 0, error: null };
+    };
+    const probe: PortProbe = async (cs) => cs.filter((c) => c.port === 3100);
+    const ownCheck = portCheck('monorepo', env.cause !== 'missing', ps('neuralis'));
+    expect(await findBusyPorts(claims, { ownProject: 'neuralis', ...ownCheck, probe })).toEqual([]);
+    // Paired control, same runner shape: another project on 3100 is still refused, and named.
+    const strangerCheck = portCheck('monorepo', env.cause !== 'missing', ps('lab'));
+    const busy = await findBusyPorts(claims, { ownProject: 'neuralis', ...strangerCheck, probe });
+    expect(busy.map((b) => [b.port, b.holder])).toEqual([[3100, 'Compose project "lab"'], [3101, 'Compose project "lab"'], [3102, 'Compose project "lab"']]);
+    expect(busyPortRefusal(busy, new Map([['app', 3103], ['mcp', 3104], ['sandbox', 3105]]), true).detail[0]).toBe('Port 3100 (the app) is in use — held by Compose project "lab": set NEURALIS_APP_PORT=3103 in .env.');
+    // A table Docker could not give: the unnamed hit says re-run, never "move the port".
+    const unread = busyPortRefusal([{ key: 'app', port: 3100, address: '0.0.0.0', holder: null }], new Map([['app', 3103]]), false);
+    expect(unread.message).toMatch(/^Docker's list of published ports could not be read/);
+    expect(unread.detail.join('\n')).not.toMatch(/NEURALIS_APP_PORT/);
+    expect(unread.detail.at(-1)).toMatch(/setup --compose-only again\. Nothing was written\.$/);
   });
 
   it('in the image: Docker\'s table first, the throwaway probe only for what no container claims', async () => {

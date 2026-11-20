@@ -26,6 +26,9 @@
  *                                   the command line, the offline-upgrade closure)
  *   <out>/scripts/cli/up.mjs        `up` precompiled — the desktop app's resident
  *                                   supervisor runs it without tsx (`bundle-up.mjs`)
+ *   <out>/_runtime/THIRD_PARTY_NOTICES.md  every third-party package of `node_modules/`,
+ *                                   its licence and texts (`third-party-notices.mjs`,
+ *                                   fail-closed on the tracked licence policy)
  *
  * `_runtime/` holds what a whole-folder overlay must not hide (an anonymous
  * volume protects a directory, never a single file); `node_modules/` stays at
@@ -59,6 +62,7 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeNotices } from './third-party-notices.mjs';
 
 export type StandaloneInputs = {
   /** The host package folder after `next build` (holds `.next/standalone`, `.next/static`, `public`, `skills`, `bin`, `scripts`). */
@@ -199,6 +203,11 @@ export function placeAssets(input: StandaloneInputs): void {
   if (input.buildReport) copyTree(input.buildReport, join(runtime, 'build'), false);
 }
 
+/** Step 5: the notices of the finished `node_modules/` — beside the server, where an overlay never hides them. */
+export function placeNotices(input: StandaloneInputs): void {
+  writeNotices({ title: 'The Neuralis host runtime', tree: [join(input.out, 'node_modules')], metafile: [], apk: null, binary: [], out: join(input.out, '_runtime', 'THIRD_PARTY_NOTICES.md') });
+}
+
 /** The whole assembly, in the order the layout depends on. */
 export function assembleStandaloneRuntime(input: StandaloneInputs, reconcile: (input: StandaloneInputs) => void = reconcileExternals): void {
   if (existsSync(input.out) && readdirSync(input.out).length > 0) throw new Error(`${input.out} is not empty — the tree is written once, into a fresh folder.`);
@@ -213,6 +222,7 @@ export function assembleStandaloneRuntime(input: StandaloneInputs, reconcile: (i
   placeNodeModules(input);
   reconcile(input);
   placeAssets(input);
+  placeNotices(input);
   // The tree is built on its target OS, and pnpm's virtual store names are
   // longer off Windows: only a Windows tree is measured against MAX_PATH.
   if (process.platform === 'win32') assertWindowsPathBudget(input.out);

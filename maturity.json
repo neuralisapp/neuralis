@@ -300,7 +300,7 @@
       "summary": "The host provides sign-in, projects with membership, roles and spend limits, package bootstrap and routing, the workspace shell and the operator commands, and leaves every product capability to packages.",
       "limits": [
         "Sign-in is email and password; single sign-on (OIDC, SAML) is not available.",
-        "The host access plane runs confined on a Linux kernel (Linux or WSL2) and, measured on one Windows 11 machine, inside the Windows sandbox; a macOS machine joins only as an unconfined device that serves its owner alone, not yet run live there.",
+        "The host access plane runs confined on a Linux kernel (Linux or WSL2) and, measured on one Windows 11 machine, inside the Windows sandbox; on a macOS machine the sandbox is not yet proven, so its device runs only its owner's own commands, not yet run live there.",
         "A package added to the host dependencies runs in-process with full native trust; vet it like any dependency.",
         "Encrypted credentials depend on the master key file; back it up with the data directory."
       ]
@@ -341,7 +341,7 @@
       "gates": [],
       "summary": "The neuralis command signs a person in from their own machine, calls package routes as that person, bridges MCP clients, exports or launches a plugin with an agent's skills, and pairs the machine as a device.",
       "limits": [
-        "On macOS the device service and the OS sandbox are built but not yet run on hardware; on Windows the sandbox is measured on one Windows 11 machine; until the sandbox proves itself on a machine, its device serves its owner alone.",
+        "On macOS the device service and the OS sandbox are built but not yet run on hardware; on Windows the sandbox is measured on one Windows 11 machine; until the sandbox proves itself on a machine, its device runs only its owner's own starts without the sandbox, on a pairing the owner approved there.",
         "Device commands run on the machine itself and need Node.js 22.22 or newer there."
       ]
     },
@@ -354,7 +354,7 @@
       "gates": [],
       "summary": "A paired computer lends a host exactly the folders its owner grants, per host: as sources, for git, for packages and for sandboxed commands and terminals, with the owner deciding on the machine whether others may run commands there.",
       "limits": [
-        "Other members' commands run on a device only under its OS sandbox; that sandbox is proven on Linux and measured on one Windows 11 machine, while on macOS, or wherever it has not proved itself, a device serves its owner alone.",
+        "Other members' commands run on a device only under its OS sandbox; that sandbox is proven on Linux and measured on one Windows 11 machine, while on macOS, or wherever it has not proved itself, a device runs only its owner's own starts without the sandbox, on a pairing the owner approved there.",
         "Against a host you do not trust, the floor is the folder list: give that host no folder it should not reach.",
         "The device broker runs in its owner's login session; there is no dedicated service account for shared machines."
       ]
@@ -398,7 +398,7 @@
       "summary": "On macOS Neuralis is built to run in Docker Desktop or natively; shells are confined by the macOS sandbox once it proves itself on that Mac.",
       "limits": [
         "Neuralis has not been run on macOS so far.",
-        "Until the macOS sandbox proves itself on that Mac, the machine serves its owner alone, unconfined."
+        "Until the macOS sandbox proves itself on that Mac, the machine runs only its owner's own starts without the sandbox, on a pairing the owner approved there."
       ]
     },
     {
@@ -411,7 +411,7 @@
       "summary": "On Windows the native host and the desktop app run without Docker; agent commands run in PowerShell, confined once the Windows sandbox proves itself on that machine (measured on one Windows 11 machine).",
       "limits": [
         "The Windows shell sandbox is measured on one Windows 11 machine only, and skill scripts still need a bash, which does not run inside it yet.",
-        "Until the Windows sandbox proves itself on that machine, the machine serves its owner alone, unconfined."
+        "Until the Windows sandbox proves itself on that machine, the machine runs only its owner's own starts without the sandbox, on a pairing the owner approved there."
       ]
     },
     {
@@ -448,7 +448,7 @@
       "kind": "topic",
       "title": "MCP",
       "label": "stable",
-      "score": 85,
+      "score": 90,
       "gates": [],
       "summary": "Each agent's gated tools are served to outside MCP clients with OAuth 2.1 or per-agent keys, and agents use external MCP servers and interactive MCP App cards.",
       "limits": [

@@ -55,6 +55,19 @@ before every build). Never edit the compose
 image line to "upgrade": a newer engine migrates the storage in place, and a jump across
 several minors is unsupported.
 
+The desktop app's own Qdrant (binary mode, the binary its bundle ships) moves with the app
+instead, and this command refuses it. At every start the app holds the record against its
+bundle's Qdrant: one minor (or a patch) behind, it writes a cold copy of the store to
+`<NEURALIS_HOME>/qdrant-backups/<from>-to-<target>-<time>/qdrant-storage.tar` before the new
+Qdrant opens it, and advances the record once that Qdrant answers its version — until it does
+(a Qdrant that answers late or crashes), every start writes one more full copy; it skips the
+copy and the Qdrant when less space is free than the store occupies. A store more than one
+minor behind, newer than the bundle's, or with an unreadable record is not opened: the host
+starts without search and indexing, and its log says why — for a store too far behind, the
+Neuralis release to install and start once first. If a Docker install set the data folder up,
+the record describes that install's store: run `neuralis qdrant-upgrade` in its folder instead.
+Nothing prunes these copies; restoring one is a manual extract with the app quit.
+
 The command asks for owner credentials, refuses without twice the storage size free,
 checks the source against the settle rule while the app still runs, stops the APP (nothing
 may write while it records the point counts every hop must reproduce), copies snapshots out

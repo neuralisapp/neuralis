@@ -559,10 +559,21 @@ function withoutImporters(text) {
 }
 
 /**
+ * A snapshot's reachability flag, not a resolution: a local package that needs a
+ * dependency the tracked graph reaches only optionally turns `x:\n    optional: true`
+ * into `x: {}` — no version moves. Snapshot entries sit at two spaces, their flag at
+ * four; a `peerDependenciesMeta` flag (eight) is untouched.
+ */
+function withoutOptionalFlag(lines) {
+  return lines.filter((line) => line !== '    optional: true').map((line) => (/^  \S.*: \{\}$/.test(line) ? line.slice(0, -3) : line));
+}
+
+/**
  * Tracked `packages:`/`snapshots:` lines a resolved lock lost (multiset): empty
  * = every tracked resolution survived. Compared VERSION-wise — a local package
  * can widen the peer context of a shared dependency (an optional peer it brings
- * into the graph lands in the suffix), which moves no version. The importers
+ * into the graph lands in the suffix), and it can make a tracked optional-only
+ * dependency required (`withoutOptionalFlag`); neither moves a version. The importers
  * are not part of this multiset: a context-free `version:` line from one
  * importer could stand in for another's, so `importerLockDrift` compares them
  * entry by entry.
@@ -573,9 +584,9 @@ function withoutImporters(text) {
  */
 export function lostLockLines(trackedText, currentText) {
   const count = new Map();
-  for (const line of withoutImporters(currentText).split('\n').map(withoutPeerContext)) count.set(line, (count.get(line) ?? 0) + 1);
+  for (const line of withoutOptionalFlag(withoutImporters(currentText).split('\n')).map(withoutPeerContext)) count.set(line, (count.get(line) ?? 0) + 1);
   const lost = [];
-  for (const line of withoutImporters(trackedText).split('\n').map(withoutPeerContext)) {
+  for (const line of withoutOptionalFlag(withoutImporters(trackedText).split('\n')).map(withoutPeerContext)) {
     const left = count.get(line) ?? 0;
     if (left === 0) lost.push(line);
     else count.set(line, left - 1);

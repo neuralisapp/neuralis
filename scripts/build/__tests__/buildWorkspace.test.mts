@@ -188,6 +188,12 @@ describe('the lock check and the workspace glob', () => {
     expect(lostLockLines(tracked, 'packages:\n  a@1.0.1:\n    resolution: x\n  b@2.0.0:\n')).toEqual(['  a@1.0.0:']);
   });
 
+  it('a local package making an optional-only snapshot required moves no version; a moved one still fails', () => {
+    const tracked = 'snapshots:\n  a@1.0.0:\n    optional: true\n\n  b@2.0.0: {}\n';
+    expect(lostLockLines(tracked, 'snapshots:\n  a@1.0.0: {}\n\n  b@2.0.0: {}\n')).toEqual([]);
+    expect(lostLockLines(tracked, 'snapshots:\n  a@1.0.1: {}\n\n  b@2.0.0: {}\n')).toEqual(['  a@1.0.0:']);
+  });
+
   /** A lock text with one importer block per entry: [importer, [dep, specifier, version][]]. */
   function lock(importers: Array<[string, Array<[string, string, string]>]>, tail = 'packages: {}\n'): string {
     let out = 'importers:\n';

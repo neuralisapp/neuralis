@@ -37,8 +37,11 @@ type CatalogEntry = {
 async function catalogFor(session: SessionContext, project: ProjectRecord): Promise<CatalogEntry[]> {
   const events = (await getRuntime()).events();
   const out: CatalogEntry[] = [];
+  // One verdict per package, however many events it declares.
+  const visible = new Map<string, Promise<boolean>>();
   for (const { type, packageId, declaration } of events.declarations()) {
-    if (!isEventPackageVisible(packageId, session, project)) continue;
+    if (!visible.has(packageId)) visible.set(packageId, isEventPackageVisible(packageId, session, project));
+    if (!(await visible.get(packageId))) continue;
     if (!meetsRequires(session, declaration.requires)) continue;
     out.push({
       type,

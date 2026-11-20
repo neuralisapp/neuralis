@@ -120,8 +120,8 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
       // seeds write the unscoped one). Re-seeding from here would stamp the
       // effect's scope onto whatever payload arrived — and on the cold-boot
       // path the Server-Action fallback delivers the UNSCOPED payload, so the
-      // cache would end up labelled `p1:a1` while holding every project's
-      // packages. The `_notifying` guard does not help: it blocks the nested
+      // cache would end up labelled `p1:a1` while holding a payload scoped to no
+      // project (builtins only). The `_notifying` guard does not help: it blocks the nested
       // NOTIFY, not the cache WRITE that precedes it.
       hydrateWidgetRegistry(snapshot);
       setCardSnapshot(snapshot);
@@ -135,8 +135,8 @@ export function WorkspaceRoot({ initialSnapshot, refreshSnapshot }: WorkspaceRoo
 
     // ALWAYS fetch the project-scoped snapshot once a project is known — even
     // when the SSR seed already released the loading overlay. The seed is built
-    // with no projectId (`getSSRSnapshot`), so it carries the ungated
-    // contributions of EVERY project's packages; skipping this fetch left the
+    // with no projectId (`getSSRSnapshot`), so it carries builtins and installs
+    // only — none of this project's packages; skipping this fetch left the
     // whole session running on that unscoped payload until an unrelated runtime
     // invalidation happened to arrive. Surfaces that treat snapshot membership
     // as a visibility PROOF (the derived skill launcher, via `getScopedSnapshot`)

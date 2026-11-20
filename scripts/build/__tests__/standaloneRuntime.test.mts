@@ -21,6 +21,7 @@ import { requiredNativeArtifacts } from '../reconcile-runtime-externals.mjs';
 const RECONCILE = join(dirname(fileURLToPath(import.meta.url)), '..', 'reconcile-runtime-externals.mjs');
 const BUNDLE_UP = join(dirname(fileURLToPath(import.meta.url)), '..', 'bundle-up.mjs');
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'standalone-runtime.mts');
+const NOTICES = join(dirname(fileURLToPath(import.meta.url)), '..', 'third-party-notices.mjs');
 
 const sandboxes: string[] = [];
 function sandbox(): string {
@@ -67,7 +68,8 @@ function fixture(root: string): { app: string; deploy: string; report: string } 
   for (const f of ['detect', 'envFile', 'ownerCheck']) put(join(app, 'scripts', 'setup', `${f}.mts`), `// ${f}\n`);
   put(join(app, 'scripts', 'upgrades', 'a.mts'), '// a\n');
   const deploy = join(root, 'deploy', 'node_modules');
-  put(join(deploy, 'node-pty', 'package.json'), '{"name":"node-pty","version":"1.1.0","main":"lib/index.js"}\n');
+  put(join(deploy, 'node-pty', 'package.json'), '{"name":"node-pty","version":"1.1.0","license":"MIT","main":"lib/index.js"}\n');
+  put(join(deploy, 'node-pty', 'LICENSE'), 'MIT licence of node-pty\n');
   put(join(deploy, 'node-pty', 'lib', 'index.js'), 'module.exports = "deployed";\n');
   put(join(deploy, 'node-pty', 'build', 'Release', 'pty.node'), 'native\n');
   put(join(deploy, '@neuralis', 'kernel', 'package.json'), '{"name":"@neuralis/kernel","version":"0.3.3"}\n');
@@ -76,10 +78,10 @@ function fixture(root: string): { app: string; deploy: string; report: string } 
   return { app, deploy, report };
 }
 
-/** The OLD runner steps 1, 1b, 1c, 2, 3, 3b, 4, 4b of `neuralis/Dockerfile`, as Docker ran them — plus 1d, the `up` bundle (`bundle-up.mjs`). */
+/** The OLD runner steps 1, 1b, 1c, 2, 3, 3b, 4, 4b of `neuralis/Dockerfile`, as Docker ran them — plus 1d, the `up` bundle (`bundle-up.mjs`), and 5, the third-party notices. */
 const OLD_STEPS = String.raw`
 set -eu
-APP="$1"; DEPLOY="$2"; REPORT="$3"; OUT="$4"; RECONCILE="$5"; BUNDLE_UP="$6"
+APP="$1"; DEPLOY="$2"; REPORT="$3"; OUT="$4"; RECONCILE="$5"; BUNDLE_UP="$6"; NOTICES="$7"
 mkdir -p "$OUT" && cd "$OUT"
 copydir() { mkdir -p "$2" && cp -a "$1/." "$2/"; }
 copydir "$APP/.next/standalone/neuralis" .
@@ -99,6 +101,7 @@ node "$RECONCILE" "$OUT" >/dev/null
 copydir "$APP/.next/static" ./_runtime/.next/static
 copydir "$APP/public" ./_runtime/public
 copydir "$REPORT" ./_runtime/build
+node "$NOTICES" --title 'The Neuralis host runtime' --tree ./node_modules --out ./_runtime/THIRD_PARTY_NOTICES.md >/dev/null
 `;
 
 /** Every entry: path, type, mode bits, and its bytes' sha256 or its symlink target — no times. */
@@ -120,7 +123,7 @@ function treeDigest(root: string): string {
 }
 
 function runOld(input: { app: string; deploy: string; report: string }, out: string): void {
-  const r = spawnSync('bash', ['-c', OLD_STEPS, 'old', input.app, input.deploy, input.report, out, RECONCILE, BUNDLE_UP], { encoding: 'utf-8' });
+  const r = spawnSync('bash', ['-c', OLD_STEPS, 'old', input.app, input.deploy, input.report, out, RECONCILE, BUNDLE_UP, NOTICES], { encoding: 'utf-8' });
   expect(r.status, r.stderr).toBe(0);
 }
 
@@ -141,6 +144,10 @@ describe('standalone-runtime — the one runnable-tree layout', () => {
     expect(readlinkSync(join(newOut, '_runtime', '.next', 'node_modules', 'node-pty-0123456789abcdef'))).toBe('../../../node_modules/node-pty');
     expect(readFileSync(join(newOut, 'scripts', 'cli', 'registry.mts'), 'utf-8')).toBe('export async function main() { return 0; } // live registry\n');
     expect(digest).not.toMatch(/\.neuralis-native/);
+    // The deploy tree's third-party packages, by the ONE generator; the first-party kernel is not one.
+    const notices = readFileSync(join(newOut, '_runtime', 'THIRD_PARTY_NOTICES.md'), 'utf-8');
+    expect(notices).toContain('\n## node-pty 1.1.0\n');
+    expect(notices).not.toContain('@neuralis/kernel');
   });
 
   it('the comparison sees a one-file difference (paired control)', () => {

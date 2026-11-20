@@ -12,10 +12,10 @@
 
 import { join } from 'node:path';
 
-export const CLOUDFLARED_VERSION = '2026.10.5';
+export const CLOUDFLARED_VERSION = '2026.11.1';
 
 /** The compose image, pinned by its multi-arch index digest (never `latest`). */
-export const CLOUDFLARED_IMAGE = `cloudflare/cloudflared:${CLOUDFLARED_VERSION}@sha256:1b1d34d0a9c0bfca9de72db8460d328db3f19edd2b96169114e3e893a97bbe53`;
+export const CLOUDFLARED_IMAGE = `cloudflare/cloudflared:${CLOUDFLARED_VERSION}@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d`;
 
 export type CloudflaredAsset = { url: string; filename: string; sha256: string; unpack: 'raw' | 'tgz' };
 
@@ -23,11 +23,11 @@ export type CloudflaredAsset = { url: string; filename: string; sha256: string; 
 export function cloudflaredAsset(platform: NodeJS.Platform = process.platform, arch: string = process.arch): CloudflaredAsset | null {
   const base = `https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}`;
   const row = (filename: string, sha256: string, unpack: CloudflaredAsset['unpack']): CloudflaredAsset => ({ url: `${base}/${filename}`, filename, sha256, unpack });
-  if (platform === 'linux' && arch === 'x64') return row('cloudflared-linux-amd64', 'e1bc0cf084fd9e590554fe769a86b1db46701c3f847a43d902f7b974a4e16298', 'raw');
-  if (platform === 'linux' && arch === 'arm64') return row('cloudflared-linux-arm64', '72e0d05a67e09da87cf495e409a28c3cc5994dd23fc66a982eebea6a55923b7d', 'raw');
-  if (platform === 'darwin' && arch === 'arm64') return row('cloudflared-darwin-arm64.tgz', '184c7d4f5f977348243a6d7ca8f6cf6073b9b2746cfe8c1fe15aa59e9a522bf0', 'tgz');
-  if (platform === 'darwin' && arch === 'x64') return row('cloudflared-darwin-amd64.tgz', '6699392fed92367808c248c2d90bed66e49bbf66e1b4ee3e4141230f3f7391b3', 'tgz');
-  if (platform === 'win32' && arch === 'x64') return row('cloudflared-windows-amd64.exe', 'db4e4c413612a0916f3e1679d3caaf376f94911952d163028fb726fb2e0516a9', 'raw');
+  if (platform === 'linux' && arch === 'x64') return row('cloudflared-linux-amd64', '97bb3b02d23a5980fc9c15a1a270e692da1923f103f920d5b16d4931d5ab55e7', 'raw');
+  if (platform === 'linux' && arch === 'arm64') return row('cloudflared-linux-arm64', 'b155cec3e48e489cfb8e5c602769fb8c771083018d8881d68b4d18a791567c5a', 'raw');
+  if (platform === 'darwin' && arch === 'arm64') return row('cloudflared-darwin-arm64.tgz', '02fe4bcf08f2c09699cff30658228a739a0c47fb75f3653d1b8772a27ade4462', 'tgz');
+  if (platform === 'darwin' && arch === 'x64') return row('cloudflared-darwin-amd64.tgz', '5e0403b188dfee71fbd9b995e7dc9910d61b661c52371935ab6475d41185632f', 'tgz');
+  if (platform === 'win32' && arch === 'x64') return row('cloudflared-windows-amd64.exe', '341deda3db5ec498a0482254d6c38c0b7cf01a30c37bb5dd95d2216d08955e35', 'raw');
   return null;
 }
 

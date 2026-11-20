@@ -83,14 +83,7 @@ export function toResolvedRecord(
   const sanitized = sanitizeProjectPackageDefinition(r.definition, r.trust);
   const validation = validateManifest(sanitized);
   if (!validation.valid) throw new Error(`Invalid authored package manifest ${JSON.stringify(r.packageId)}: ${validation.errors[0]}`);
-  const rel = origin ? relative(origin.directory, r.packageRoot).split(sep).join('/') : r.slug;
-  if (rel === '..' || rel.startsWith('../')) throw new Error('Package root escapes its source');
-  const originUri = origin ? `${origin.uriRoot}${origin.uriRoot.endsWith('://') || origin.uriRoot.endsWith('/') || !rel ? '' : '/'}${rel}` : `packages://${rel}`;
-  const runtimeId = packageInstanceId({ originUri, projectId, scope });
-  // The instance's data zone must be representable (a leaf over NAME_MAX
-  // throws) — refused HERE, where the scanner skips and names the record,
-  // never later inside provisioning where it would fail the project's load.
-  sanitizePackageId(runtimeId);
+  const { originUri, packageId: runtimeId } = packageFolderInstance(r, projectId, scope, origin);
   return {
     packageId: runtimeId,
     manifestId: r.packageId,
@@ -109,6 +102,29 @@ export function toResolvedRecord(
     ...(r.reader ? { reader: r.reader } : {}),
     ...(r.unavailable ? { unavailable: r.unavailable } : {}),
   };
+}
+
+/**
+ * The instance a package folder is loaded as — its source URI and runtime id —
+ * from where it sits, the project and the owning scope; never from its
+ * manifest. The ONE derivation: a loaded record and a switched-off source's
+ * listed folder carry the same id, so per-agent settings keep matching it.
+ */
+export function packageFolderInstance(
+  folder: Pick<ProjectPackageRecord, 'slug' | 'packageRoot'>,
+  projectId: string,
+  scope: SourceScope,
+  origin?: { directory: string; uriRoot: string },
+): { originUri: string; packageId: string } {
+  const rel = origin ? relative(origin.directory, folder.packageRoot).split(sep).join('/') : folder.slug;
+  if (rel === '..' || rel.startsWith('../')) throw new Error('Package root escapes its source');
+  const originUri = origin ? `${origin.uriRoot}${origin.uriRoot.endsWith('://') || origin.uriRoot.endsWith('/') || !rel ? '' : '/'}${rel}` : `packages://${rel}`;
+  const packageId = packageInstanceId({ originUri, projectId, scope });
+  // The instance's data zone must be representable (a leaf over NAME_MAX
+  // throws) — refused HERE, where the scanner skips and names the record,
+  // never later inside provisioning where it would fail the project's load.
+  sanitizePackageId(packageId);
+  return { originUri, packageId };
 }
 
 export type ResolvedPackageRecord = {

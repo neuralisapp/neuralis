@@ -26,10 +26,15 @@
  * `workspace:`, `file:` or `link:` specifier left in it installs nowhere, and
  * only a real pack shows it (the dry-run list reads the workspace manifest) —
  * and every file `native/manifest.json` marks `executable` must be executable.
+ * A package that bundles third-party code must carry its `THIRD_PARTY_NOTICES.md`;
+ * `--notices-metafile <package>=<metafile>` (the release job packs what it just
+ * built) also requires it to name every package that build's esbuild metafile
+ * inlined, with every licence and NOTICE text (`third-party-notices.mjs`).
  * The directory must hold exactly one tarball per publishable package.
  *
  *   node neuralis/scripts/build/audit-publish-tarballs.mjs [--strict] [--tarballs <dir>]
  *        [--forbid-root <abs path>[:<abs path>…]]… [--forbid-text <text>]…
+ *        [--notices-metafile <package>=<metafile>]…
  *
  * A runner knows only its own checkout and home, so a release passes the
  * developer machines' roots and the private repository's name explicitly.
@@ -44,6 +49,7 @@ import { homedir, tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, extname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { collectMetafile, loadPolicy, missingFrom } from './third-party-notices.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -261,14 +267,16 @@ function uiModuleFindings(label, manifest, files, findings) {
   }
 }
 
-function auditWorkspaceTrees(findings, opts) {
+/** The workspace packages as they would pack (`root`/`packages` exist for the suite's fixture workspace). */
+export function auditWorkspaceTrees(findings, opts, { root = REPO_ROOT, packages = PACKAGES } = {}) {
   let total = 0;
-  for (const rel of PACKAGES) {
-    const dir = join(REPO_ROOT, rel);
+  for (const rel of packages) {
+    const dir = join(root, rel);
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     const before = findings.length;
     const files = packlist(dir);
     total += files.length;
+    noticesFindings(rel, manifest, dir, findings, opts.metafiles);
     uiModuleFindings(rel, manifest, files, findings);
     pathFindings(rel, files, findings);
     scanContents(rel, dir, files, findings, opts);
@@ -294,6 +302,19 @@ function executableFindings(label, root, findings) {
     if (entry?.executable !== true || !existsSync(path)) continue;
     if ((statSync(path).mode & 0o111) === 0) findings.push(`${label}: native/${file} is not executable in the tarball`);
   }
+}
+
+/** The packages whose tarball bundles third-party code, so ships `THIRD_PARTY_NOTICES.md`. */
+export const BUNDLES_THIRD_PARTY = ['@neuralis/cli'];
+
+function noticesFindings(label, manifest, root, findings, metafiles) {
+  if (!BUNDLES_THIRD_PARTY.includes(manifest.name)) return;
+  const notices = join(root, 'THIRD_PARTY_NOTICES.md');
+  if (!existsSync(notices)) { findings.push(`${label}: THIRD_PARTY_NOTICES.md is missing — the package bundles third-party code`); return; }
+  const metafile = metafiles[manifest.name];
+  if (!metafile) return;
+  const policy = loadPolicy();
+  for (const gap of missingFrom(readFileSync(notices, 'utf8'), collectMetafile(metafile, policy), policy)) findings.push(`${label}: THIRD_PARTY_NOTICES.md — ${gap}`);
 }
 
 /** Ready packed tarballs: exactly one per publishable package. */
@@ -326,6 +347,7 @@ function auditTarballs(dir, findings, opts) {
       const files = walkFiles(root);
       total += files.length;
       executableFindings(manifest.name, root, findings);
+      noticesFindings(name, manifest, root, findings, opts.metafiles);
       uiModuleFindings(name, manifest, files, findings);
       pathFindings(name, files, findings);
       scanContents(name, root, files, findings, opts);
@@ -345,7 +367,7 @@ function report(label, fileCount, newFindings) {
   console.log(`  ${label} — ${fileCount} files — ${status}`);
 }
 
-const USAGE = 'usage: audit-publish-tarballs.mjs [--strict] [--tarballs <existing dir>] [--forbid-root <abs path>[:<abs path>…]]… [--forbid-text <text>]…';
+const USAGE = 'usage: audit-publish-tarballs.mjs [--strict] [--tarballs <existing dir>] [--forbid-root <abs path>[:<abs path>…]]… [--forbid-text <text>]… [--notices-metafile <package>=<metafile>]…';
 
 function usage() {
   console.error(USAGE);
@@ -353,7 +375,7 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const opts = { strict: false, tarballDir: null, roots: [], texts: [] };
+  const opts = { strict: false, tarballDir: null, roots: [], texts: [], metafiles: {} };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--strict') { opts.strict = true; continue; }
@@ -362,7 +384,11 @@ function parseArgs(argv) {
     if (flag === '--tarballs') opts.tarballDir = value;
     else if (flag === '--forbid-root') opts.roots.push(...value.split(delimiter).filter(Boolean));
     else if (flag === '--forbid-text') opts.texts.push(value);
-    else usage();
+    else if (flag === '--notices-metafile') {
+      const at = value.indexOf('=');
+      if (at <= 0 || !existsSync(value.slice(at + 1))) usage();
+      opts.metafiles[value.slice(0, at)] = resolve(value.slice(at + 1));
+    } else usage();
     i += 1;
   }
   if (opts.tarballDir !== null && !existsSync(opts.tarballDir)) usage();
@@ -372,7 +398,7 @@ function parseArgs(argv) {
 function main(argv) {
   const args = parseArgs(argv);
   const roots = machineRoots(args.roots);
-  const opts = { strict: args.strict, markers: privateMarkers({ roots, texts: args.texts }) };
+  const opts = { strict: args.strict, markers: privateMarkers({ roots, texts: args.texts }), metafiles: args.metafiles };
   const findings = [];
   const mode = args.tarballDir ? ` from ${args.tarballDir}` : '';
   console.log(`${c.bold}Auditing ${PACKAGES.length} publishable packages${mode}${c.reset}${args.strict ? c.dim + ' (strict: + internal codenames)' + c.reset : ''}`);

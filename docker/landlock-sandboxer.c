@@ -6,7 +6,7 @@
 // mask) and then execve()s the real command inside it.
 //
 // WHO RUNS THROUGH IT. In the CONTAINER this is the wall builder for
-// lower-trust agents; `exec.unconfined` holders bypass it (bare spawn) —
+// lower-trust agents; `server.unconfined` holders bypass it (bare spawn) —
 // that bypass is deliberate and owner-decided. On the DEVICE PLANE there is NO
 // bypass for anyone, owner included: every host exec and every host PTY is
 // spawned through this helper, and if the helper is missing the broker answers

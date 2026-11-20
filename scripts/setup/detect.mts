@@ -479,12 +479,17 @@ export async function settleLoopbackPorts(claims: PortClaim[], probe: PortProbe 
   return new Map(claims.map((claim) => [claim.key, settled.get(claim.key) ?? moved.get(claim.key)!] as const));
 }
 
-/** How this layout checks ports: a listen on the host; a throwaway `docker run -p` in the image. Docker's table is read once. */
+/**
+ * How this layout checks ports: a listen on the host; a throwaway `docker run -p` in the image.
+ * Docker's table is read once, whenever the Docker CLI exists — not only when `docker info`
+ * answered inside its 5 s detection timeout: a loaded daemon misses that window, and without
+ * the table this install's own running stack would read as a stranger holding its ports.
+ */
 export type PortCheck = { probe: PortProbe; probeFirst: boolean; published: () => Promise<PublishedPort[] | null> };
 
-export function portCheck(layout: InstallLayout, docker: boolean): PortCheck {
+export function portCheck(layout: InstallLayout, dockerCli: boolean, run: AsyncProgramRunner = runProgramAsync): PortCheck {
   let table: Promise<PublishedPort[] | null> | null = null;
-  const published = () => (table ??= docker ? listPublishedPorts() : Promise.resolve(null));
+  const published = () => (table ??= dockerCli ? listPublishedPorts(run) : Promise.resolve(null));
   if (!insideImage(layout)) return { probe: pickPortProbe, probeFirst: true, published };
   let probe: Promise<PortProbe> | null = null;
   return { probe: async (claims) => (await (probe ??= dockerRunProbe()))(claims), probeFirst: false, published };
@@ -492,9 +497,17 @@ export function portCheck(layout: InstallLayout, docker: boolean): PortCheck {
 
 /**
  * `--compose-only` asks nothing: a busy port is refused with the `.env` line
- * that moves it, writing nothing.
+ * that moves it, writing nothing. When Docker's table could not be read, a
+ * port nobody is named for may be this install's own running stack — the
+ * refusal says to re-run, never to move the port.
  */
-export function busyPortRefusal(busy: BusyPort[], free: Map<string, number>): CliExit {
+export function busyPortRefusal(busy: BusyPort[], free: Map<string, number>, tableRead = true): CliExit {
+  if (!tableRead && busy.some((b) => b.holder === null)) {
+    return new CliExit(1, 'Docker\'s list of published ports could not be read (no answer, no socket access or no daemon), so setup cannot tell who holds the ports this install publishes.', [
+      ...busy.map((b) => `Port ${b.port} (${PORT_ROLES[b.key]!.label}) is in use.`),
+      `If this install's own stack is running, that is expected: run ${spell('setup --compose-only')} again. Nothing was written.`,
+    ]);
+  }
   const lines = busy.map((b) => {
     const role = PORT_ROLES[b.key]!;
     const fix = b.key === 'codex' ? `${role.envKey}=off` : `${role.envKey}=${free.get(b.key)}`;

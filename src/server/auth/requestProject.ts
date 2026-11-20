@@ -5,7 +5,7 @@
  *
  * **The header is the transport.** Every admin-client call goes through
  * `packages/admin/app/admin/api/projects.ts` → `buildHeaders` → the
- * `X-Project-Id` HEADER; `brain-core`'s feature-catalog fetch sends the same.
+ * `X-Project-Id` HEADER.
  * Routes that read a query param or a body field instead were never receiving
  * one from the live UI, which is precisely how `requireAdmin()`'s deleted
  * "first project" fallback stayed invisible for so long (O-2).

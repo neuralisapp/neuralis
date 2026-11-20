@@ -1,5 +1,7 @@
 # Workspace Widgets
 
+Fresh desktop layouts place Apps vertically at left center and Agents vertically at top right, with Chat on the right, Dim widgets and clear Toolbar docks. Saved preferences take precedence; native Phone layout uses its own dock band.
+
 This directory defines host-level widget contracts and the local widget registry used by the workspace shell.
 
 Most product widgets are contributed by packages and rendered through `src/workspace/packages`. This directory exists for host-level types, compatibility wrappers, and registry plumbing that cannot live in a package.

@@ -152,13 +152,13 @@ describe('the 16 placements — eight anchors × two orientations, never the cen
 });
 
 describe('the first-run layout', () => {
-  it('apps toolbar along the bottom centre, agents down the left middle, chat right, Dim widgets — in ONE owner', () => {
+  it('apps left middle, agents top right, chat right, Dim widgets and clear docks — in ONE owner', () => {
     expect(DEFAULT_DOCK_LAYOUT).toEqual({
-      primary: { dockId: 'primary', anchor: 'bottom', orientation: 'horizontal' },
-      secondary: { dockId: 'secondary', anchor: 'left', orientation: 'vertical' },
+      primary: { dockId: 'primary', anchor: 'left', orientation: 'vertical' },
+      secondary: { dockId: 'secondary', anchor: 'top-right', orientation: 'vertical' },
       chatPosition: 'end',
       defaultWidgetTransparency: 'dim',
-      defaultDockTransparency: 'opaque',
+      defaultDockTransparency: 'transparent',
       backgroundTransparency: 'dim',
       dockBackground: 'toolbar',
       autoPhone: true,

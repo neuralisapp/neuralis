@@ -46,6 +46,9 @@ import { getCommunityPackageRegistry } from '../runtime';
 import { getPackageRuntimeManager } from '../PackageRuntimeManager';
 import { PackageSnapshotService } from '@neuralis/package-system';
 
+/** The read verdict of a caller who may read every source package file. */
+const READ_ALL = { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() };
+
 function makeDef(id: string, opts?: { hosts?: string[] }) {
   return {
     id,
@@ -105,16 +108,16 @@ describe('project-scoped snapshots', () => {
     });
   });
 
-  it('returns all packages when no projectId (admin view)', () => {
-    const snapshot = getPackageSnapshot({ host: 'neuralis-workspace' });
+  it('a snapshot with no project carries builtins only — no package of any project', () => {
+    const snapshot = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace' });
     const ids = snapshot.tools.map(t => t.packageId);
     expect(ids).toContain('@neuralis/agent-core');
-    expect(ids).toContain('pkg-project-a');
-    expect(ids).toContain('pkg-project-b');
+    expect(ids).not.toContain('pkg-project-a');
+    expect(ids).not.toContain('pkg-project-b');
   });
 
   it('returns only builtins + project-A packages for project-A', () => {
-    const snapshot = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const snapshot = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     const ids = snapshot.tools.map(t => t.packageId);
     expect(ids).toContain('@neuralis/agent-core');
     expect(ids).toContain('pkg-project-a');
@@ -122,7 +125,7 @@ describe('project-scoped snapshots', () => {
   });
 
   it('returns only builtins + project-B packages for project-B', () => {
-    const snapshot = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-b' });
+    const snapshot = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-b' });
     const ids = snapshot.tools.map(t => t.packageId);
     expect(ids).toContain('@neuralis/agent-core');
     expect(ids).toContain('pkg-project-b');
@@ -130,31 +133,31 @@ describe('project-scoped snapshots', () => {
   });
 
   it('cross-project leakage: A snapshot does NOT contain B widget', () => {
-    const snapshot = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const snapshot = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     const widgetPkgs = snapshot.surfaces.map(w => w.packageId);
     expect(widgetPkgs).not.toContain('pkg-project-b');
   });
 
   it('cross-project leakage: B snapshot does NOT contain A command', () => {
-    const snapshot = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-b' });
+    const snapshot = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-b' });
     const cmdPkgs = snapshot.commands.map(c => c.packageId);
     expect(cmdPkgs).not.toContain('pkg-project-a');
   });
 
   it('widget snapshot respects project scope', () => {
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     const pkgs = widgets.map(w => w.packageId);
     expect(pkgs).not.toContain('pkg-project-b');
   });
 
   it('command snapshot respects project scope', () => {
-    const commands = getCommandSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const commands = getCommandSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     const pkgs = commands.map(c => c.packageId);
     expect(pkgs).not.toContain('pkg-project-b');
   });
 
   it('dock snapshot respects project scope', () => {
-    const dock = getDockSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const dock = getDockSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     // No dock items in our mock, but it should not crash
     expect(Array.isArray(dock)).toBe(true);
   });
@@ -186,7 +189,7 @@ describe('a synthetic external MCP package never reaches a project-scoped snapsh
     delete (globalThis as any).__neuralis_snapshot_service__;
 
     const project = () => getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', userId: 'user-1' },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', userId: 'user-1' },
       ['core.agents'],
     ).packages.map((pkg) => pkg.id);
     (getCommunityPackageRegistry as ReturnType<typeof vi.fn>).mockReturnValue({ listPackages: () => [builtin] });
@@ -234,7 +237,7 @@ describe('base-access feature gate on the CLIENT snapshot — the exact instance
 
   it('HIDES a package whose INSTANCE-keyed override the caller lacks', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
       [], // caller holds no features
     );
     expect(snap.surfaces.map((s) => s.packageId)).not.toContain(INSTANCE_ID);
@@ -243,7 +246,7 @@ describe('base-access feature gate on the CLIENT snapshot — the exact instance
 
   it('PAIRED CONTROL — SHOWS the same package when the caller holds the override feature', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [INSTANCE_ID]: 'secure.access' } },
       ['secure.access'],
     );
     expect(snap.surfaces.map((s) => s.packageId)).toContain(INSTANCE_ID);
@@ -251,7 +254,7 @@ describe('base-access feature gate on the CLIENT snapshot — the exact instance
 
   it('a MANIFEST-keyed entry is not consulted — the authored name is no override key', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [MANIFEST_ID]: 'secure.access' } },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', packageAccessFeature: { [MANIFEST_ID]: 'secure.access' } },
       [],
     );
     expect(snap.surfaces.map((s) => s.packageId)).toContain(INSTANCE_ID);
@@ -317,7 +320,8 @@ describe('widget URL normalization', () => {
 
   beforeEach(() => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
-      getProjectPackageIds: () => new Set(),
+      // Every fixture package belongs to the project the URL rows are judged in.
+      getProjectPackageIds: () => ({ has: () => true }) as unknown as ReadonlySet<string>,
       getPackageOwnerScope: () => undefined,
       getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
@@ -326,33 +330,33 @@ describe('widget URL normalization', () => {
 
   it('rewrites a relative widget URL to /api/packages/{slug}/app/{url}', () => {
     setupWidget({ packageId: 'relative-pkg', url: 'widget.html', trust: 'untrusted' });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets).toHaveLength(1);
     expect(widgets[0]!.component.url).toBe('/api/packages/relative-pkg/app/widget.html');
   });
 
   it('strips leading "./" from relative URLs', () => {
     setupWidget({ packageId: 'relative-pkg', url: './nested/page.html', trust: 'untrusted' });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets[0]!.component.url).toBe('/api/packages/relative-pkg/app/nested/page.html');
   });
 
   it('drops widgets with absolute URLs from untrusted packages', () => {
     setupWidget({ packageId: 'untrusted-abs-pkg', url: 'https://example.com/x.html', trust: 'untrusted' });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets).toHaveLength(0);
   });
 
   it('keeps absolute URLs for trusted packages', () => {
     setupWidget({ packageId: 'trusted-abs-pkg', url: 'https://example.com/x.html', trust: 'trusted' });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets).toHaveLength(1);
     expect(widgets[0]!.component.url).toBe('https://example.com/x.html');
   });
 
   it('passes widgets without a URL through unchanged', () => {
     setupWidget({ packageId: 'no-url-pkg', renderer: 'direct', trust: 'native' });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets).toHaveLength(1);
     expect(widgets[0]!.component.url).toBeUndefined();
   });
@@ -365,7 +369,7 @@ describe('widget URL normalization', () => {
       getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
-    const widgets = getWidgetSnapshot({ host: 'neuralis-workspace', projectId: 'main' });
+    const widgets = getWidgetSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(widgets).toHaveLength(1);
     expect(widgets[0]!.component.url).toBe('/api/packages/relative-pkg/app/widget.html');
   });
@@ -428,7 +432,8 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
 
   beforeEach(() => {
     (getPackageRuntimeManager as ReturnType<typeof vi.fn>).mockReturnValue({
-      getProjectPackageIds: () => new Set(),
+      // Every fixture package belongs to the project the URL rows are judged in.
+      getProjectPackageIds: () => ({ has: () => true }) as unknown as ReadonlySet<string>,
       getPackageOwnerScope: () => undefined,
       getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
@@ -441,7 +446,7 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
       url: './app/surfaces/card/relative-card-pkg.card/index.html',
       trust: 'untrusted',
     });
-    const cards = getCardSnapshot({ host: 'neuralis-workspace' });
+    const cards = getCardSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(cards).toHaveLength(1);
     expect(cards[0]!.render!.url).toBe(
       '/api/packages/relative-card-pkg/app/app/surfaces/card/relative-card-pkg.card/index.html',
@@ -452,19 +457,19 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
     // Before 3C the card branch bypassed normalization entirely, so this
     // untrusted absolute survived into the client snapshot.
     setupCard({ packageId: 'untrusted-abs-card', url: 'https://evil.example/x.html', trust: 'untrusted' });
-    expect(getCardSnapshot({ host: 'neuralis-workspace' })).toHaveLength(0);
+    expect(getCardSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' })).toHaveLength(0);
   });
 
   it('keeps an absolute card URL for a trusted package', () => {
     setupCard({ packageId: 'trusted-abs-card', url: 'https://example.com/x.html', trust: 'trusted' });
-    const cards = getCardSnapshot({ host: 'neuralis-workspace' });
+    const cards = getCardSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(cards).toHaveLength(1);
     expect(cards[0]!.render!.url).toBe('https://example.com/x.html');
   });
 
   it('passes a `direct` card (no url) through unchanged', () => {
     setupCard({ packageId: 'direct-card-pkg', renderer: 'direct', trust: 'native' });
-    const cards = getCardSnapshot({ host: 'neuralis-workspace' });
+    const cards = getCardSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(cards).toHaveLength(1);
     expect(cards[0]!.render!.url).toBeUndefined();
   });
@@ -481,7 +486,7 @@ describe('card URL normalization (CARD1 3C — widget parity)', () => {
       getPackageOwnerOrigin: () => undefined,
       getLoader: () => ({ getStatus: () => undefined }),
     });
-    const cards = getCardSnapshot({ host: 'neuralis-workspace', projectId: 'main' });
+    const cards = getCardSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'main' });
     expect(cards[0]!.render!.url).not.toContain('projectId');
     expect(cards[0]!.render!.url).not.toContain('?');
   });
@@ -558,12 +563,12 @@ describe('feature-filtered snapshots', () => {
   });
 
   it('filters runtime widgets, dock entries, and commands by granted features', () => {
-    const denied = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, []);
+    const denied = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' }, []);
     expect(denied.surfaces).toHaveLength(0);
     expect(denied.commands).toHaveLength(0);
 
     const allowed = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a' },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' },
       ['feature.secure'],
     );
     expect(allowed.surfaces.map((entry) => entry.id)).toEqual(['secure-widget', 'secure-dock']);
@@ -571,11 +576,11 @@ describe('feature-filtered snapshots', () => {
   });
 
   it('filters runtime tools by granted features (S2b — 3rd surface)', () => {
-    const denied = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, []);
+    const denied = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' }, []);
     expect(denied.tools.map((t) => t.name)).toEqual(['open_tool']);
 
     const allowed = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a' },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' },
       ['feature.secure'],
     );
     expect(allowed.tools.map((t) => t.name).sort()).toEqual(['open_tool', 'secure_tool']);
@@ -623,12 +628,12 @@ describe('dock entries — the ONE dock rule, its missing-target semantics and t
   });
 
   it('an open-widget entry whose target no visible package declares STAYS (existing semantics, pinned as-is)', () => {
-    const docks = getDockSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, []);
+    const docks = getDockSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' }, []);
     expect(docks.map((dock) => dock.id)).toEqual(['orphan-dock']);
   });
 
   it("the entry's own features still gate it, and the declared picture path passes through unchanged", () => {
-    const docks = getDockSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' }, ['dock.secret']);
+    const docks = getDockSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' }, ['dock.secret']);
     expect(docks.map((dock) => [dock.id, dock.image])).toEqual([
       ['orphan-dock', 'app/shared/icon.png'],
       ['gated-dock', 'app/shared/icon.png'],
@@ -676,7 +681,7 @@ describe('R2b — scope-isolated snapshots (scope-guarding-magpie)', () => {
 
   it('hides a user-scoped package from another user; keeps builtins + project-scope', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', userId: 'bob', role: 'member', grantedFeatures: [] },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', userId: 'bob', role: 'member', grantedFeatures: [] },
     );
     const ids = snap.tools.map((t) => t.packageId);
     expect(ids).toContain('@neuralis/agent-core');
@@ -686,20 +691,20 @@ describe('R2b — scope-isolated snapshots (scope-guarding-magpie)', () => {
 
   it('shows a user-scoped package to its owning user', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', userId: 'alice', role: 'member', grantedFeatures: [] },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', userId: 'alice', role: 'member', grantedFeatures: [] },
     );
     expect(snap.tools.map((t) => t.packageId)).toContain('pkg-alice');
   });
 
   it('shows a user-scoped package to an owner holding the wildcard grant (observeScoped)', () => {
     const snap = getPackageSnapshot(
-      { host: 'neuralis-workspace', projectId: 'proj-a', userId: 'bob', role: 'owner', grantedFeatures: ['*'] },
+      { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a', userId: 'bob', role: 'owner', grantedFeatures: ['*'] },
     );
     expect(snap.tools.map((t) => t.packageId)).toContain('pkg-alice');
   });
 
   it('deny-by-default: a no-userId snapshot hides scoped packages but keeps builtins/project-scope', () => {
-    const snap = getPackageSnapshot({ host: 'neuralis-workspace', projectId: 'proj-a' });
+    const snap = getPackageSnapshot({ readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'proj-a' });
     const ids = snap.tools.map((t) => t.packageId);
     expect(ids).toContain('@neuralis/agent-core');
     expect(ids).toContain('pkg-shared');

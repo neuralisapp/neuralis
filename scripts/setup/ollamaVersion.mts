@@ -24,10 +24,10 @@
 
 import { join } from 'node:path';
 
-export const OLLAMA_VERSION = '0.40.12';
+export const OLLAMA_VERSION = '0.40.16';
 
 /** The compose image, pinned by its multi-arch index digest (never `latest`). */
-export const OLLAMA_IMAGE = `ollama/ollama:${OLLAMA_VERSION}@sha256:20d1bbfbabe1c97ba4b16301f08a20d8484bcf77047742a3cb71c613d8e12d0b`;
+export const OLLAMA_IMAGE = `ollama/ollama:${OLLAMA_VERSION}@sha256:910d0d8107b538fb0894e63163eb195de0cc7aefcbc666dc62d3b18f71124592`;
 
 /** The port this install's OWN Ollama listens on — beside, never on, a user's own `11434`. */
 export const OLLAMA_OWN_PORT = 11435;
@@ -64,11 +64,11 @@ export type OllamaAsset = { url: string; filename: string; sha256: string; bytes
 export function ollamaAsset(platform: NodeJS.Platform = process.platform, arch: string = process.arch): OllamaAsset | null {
   const base = `https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}`;
   const row = (filename: string, sha256: string, bytes: number, unpack: OllamaAsset['unpack']): OllamaAsset => ({ url: `${base}/${filename}`, filename, sha256, bytes, unpack });
-  if (platform === 'linux' && arch === 'x64') return row('ollama-linux-amd64.tar.zst', 'f8adcb7e08d272283a4bd3abc18cf581afe37e64b2aee04fda4f407f215485ba', 1_525_425_005, 'tar.zst');
-  if (platform === 'linux' && arch === 'arm64') return row('ollama-linux-arm64.tar.zst', 'eab411c311611fe0fcddf5ba73c68ea94a9571007b520d8708112348b87c0bd6', 1_582_120_565, 'tar.zst');
-  if (platform === 'darwin') return row('ollama-darwin.tgz', '1d1b4c2cf40d2a239f9b08a77384830800a8542c744a55f47247f9baf85b55d2', 186_398_711, 'tgz');
-  if (platform === 'win32' && arch === 'x64') return row('ollama-windows-amd64.zip', '21814944f3e50d3f07b6bb3af75baddb96f59e91353c332ac9c5063b3bfd1041', 1_601_458_136, 'zip');
-  if (platform === 'win32' && arch === 'arm64') return row('ollama-windows-arm64.zip', 'e64ab13a21bde937abcec5c3d2b5bf8b1a152f325a018077a6767df07c7f7391', 215_776_808, 'zip');
+  if (platform === 'linux' && arch === 'x64') return row('ollama-linux-amd64.tar.zst', '87bfafb2acbc89b2e6a1be0a9043de6aa75fb450696f86bc426e65fc448f788d', 1_545_767_640, 'tar.zst');
+  if (platform === 'linux' && arch === 'arm64') return row('ollama-linux-arm64.tar.zst', 'e45b8e6dcb86cb9f3057396351655079c9a4879b4ced2678c9350d375dcbc224', 1_600_610_073, 'tar.zst');
+  if (platform === 'darwin') return row('ollama-darwin.tgz', 'a743717494315da7cd352982b805f6b992d4b4452ca117fd5fbf86c4ee46fca0', 186_116_182, 'tgz');
+  if (platform === 'win32' && arch === 'x64') return row('ollama-windows-amd64.zip', '50fcf5ad54277f2fa5d173ebfc93bcb017adbc0c9ef2314daabc96ca9e6aa64e', 1_618_244_995, 'zip');
+  if (platform === 'win32' && arch === 'arm64') return row('ollama-windows-arm64.zip', '86d2b329cae3125684ff29b506623710b68e1393f679594f1c6aa267beac31c2', 386_918_926, 'zip');
   return null;
 }
 

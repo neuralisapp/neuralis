@@ -1,4 +1,5 @@
 import { PackageSnapshotService, isAbsoluteAssetUrl } from '@neuralis/package-system';
+import { applyReadFloor, isManifestReadHidden } from '@neuralis/package-system/access';
 import type {
   CardRuntimeDefinition,
   CommandRuntimeDefinition,
@@ -97,7 +98,9 @@ function buildContributions(
       // (parity with the commands/team/ui filters below): a feature-gated
       // file must not reach a member's browser payload at all.
       .filter((file) => hasRequiredFeatures(file, grantedFeatures))
-      .map((file) => ({
+      // `osUri` is a machine path on the source's plane: server-side only,
+      // no host reader — it never reaches a browser payload.
+      .map(({ osUri: _machinePath, ...file }) => ({
         ...file,
         packageId: definition.id,
         source: definition.source?.kind,
@@ -245,12 +248,11 @@ function buildScopedSnapshot(scope: SnapshotScope, grantedFeatures?: string[]): 
     .filter((definition) => matchesHost(definition, scope.host));
 
   // Step 2 + 2b: filter by projectId (builtins ∪ this project's packages) and
-  // R2b source-owner scope isolation — shared `passesProjectAndOwnerScope`.
-  if (scope.projectId) {
-    visibleDefinitions = visibleDefinitions.filter((definition) =>
-      passesProjectAndOwnerScope(definition, scope),
-    );
-  }
+  // R2b source-owner scope isolation — shared `passesProjectAndOwnerScope`,
+  // which also hides every loaded source package from a project-less scope.
+  visibleDefinitions = visibleDefinitions.filter((definition) =>
+    passesProjectAndOwnerScope(definition, scope),
+  );
 
   // R2b — base-access feature gate (whole-package, all classes incl. builtins).
   // A package is hidden if its manifest `requires.accessFeature` OR the project
@@ -315,7 +317,9 @@ function buildScopedSnapshot(scope: SnapshotScope, grantedFeatures?: string[]): 
   );
   const surfaces = normalizedUi.filter((entry) => isUiEntryGranted(entry, grantedFeatures, widgetsByType));
 
-  return {
+  // Step 2d: the READ floor — a source package the caller cannot read is gone,
+  // a file it cannot read is gone from a visible one (kernel `applyReadFloor`).
+  return applyReadFloor({
     ...base,
     packages: enrichedPackages,
     tools: buildTools(visibleDefinitions, grantedFeatures),
@@ -334,9 +338,11 @@ function buildScopedSnapshot(scope: SnapshotScope, grantedFeatures?: string[]): 
         { requires: { features: member.permissions?.features } },
         grantedFeatures,
       )),
-    resources: visibleDefinitions.flatMap((definition) => definition.resources ?? []),
+    resources: visibleDefinitions
+      .filter((definition) => !isManifestReadHidden(scope.readHidden, definition.id))
+      .flatMap((definition) => definition.resources ?? []),
     connectors: base.connectors.filter((connector) => visiblePackageIds.has(connector.packageId)),
-  };
+  }, scope.readHidden);
 }
 
 export function getPackageSnapshot(scope: SnapshotScope, grantedFeatures?: string[]): PackageRuntimeSnapshot {

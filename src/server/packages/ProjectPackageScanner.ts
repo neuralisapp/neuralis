@@ -137,10 +137,7 @@ export class ProjectPackageScanner {
     const results = await Promise.allSettled(
       entries.map(async (slug) => {
         const packageRoot = join(this.#packagesDir, slug);
-        if (slug !== '') {
-          if (!(await reader.stat(packageRoot))?.isDirectory) return null;
-          if (!isPackageDirListing((await reader.list(packageRoot)).map((entry) => entry.name))) return null;
-        }
+        if (slug !== '' && !(await isPackageFolder(reader, packageRoot))) return null;
 
         const record = await this.#resolvePackage(slug, packageRoot);
         return { slug, record };
@@ -382,28 +379,72 @@ export class ProjectPackageScanner {
   }
 
   async #readManifestId(packageRoot: string): Promise<string | undefined> {
-    // Try package.json#neuralis.id
-    try {
-      const pkgJson = join(packageRoot, 'package.json');
-      const raw = await this.#reader.readText(pkgJson);
-      const parsed = JSON.parse(raw) as {
-        neuralis?: { id?: string };
-        name?: string;
-      };
-      if (parsed.neuralis?.id) return parsed.neuralis.id;
-      if (parsed.name) return parsed.name;
-    } catch { /* ignore */ }
-
-    // Try neuralis.package.json
-    try {
-      const manifestPath = join(packageRoot, 'neuralis.package.json');
-      const raw = await this.#reader.readText(manifestPath);
-      const parsed = JSON.parse(raw) as { id?: string };
-      if (parsed.id) return parsed.id;
-    } catch { /* ignore */ }
-
-    return undefined;
+    return (await readManifestFields(this.#reader, packageRoot)).id;
   }
+}
+
+/** A child folder that holds a package (one of the package markers at its top). */
+async function isPackageFolder(reader: PackageReader, packageRoot: string): Promise<boolean> {
+  if (!(await reader.stat(packageRoot))?.isDirectory) return false;
+  return isPackageDirListing((await reader.list(packageRoot)).map((entry) => entry.name));
+}
+
+type ManifestFields = { id?: string; name?: string; version?: string };
+
+/**
+ * A package's id, display name and version as its manifest states them —
+ * `package.json` (`neuralis.*` first, then the npm fields), else
+ * `neuralis.package.json` — read as text, nothing discovered or imported.
+ */
+async function readManifestFields(reader: PackageReader, packageRoot: string): Promise<ManifestFields> {
+  const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
+  try {
+    const parsed = JSON.parse(await reader.readText(join(packageRoot, 'package.json'))) as {
+      neuralis?: { id?: unknown; name?: unknown; version?: unknown };
+      name?: unknown;
+      version?: unknown;
+    };
+    const id = text(parsed.neuralis?.id) ?? text(parsed.name);
+    if (id) return { id, name: text(parsed.neuralis?.name) ?? text(parsed.name) ?? id, version: text(parsed.neuralis?.version) ?? text(parsed.version) };
+  } catch { /* no usable package.json */ }
+  try {
+    const parsed = JSON.parse(await reader.readText(join(packageRoot, 'neuralis.package.json'))) as { id?: unknown; name?: unknown; version?: unknown };
+    const id = text(parsed.id);
+    if (id) return { id, name: text(parsed.name) ?? id, version: text(parsed.version) };
+  } catch { /* no usable neuralis.package.json */ }
+  return {};
+}
+
+/** One package folder of a root as its manifest names it — never resolved, never loaded. */
+export type PackageFolderManifest = { slug: string; packageRoot: string; name: string; version?: string };
+
+/**
+ * The package folders under `packagesDir` (the root itself when it IS a
+ * package) as their manifests name them: the scanner's own folder test and
+ * manifest read, no discovery and no definition — what a switched-off
+ * source's folder lists. One listing, then a stat, a listing and at most two
+ * manifest reads per child. A missing or unreadable root lists nothing.
+ */
+export async function readPackageFolderManifests(packagesDir: string, reader: PackageReader = localPackageReader): Promise<PackageFolderManifest[]> {
+  let names: string[];
+  try {
+    names = (await reader.list(packagesDir)).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  const slugs = isPackageDirListing(names) ? ['', ...names] : names;
+  const found = await Promise.all(slugs.map(async (slug): Promise<PackageFolderManifest | null> => {
+    const packageRoot = join(packagesDir, slug);
+    try {
+      if (slug !== '' && !(await isPackageFolder(reader, packageRoot))) return null;
+      const fields = await readManifestFields(reader, packageRoot);
+      const name = fields.name ?? (slug || folderPackageId(packageRoot));
+      return { slug, packageRoot, name, ...(fields.version ? { version: fields.version } : {}) };
+    } catch {
+      return null;
+    }
+  }));
+  return found.filter((entry): entry is PackageFolderManifest => entry !== null);
 }
 
 /**

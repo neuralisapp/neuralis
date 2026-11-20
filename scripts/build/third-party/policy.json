@@ -1,0 +1,136 @@
+{
+  "firstParty": ["@neuralis/*", "neuralis", "create-neuralis"],
+  "allow": [
+    "0BSD", "AFL-2.1", "Apache-2.0", "Artistic-2.0", "Beerware", "BlueOak-1.0.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-3-Clause-Clear",
+    "bzip2-1.0.6", "CC-BY-3.0", "CC-BY-4.0", "CC0-1.0", "curl", "FTL", "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later",
+    "ICU", "IJG", "Info-ZIP", "ISC", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-or-later",
+    "libtiff", "Libpng", "MIT", "MIT-0", "MPL-1.1", "MPL-2.0", "NCSA", "PSF-2.0", "Unlicense", "WTFPL", "X11",
+    "XFree86-1.1", "Zlib", "blessing", "OpenSSL-Exception"
+  ],
+  "aliases": {
+    "Public Domain": "Public-Domain",
+    "Apache 2.0": "Apache-2.0",
+    "mit": "MIT"
+  },
+  "noText": {
+    "Public-Domain": "a public-domain dedication carries no licence text",
+    "OpenSSL-Exception": "a licence exception to the GPL text printed with it; the exception's wording is in the package source at the aports commit the Source line names"
+  },
+  "apkCustom": {
+    "aom-libs": { "reason": "the Alliance for Open Media Patent License 1.0 beside the BSD-2-Clause text; its wording is in the package source at the aports commit the Source line names" },
+    "rav1e-libs": { "reason": "the Alliance for Open Media Patent License 1.0 beside the BSD-2-Clause text; its wording is in the package source at the aports commit the Source line names" },
+    "unzip": { "spdx": "Info-ZIP", "reason": "Alpine labels the licence \"custom\"; unzip's terms are the Info-ZIP licence" }
+  },
+  "sourceOffer": "Source code: the components below whose licence is a GNU GPL or LGPL are available as complete corresponding source code, in the exact version this release contains, on request at team@neuralisapp.com for three years from the date this release was published. Name the component, its version and the release.",
+  "spdx": {
+    "0BSD": { "file": "spdx/0BSD.txt", "sha256": "e3f18c71e10d673590eb9856c1d79dd3b4b0d65404efb5e8584dbede7edd608b", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/0BSD.txt" },
+    "AFL-2.1": { "file": "spdx/AFL-2.1.txt", "sha256": "fbedf33db9a433cf87c6f0974f7e488599ee0c9446ed543235c99785ce7d22e6", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/AFL-2.1.txt" },
+    "Apache-2.0": { "file": "spdx/Apache-2.0.txt", "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Apache-2.0.txt" },
+    "Artistic-2.0": { "file": "spdx/Artistic-2.0.txt", "sha256": "bae466ac8d7100c304fe76632ccc627203a3897d3f7166f3cce00fb9df8c2074", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Artistic-2.0.txt" },
+    "BSD-2-Clause": { "file": "spdx/BSD-2-Clause.txt", "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/BSD-2-Clause.txt" },
+    "BSD-3-Clause": { "file": "spdx/BSD-3-Clause.txt", "sha256": "5a93d5831e1297ab10fe643e1a631e83be392896da14ee2951285a79012df69d", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/BSD-3-Clause.txt" },
+    "BSD-3-Clause-Clear": { "file": "spdx/BSD-3-Clause-Clear.txt", "sha256": "4495ed59005765e600a16457dc52a2d39757dbfeae081e68b59fe7c177c78589", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/BSD-3-Clause-Clear.txt" },
+    "Beerware": { "file": "spdx/Beerware.txt", "sha256": "991d8a58e0b4be84a174a9bd333a8ca33807a0c1ce6d23a2e25a21f7ece482d0", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Beerware.txt" },
+    "BlueOak-1.0.0": { "file": "spdx/BlueOak-1.0.0.txt", "sha256": "8a1af140fdfbf5afd3df27f7e662f989c5b963a300020dfafce42033cae9e004", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/BlueOak-1.0.0.txt" },
+    "CC-BY-3.0": { "file": "spdx/CC-BY-3.0.txt", "sha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/CC-BY-3.0.txt" },
+    "CC-BY-4.0": { "file": "spdx/CC-BY-4.0.txt", "sha256": "d557539df68e771cc1eedcc91d13f70fca930e508d11eedcafa4b15db49e3744", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/CC-BY-4.0.txt" },
+    "CC0-1.0": { "file": "spdx/CC0-1.0.txt", "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/CC0-1.0.txt" },
+    "FTL": { "file": "spdx/FTL.txt", "sha256": "ced6622122ce451cb1ea0c3c3f507a640e2a44c075c04900ddd9fae8acb5369f", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/FTL.txt" },
+    "GPL-2.0-only": { "file": "spdx/GPL-2.0-only.txt", "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/GPL-2.0-only.txt" },
+    "GPL-2.0-or-later": { "file": "spdx/GPL-2.0-only.txt", "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/GPL-2.0-only.txt" },
+    "GPL-3.0-only": { "file": "spdx/GPL-3.0-only.txt", "sha256": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/GPL-3.0-only.txt" },
+    "GPL-3.0-or-later": { "file": "spdx/GPL-3.0-only.txt", "sha256": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/GPL-3.0-only.txt" },
+    "IJG": { "file": "spdx/IJG.txt", "sha256": "7658542977bfdced9e1059a6c934ce4281de76d103b831007b825917dc62511a", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/IJG.txt" },
+    "ISC": { "file": "spdx/ISC.txt", "sha256": "521c6f0ed8e64736684f89843d16a4df6b4b7449acbcfc6ca6630a3037ca8c53", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/ISC.txt" },
+    "Info-ZIP": { "file": "spdx/Info-ZIP.txt", "sha256": "fa0c6949eee13c4099a6d0f78f9f1d76c7320e71adfc066d1632837320703a08", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Info-ZIP.txt" },
+    "LGPL-2.0-or-later": { "file": "spdx/LGPL-2.0-or-later.txt", "sha256": "86dc99d7e5060915ab1dfc1378b7dd351c62088bfa74067e8aa1868c6fdba7d8", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/LGPL-2.0-or-later.txt" },
+    "LGPL-2.1-only": { "file": "spdx/LGPL-2.1-only.txt", "sha256": "5749785c8bdefafcb5d798270ed0a967036fe2ca63dcedade1627565dfef81d2", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/LGPL-2.1-only.txt" },
+    "LGPL-2.1-or-later": { "file": "spdx/LGPL-2.1-only.txt", "sha256": "5749785c8bdefafcb5d798270ed0a967036fe2ca63dcedade1627565dfef81d2", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/LGPL-2.1-only.txt" },
+    "LGPL-3.0-or-later": { "file": "spdx/LGPL-3.0-or-later.txt", "sha256": "996af0513df21f7496288951c41428a03c174e9e4a9d63665c57d670f845ccb1", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/LGPL-3.0-or-later.txt" },
+    "Libpng": { "file": "spdx/Libpng.txt", "sha256": "7667a8c88c7a63690244988d626bcddd27ed895526e2c3ab1a9adb463a5fa287", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Libpng.txt" },
+    "MIT": { "file": "spdx/MIT.txt", "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/MIT.txt" },
+    "MIT-0": { "file": "spdx/MIT-0.txt", "sha256": "59746d6285ffa44bfc7ecada352aa5d6a20dc8eab418a60ce091cc739012c135", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/MIT-0.txt" },
+    "MPL-1.1": { "file": "spdx/MPL-1.1.txt", "sha256": "6214f8b1300bb9f37b16ebc146f8f61af0187e0025042ff95c8b3030744a8795", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/MPL-1.1.txt" },
+    "MPL-2.0": { "file": "spdx/MPL-2.0.txt", "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/MPL-2.0.txt" },
+    "NCSA": { "file": "spdx/NCSA.txt", "sha256": "b31bbfd06e221b39e1a877fb3f91b32fe9e88c87c1b46d11cd2bd5c822ec71e3", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/NCSA.txt" },
+    "PSF-2.0": { "file": "spdx/PSF-2.0.txt", "sha256": "ab745c5061d1dea43a3885e5b4b6befc7e983954954775c5736debeefcdfd89b", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/PSF-2.0.txt" },
+    "Unlicense": { "file": "spdx/Unlicense.txt", "sha256": "0bdebfeda07d45dada625ae1317c6f833186e798b171d0db640bcf32e92a8240", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Unlicense.txt" },
+    "WTFPL": { "file": "spdx/WTFPL.txt", "sha256": "13d8825a59e5e546d41e8711405d0f335a9934362a47c04a3b4280fa7932dc4a", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/WTFPL.txt" },
+    "X11": { "file": "spdx/X11.txt", "sha256": "e1963c9958b93bc2578b34f8ae22cfe205e8c0e7d5be7235cfdbdefbf92a5423", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/X11.txt" },
+    "XFree86-1.1": { "file": "spdx/XFree86-1.1.txt", "sha256": "f87e1172d544674ad152378494a267e8260005b45ecfaf240af8b3bddae1eac8", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/XFree86-1.1.txt" },
+    "Zlib": { "file": "spdx/Zlib.txt", "sha256": "bfb1112d49db5b1daecdfef24bd7e2f3ea0bafb33aa67aa0ab51e2bf8407c03d", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/Zlib.txt" },
+    "blessing": { "file": "spdx/blessing.txt", "sha256": "592db1199aab67aafe4515db9808b420db122083807c5329b2f061951e79acbe", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/blessing.txt" },
+    "bzip2-1.0.6": { "file": "spdx/bzip2-1.0.6.txt", "sha256": "0a56dbabe7d2ff65dea26e8b795fe42c6204a192b974d8e9304fe356ccda9fd1", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/bzip2-1.0.6.txt" },
+    "curl": { "file": "spdx/curl.txt", "sha256": "272d1239bdcef73bb98bac206168ca1040bd4a31296755fadfb7515bcea18df3", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/curl.txt" },
+    "libtiff": { "file": "spdx/libtiff.txt", "sha256": "a6ecaa20c8c1b7a8215ed05e5f58764f821596e36d31acc05282c6154cf0dc44", "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/libtiff.txt" }
+  },
+  "binaries": {
+    "node": {
+      "name": "Node.js", "version": "26.13.1", "license": "MIT",
+      "source": "https://github.com/nodejs/node/tree/v26.13.1",
+      "note": "the runtime of the image; its LICENSE also carries the licences of the libraries Node.js bundles",
+      "files": [{ "label": "LICENSE", "file": "upstream/node-26.13.1/LICENSE", "url": "https://raw.githubusercontent.com/nodejs/node/v26.13.1/LICENSE", "sha256": "8e603aa87c70d36e497004f0dec63111511cb61b7d65ace12e10ea791599286c" }]
+    },
+    "qdrant": {
+      "name": "Qdrant", "version": "1.20.2", "license": "Apache-2.0",
+      "source": "https://github.com/qdrant/qdrant/tree/v1.20.2",
+      "note": "the vector store the desktop app runs (resources/qdrant/)",
+      "files": [{ "label": "LICENSE", "file": "upstream/qdrant-1.20.2/LICENSE", "url": "https://raw.githubusercontent.com/qdrant/qdrant/v1.20.2/LICENSE", "sha256": "210b508429e913d9de5301f90508bc2cbf5b2281de5b45e607c04d58f0f3bd8f" }]
+    },
+    "jq": {
+      "name": "jq", "version": "1.8.2", "license": "MIT AND ICU AND BSD-2-Clause",
+      "source": "https://github.com/jqlang/jq/tree/jq-1.8.2",
+      "note": "jq with its vendored decNumber (ICU) and Oniguruma (BSD-2-Clause, submodule commit 4ef89209): the desktop app's jq release binary, and the WebAssembly build jq-wasm bundles",
+      "files": [
+        { "label": "COPYING", "file": "upstream/jq-1.8.2/COPYING", "url": "https://raw.githubusercontent.com/jqlang/jq/jq-1.8.2/COPYING", "sha256": "ad2b4a266b2268939c1446979759706077421cf906a203aa188c6f396e8cfd74" },
+        { "label": "Oniguruma COPYING", "file": "upstream/oniguruma-4ef89209/COPYING", "url": "https://raw.githubusercontent.com/kkos/oniguruma/4ef89209a239c1aea328cf13c05a2807e5c146d1/COPYING", "sha256": "70ba5469ea0bab6e18a32d7009068f996503168d27be57747e08da34337ff26f" }
+      ]
+    },
+    "musl": {
+      "name": "musl", "version": "1.2.6", "license": "MIT", "versionOfApk": "musl",
+      "source": "https://git.musl-libc.org/cgit/musl/tree/?h=v1.2.6",
+      "note": "the C library linked statically into nrs-sandboxer (built on Alpine 3.24)",
+      "files": [{ "label": "COPYRIGHT", "file": "upstream/musl-1.2.6/COPYRIGHT", "url": "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.6", "sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b" }]
+    },
+    "uv": {
+      "name": "uv", "version": "0.13.9", "license": "MIT OR Apache-2.0",
+      "source": "https://github.com/astral-sh/uv/tree/0.13.9",
+      "files": [
+        { "label": "LICENSE-APACHE", "file": "upstream/uv-0.13.9/LICENSE-APACHE", "url": "https://raw.githubusercontent.com/astral-sh/uv/0.13.9/LICENSE-APACHE", "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4" },
+        { "label": "LICENSE-MIT", "file": "upstream/uv-0.13.9/LICENSE-MIT", "url": "https://raw.githubusercontent.com/astral-sh/uv/0.13.9/LICENSE-MIT", "sha256": "860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58176c" }
+      ]
+    },
+    "extism-js": {
+      "name": "extism-js", "version": "v1.7.0", "license": "BSD-3-Clause",
+      "source": "https://github.com/extism/js-pdk/tree/v1.7.0",
+      "files": [{ "label": "LICENSE", "file": "upstream/extism-js-1.7.0/LICENSE", "url": "https://raw.githubusercontent.com/extism/js-pdk/v1.7.0/LICENSE", "sha256": "d01e60805075b591cbecc63b8582788e54e190f699037f1af19fb5294b7a47ab" }]
+    },
+    "binaryen": {
+      "name": "binaryen", "version": "version_133", "license": "Apache-2.0",
+      "source": "https://github.com/WebAssembly/binaryen/tree/version_133",
+      "note": "wasm-merge and wasm-opt",
+      "files": [{ "label": "LICENSE", "file": "upstream/binaryen-133/LICENSE", "url": "https://raw.githubusercontent.com/WebAssembly/binaryen/version_133/LICENSE", "sha256": "64c0d02491e16eced74826440ecd2bcf7722d37fa586faf457b2494293afbffe" }]
+    },
+    "github-cli": {
+      "name": "GitHub CLI", "version": "2.97.0", "license": "MIT", "apk": "github-cli",
+      "source": "https://github.com/cli/cli/tree/v2.97.0",
+      "files": [{ "label": "LICENSE", "file": "upstream/github-cli-2.97.0/LICENSE", "url": "https://raw.githubusercontent.com/cli/cli/v2.97.0/LICENSE", "sha256": "6da4adc42392c8485e40b4251c7e332fc3352df1947c9ffade71dd60b14a7a4f" }]
+    },
+    "docker-cli": {
+      "name": "Docker CLI", "version": "29.9.3", "license": "Apache-2.0", "apk": "docker-cli",
+      "source": "https://github.com/docker/cli/tree/v29.9.3",
+      "files": [
+        { "label": "LICENSE", "file": "upstream/docker-cli-29.9.3/LICENSE", "url": "https://raw.githubusercontent.com/docker/cli/v29.9.3/LICENSE", "sha256": "2d81ea060825006fc8f3fe28aa5dc0ffeb80faf325b612c955229157b8c10dc0" },
+        { "label": "NOTICE", "file": "upstream/docker-cli-29.9.3/NOTICE", "url": "https://raw.githubusercontent.com/docker/cli/v29.9.3/NOTICE", "sha256": "a8c869fbda819afb8d80e0ac19bac52e766bc6c19cb38cf94f52d64c4be2aab6" }
+      ]
+    },
+    "docker-compose": {
+      "name": "Docker Compose", "version": "5.7.2", "license": "Apache-2.0", "apk": "docker-cli-compose",
+      "source": "https://github.com/docker/compose/tree/v5.7.2",
+      "files": [
+        { "label": "LICENSE", "file": "upstream/docker-compose-5.7.2/LICENSE", "url": "https://raw.githubusercontent.com/docker/compose/v5.7.2/LICENSE", "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd" },
+        { "label": "NOTICE", "file": "upstream/docker-compose-5.7.2/NOTICE", "url": "https://raw.githubusercontent.com/docker/compose/v5.7.2/NOTICE", "sha256": "b7dca0a6b01fa7365e4892877a6321179ee343d72ee87a96cfc222141b99a1e6" }
+      ]
+    }
+  }
+}

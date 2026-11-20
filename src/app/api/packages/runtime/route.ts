@@ -15,6 +15,7 @@ import { getPackageSnapshot } from '@/server/packages/snapshot';
 import { getUiAttachments, viewUiAttachments } from '@/server/packages/packageUiModules';
 import { resolveProjectAccess } from '@/server/projects/access';
 import { resolveVerifiedAgentScope } from '@/server/auth/resolveVerifiedAgentScope';
+import { loadReadHiddenView } from '@/server/packages/packageReadFloor';
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   let session;
@@ -60,6 +61,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       role: access.member.role,
       grantedFeatures: access.role.grantedFeatures,
       ...(access.project.packageAccessFeature ? { packageAccessFeature: access.project.packageAccessFeature } : {}),
+      readHidden: await loadReadHiddenView({ ...access.session, agentId }, projectId),
     },
     access.role.grantedFeatures,
   );

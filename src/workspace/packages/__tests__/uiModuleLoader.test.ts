@@ -334,6 +334,22 @@ describe('ensureUiModules — modules install concurrently, each after its own p
     expect(io.requested).toEqual([hung.entryUrl, free.entryUrl]);
   });
 
+  it('a consumer whose provider is absent names that where its surfaces render (paired: a consumer loaded beside its provider names nothing)', async () => {
+    const provider = lane('@x/provider', { provides: [PROVIDED] });
+    const consumer = lane('@x/consumer', { sharedImports: ['react', PROVIDED] });
+    const importer = async (): Promise<Record<string, unknown>> => ({ installConsumerHostComponents: () => undefined, installProviderHostComponents: () => undefined });
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await ensureUiModules({ modules: [consumer], sheet: null, refused: [] }, importer);
+      expect(uiModuleRefusalReason('@x/consumer')).toContain(PROVIDED);
+      const served = lane('@x/served', { sharedImports: ['react', PROVIDED] });
+      await ensureUiModules({ modules: [served, provider], sheet: null, refused: [] }, async () => ({ installServedHostComponents: () => undefined, installProviderHostComponents: () => undefined }));
+      expect(uiModuleRefusalReason('@x/served')).toBeNull();
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
   it('a dependent still waits for its provider (paired: it imports right after the provider settles)', async () => {
     const provider = lane('@x/provider', { provides: [PROVIDED] });
     const consumer = lane('@x/consumer', { sharedImports: ['react', PROVIDED] });

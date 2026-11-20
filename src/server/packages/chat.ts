@@ -8,8 +8,11 @@
 
 import type { HostTarget } from '@neuralis/package-system/contracts';
 import { getCardSnapshot, getPackageSnapshot } from './snapshot';
+import { NO_READ_HIDDEN } from './packageReadFloor';
 
-export function getChatRuntimeSurface(scope: { host: HostTarget }) {
+export function getChatRuntimeSurface(host: { host: HostTarget }) {
+  // Project-less: no loaded source package reaches this surface.
+  const scope = { ...host, readHidden: NO_READ_HIDDEN };
   const snapshot = getPackageSnapshot(scope);
   const cards = getCardSnapshot(scope);
   const toolCardMap = new Map<string, string>();

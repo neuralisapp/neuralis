@@ -152,7 +152,7 @@ describe('everything below the provider wrap remounts — the feed is held above
     await renderTree(createElement(WorkspaceShell, { snapshotReady: true, children: null }));
     expect(probe.log).toEqual([
       'mount primary', 'mount secondary',
-      'unmount primary', 'mount primary',
+      'unmount secondary', 'mount secondary',
     ]);
   });
 

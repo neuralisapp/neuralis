@@ -1,6 +1,15 @@
 import { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+}));
+
 const mocks = vi.hoisted(() => ({
   requireSession: vi.fn(async () => ({ id: 'user-1' })),
   resolveProjectAccess: vi.fn(),
@@ -109,6 +118,7 @@ describe('GET /api/packages/runtime', () => {
         userId: 'user-1',
         role: 'member',
         grantedFeatures: ['core.agents'],
+        readHidden: { hiddenPackageIds: new Set(), hiddenFileKeys: new Set() },
       },
       ['core.agents'],
     );

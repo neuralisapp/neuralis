@@ -32,7 +32,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream, rmSync, writeFileSync } from 'node:fs';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -435,6 +435,28 @@ export async function mustExec(ctx: Pick<BaseContext, 'exec'>, args: string[], w
   return res;
 }
 
+/** The bytes free for this user on the filesystem that holds `dir`. */
+export async function freeBytesOf(dir: string): Promise<number> {
+  const fs = await statfs(dir);
+  return fs.bavail * fs.bsize;
+}
+
+/**
+ * The cold copy of a binary-mode storage dir (Qdrant stopped): one tar, 0600,
+ * its size. Qdrant's mmap files are sparse, so the archive keeps their holes:
+ * GNU tar only with `-S`; bsdtar (macOS, Windows' `tar.exe`) reads holes by
+ * default and accepts `-S` in extract mode only, so it gets the plain form.
+ */
+export async function tarStorageDir(ctx: Pick<BaseContext, 'exec'>, storageDir: string, tarFile: string): Promise<number> {
+  const tar = localTar();
+  const gnu = /GNU tar/.test((await ctx.exec(tar, ['--version'])).out);
+  await mustExec(ctx, ['-C', storageDir, ...(gnu ? ['-S'] : []), '-cf', tarFile, '.'], 'cold backup of the storage dir', undefined, tar);
+  await chmod(tarFile, 0o600);
+  const bytes = (await stat(tarFile)).size;
+  if (bytes === 0) throw new Error('The cold backup is empty.');
+  return bytes;
+}
+
 function compose(ctx: UpgradeContext, args: string[], what: string): Promise<ExecResult> {
   // From the host folder with no `-f`: the only form that merges the override.
   return mustExec(ctx, ['compose', ...args], what, { cwd: ctx.neuralisDir });
@@ -549,15 +571,24 @@ export function backupRoot(neuralisHome: string): string {
   return join(neuralisHome, 'qdrant-backups');
 }
 
-async function makeBackupDir(ctx: BaseContext, kind: 'upgrade' | 'rehearsal'): Promise<string> {
-  const root = backupRoot(ctx.neuralisHome);
+/** `<home>/qdrant-backups/<name>`, both 0700; `name` must be new. */
+export async function createBackupDir(neuralisHome: string, name: string): Promise<string> {
+  const root = backupRoot(neuralisHome);
   await mkdir(root, { recursive: true, mode: 0o700 });
   await chmod(root, 0o700);
-  const stamp = ctx.now().toISOString().replace(/[:.]/g, '-');
-  const dir = join(root, `${stamp}-${kind}-${ctx.from}-to-${ctx.target}`);
+  const dir = join(root, name);
   await mkdir(dir, { mode: 0o700 });
   await chmod(dir, 0o700);
   return dir;
+}
+
+/** A wall-clock time as a path segment. */
+export function backupStamp(now: Date): string {
+  return now.toISOString().replace(/[:.]/g, '-');
+}
+
+function makeBackupDir(ctx: BaseContext, kind: 'upgrade' | 'rehearsal'): Promise<string> {
+  return createBackupDir(ctx.neuralisHome, `${backupStamp(ctx.now())}-${kind}-${ctx.from}-to-${ctx.target}`);
 }
 
 async function saveRecord(dir: string, record: UpgradeRecord): Promise<void> {
@@ -964,9 +995,7 @@ async function binaryUpgrade(ctx: BinaryContext): Promise<UpgradeOutcome> {
     await ctx.binary.stopManaged();
     await waitDown(ctx, ctx.liveQdrant());
     const tarFile = join(dir, 'qdrant-storage.tar');
-    await mustExec(ctx, ['-C', ctx.storageDir, '-cf', tarFile, '.'], 'cold backup of the storage dir', undefined, localTar());
-    await chmod(tarFile, 0o600);
-    record.coldTar = { file: tarFile, bytes: (await stat(tarFile)).size };
+    record.coldTar = { file: tarFile, bytes: await tarStorageDir(ctx, ctx.storageDir, tarFile) };
     const previousBinary = join(dir, `qdrant-${ctx.from}`);
     await copyFile(join(ctx.binDir, qdrantBinaryName()), previousBinary);
     if (process.platform !== 'win32') await chmod(previousBinary, 0o700);

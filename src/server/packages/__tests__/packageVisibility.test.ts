@@ -7,6 +7,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+}));
 import type { SessionContext } from '@neuralis/package-system/contracts';
 
 const mocks = vi.hoisted(() => ({
@@ -51,6 +60,9 @@ import {
   getDefinitionGeneration,
   normalizeSurfaceAssetMode,
 } from '../packageVisibility';
+
+/** The read verdict of a caller who may read every source package file. */
+const READ_ALL = { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() };
 
 function makeSession(overrides: Partial<SessionContext> = {}): SessionContext {
   return {
@@ -451,7 +463,7 @@ describe('resolveVisiblePackageSurface', () => {
 
   it('isPackageDefinitionVisible skips the base-access gate without caller features (legacy unscoped)', () => {
     const def = makePackage({ requires: { accessFeature: 'special.access' } }) as never;
-    const scope = { host: 'neuralis-workspace' as const, projectId: 'proj-1', userId: 'user-1' };
+    const scope = { host: 'neuralis-workspace' as const, projectId: 'proj-1', userId: 'user-1', readHidden: READ_ALL };
     mocks.getProjectPackageIds.mockReturnValue(new Set(['example-package']));
     expect(isPackageDefinitionVisible(def, scope, undefined)).toBe(true);
     expect(isPackageDefinitionVisible(def, scope, ['other'])).toBe(false);

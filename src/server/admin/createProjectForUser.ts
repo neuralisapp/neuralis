@@ -6,7 +6,7 @@
  * Gate ORDER is load-bearing: owner-strength FIRST, capacity second — an
  * unauthorized caller never learns the instance project count (non-inference).
  * The real floor stays owner-strength here; the package route's
- * `platform.projects.create` feature is reachability only and never
+ * `platform.projects` feature is reachability only and never
  * sufficient on its own.
  */
 

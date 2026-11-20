@@ -10,6 +10,7 @@ import { getDockSnapshot } from '@/server/packages/snapshot';
 import { ensureProjectPackagesLoaded } from '@/server/packages/projectPackages';
 import { resolveProjectAccess } from '@/server/projects/access';
 import { resolveVerifiedAgentScope } from '@/server/auth/resolveVerifiedAgentScope';
+import { loadReadHiddenView } from '@/server/packages/packageReadFloor';
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   let user;
@@ -42,6 +43,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       role: access.member.role,
       grantedFeatures: access.role.grantedFeatures,
       ...(access.project.packageAccessFeature ? { packageAccessFeature: access.project.packageAccessFeature } : {}),
+      readHidden: await loadReadHiddenView({ ...access.session, agentId }, projectId),
     },
     access.role.grantedFeatures,
   );

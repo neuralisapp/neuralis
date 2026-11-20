@@ -1,6 +1,7 @@
 {
   "name": "neuralis",
-  "version": "0.4.1",
+  "version": "0.4.2",
+  "description": "Neuralis: a self-hosted, multi-agent, multiplayer AI workspace where people and agents share projects, files and tools, built around one package protocol",
   "license": "FSL-1.1-ALv2",
   "homepage": "https://neuralisapp.com",
   "repository": {
@@ -72,29 +73,29 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@neuralis/admin": "0.4.1",
-    "@neuralis/agent-core": "0.4.1",
-    "@neuralis/brain-core": "0.4.1",
-    "@neuralis/machine-core": "0.4.1",
-    "@neuralis/package-system": "0.4.1",
-    "@tailwindcss/oxide": "4.3.3",
+    "@neuralis/admin": "0.4.2",
+    "@neuralis/agent-core": "0.4.2",
+    "@neuralis/brain-core": "0.4.2",
+    "@neuralis/machine-core": "0.4.2",
+    "@neuralis/package-system": "0.4.2",
+    "@tailwindcss/oxide": "4.3.5",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dockerode": "^5.0.1",
     "express": "^5.3.0",
-    "lucide-react": "^1.47.0",
-    "next": "16.4.5",
+    "lucide-react": "^1.74.0",
+    "next": "16.4.6",
     "next-auth": "4.24.15",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "react-resizable-panels": "^4.15.3",
+    "react-resizable-panels": "^4.24.0",
     "react-rnd": "^10.5.2",
-    "tailwindcss": "4.3.3",
+    "tailwindcss": "4.3.5",
     "tsx": "^4.23.15",
-    "zustand": "5.0.16"
+    "zustand": "5.1.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/cors": "^2.8.19",
     "@types/dockerode": "^4.0.1",
     "@types/express": "^5.0.6",
@@ -108,8 +109,8 @@
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "express-rate-limit": "^8.2.2",
-    "hono": "^4.13.5",
-    "@hono/node-server": "^1.19.15 || ^2.0.5",
+    "hono": "^4.13.16",
+    "@hono/node-server": "^1.19.18 || ^2.1.6",
     "ip-address": "^10.7.4",
     "fast-uri": "^3.1.9",
     "@qdrant/js-client-rest": {
@@ -117,6 +118,12 @@
     },
     "app-builder-lib": {
       "minimatch": "^11.0.3"
+    },
+    "@electron/universal": {
+      "minimatch": "^11.0.9"
+    },
+    "@electron/get": {
+      "undici": "^7.30.2"
     }
   },
   "allowScripts": {

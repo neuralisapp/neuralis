@@ -28,8 +28,8 @@ export type PackageRuntimeScope = {
  * They did until 2026-07-28, and it made `getScopedSnapshot` fail OPEN in the
  * one window that matters: `session.projectId`/`agentId` are both `null` on
  * every page load until `bootstrap()` resolves, so a pre-bootstrap ask matched
- * the unscoped SSR seed exactly — and that seed carries every project's ungated
- * contributions. Only the loading overlay happened to keep launchers unmounted
+ * the unscoped SSR seed exactly — a seed scoped to no project, which proves
+ * nothing about the active one. Only the loading overlay happened to keep launchers unmounted
  * during it, which is a rendering coincidence, not a guarantee.
  */
 const UNSCOPED_KEY = '\0unscoped';
@@ -149,8 +149,8 @@ export function subscribeToRuntimeEvents(scope?: PackageRuntimeScope): () => voi
  *
  * `scope` records WHICH caller scope the snapshot was built for. Omit it for
  * the SSR seed — `getSSRSnapshot()` builds with NO `projectId` (only
- * `grantedFeatures: []`), so `passesProjectAndOwnerScope` short-circuits and
- * the payload carries the UNGATED contributions of EVERY project's packages.
+ * `grantedFeatures: []`), so `passesProjectAndOwnerScope` admits builtins and
+ * installs only — no project's own packages.
  * That seed is deliberately unscoped and must never be mistaken for a
  * project-scoped answer; `getScopedSnapshot` is how a consumer says "only give
  * me the snapshot if it was actually built for THIS project/agent".

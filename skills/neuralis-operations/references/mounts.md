@@ -111,22 +111,20 @@ context by itself, instead of a file someone has to know to open. Root it at the
 **never at the deployment root** — that directory holds the `.env` carrying the session secret and
 the vector-store key, and a source there would put both into agent reach and into the vector index.
 
-With the overlay configured, Files → Discover offers this ready-made, narrowest first:
+Files → Discover offers this ready-made as ONE source:
 
-- **Neuralis Skills** — rooted at `neuralis-tree:skills` (the tree's `skills/` on whichever plane
-  opens it: the overlay here, the host's own folder on a native install), user-scoped, manual sync, and read-only via a
-  `**` write/exec deny. This is the one to click. The root *is* the boundary, so nothing outside the
-  skills folder is reachable, and no filter has to hold the line. It appears only when the overlay
-  root actually has a `skills/` folder — better no row than a row pointing at nothing.
-- **Neuralis Tree** — the whole overlay, for editing platform source. It pre-fills
-  `include: ['skills/**']` so a "turned it on and left it" attach does not index the entire folder,
-  plus denies on the two things that make this root dangerous: `.env*` (no read, no write — it
-  carries the session secret and the vector-store key) and write on `Dockerfile`, `docker/**` and
-  every compose file the daemon would pick up. That last set is wider than the file this repo
-  ships: `neuralis:rebuild` runs `docker compose up` with no `-f`, so Compose's default discovery
-  applies — `compose.override.yaml` and `docker-compose.override.yaml` beside the base are MERGED,
-  and a bare `compose.yaml` REPLACES it — so all four spellings, `.yml` and `.yaml`, are denied. Ordinary editable rules, not immutable floors; the owner
-  can remove any of them before or after saving.
+- **Neuralis Tree** (`neuralis`) — rooted at `neuralis-tree:` (the tree on whichever plane opens
+  it: the overlay here, the host's own folder on a native install), user-scoped, manual sync,
+  read-only by default, and its index narrowed to `skills/**` so a "turned it on and left it"
+  attach does not index the whole folder. Two things make this root dangerous and both are
+  closed: every `.env*` (no read, no write — it carries the session secret and the vector-store
+  key) is an immutable floor that follows the folder, so it holds on any source rooted in or over
+  the tree; and `Dockerfile`, `docker/**` and every compose file the daemon would pick up are
+  write-denied. That last set is wider than the file this repo ships: `neuralis:rebuild` runs
+  `docker compose up` with no `-f`, so Compose's default discovery applies —
+  `compose.override.yaml` and `docker-compose.override.yaml` beside the base are MERGED, and a
+  bare `compose.yaml` REPLACES it — so all four spellings, `.yml` and `.yaml`, are denied. The
+  write denies are ordinary editable rules; the `.env*` floor is not.
 
 **Two traps, both of which look closed when they are not.** A sync `include` decides what gets
 INDEXED, never what `fs_read` can reach — the source root and the path rules do that. And a

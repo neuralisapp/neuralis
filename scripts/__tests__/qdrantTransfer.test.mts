@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import type { ComposeAnswer } from '../host-broker/helper.mts';
-import { QDRANT_TARGET_VERSION } from '../setup/qdrantVersion.mts';
+import { QDRANT_RELEASES, QDRANT_TARGET_VERSION } from '../setup/qdrantVersion.mts';
 import { extractArgs, planTransfer, runTransfer, transferStorageDir, type TransferInput, type TransferPorts } from '../qdrant-upgrade/transfer.mts';
 import type { ExecResult, QdrantApi } from '../qdrant-upgrade/upgrade.mts';
 
@@ -111,7 +111,10 @@ describe('the Docker vectors copied into the desktop app\'s own store', () => {
     await expect(planTransfer(older.ports, older.input)).rejects.toThrow(/on Qdrant 1\.18\.0 and this app's Qdrant is .*`neuralis qdrant-upgrade`/);
     const unknown = world({ recorded: null });
     await expect(runTransfer(unknown.ports, unknown.input)).rejects.toThrow(/no recorded version/);
-    for (const w of [older, unknown]) expect(w.calls).toEqual([]);
+    // The Docker store still on the previous pin after the bundle moved on: refused, nothing runs.
+    const previous = world({ recorded: QDRANT_RELEASES.at(-2)!.version });
+    await expect(runTransfer(previous.ports, previous.input)).rejects.toThrow(/a store copies only between the same version/);
+    for (const w of [older, unknown, previous]) expect(w.calls).toEqual([]);
 
     const full = world();
     mkdirSync(join(transferStorageDir(full.home), 'collections'), { recursive: true });

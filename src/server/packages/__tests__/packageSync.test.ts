@@ -37,6 +37,9 @@ const h = vi.hoisted(() => ({
   listeners: new Set<(projectId: string) => void>(),
   listCalls: [] as string[],
   gate: null as Promise<void> | null,
+  /** More source rows per project (a `packages` row, a switched-off source), and projects whose listing throws. */
+  extraRows: new Map<string, Array<Record<string, unknown>>>(),
+  failing: new Set<string>(),
 }));
 
 function mkLogger(prefix: string): Record<string, unknown> {
@@ -85,7 +88,7 @@ import { getFsWatchHub } from '@neuralis/package-system/data';
 import { ensureProjectPackagesLoaded, resetProjectPackageActivation, resolveProjectPackageInstance, listAllActivatedPackages } from '../projectPackages';
 import { rescanProjectPackages } from '../rescanProjectPackages';
 import { getPackageRuntimeManager } from '../PackageRuntimeManager';
-import { getProjectPackageScanner, getScannerForDir, ProjectPackageScanner } from '../ProjectPackageScanner';
+import { getProjectPackageScanner, getScannerForDir, ProjectPackageScanner, readPackageFolderManifests } from '../ProjectPackageScanner';
 import { toResolvedRecord } from '../packageRecords';
 import { packageInstanceId } from '@neuralis/package-system/contracts';
 
@@ -233,12 +236,14 @@ beforeAll(async () => {
             h.listCalls.push(pid);
             const src = h.sources.get(pid);
             if (h.gate) await h.gate;
-            return src
-              ? [{
-                  slug: 'testpackages', uriRoot: 'testpackages://', containerRoot: src.dir,
-                  scope: src.scope, packageFolders: [''], enabled: true, kind: 'folder',
-                }]
-              : [];
+            if (h.failing.has(pid)) throw new Error('source configs unreadable');
+            return [
+              ...(src ? [{
+                slug: 'testpackages', uriRoot: 'testpackages://', containerRoot: src.dir,
+                scope: src.scope, packageFolders: [''], enabled: true, kind: 'folder',
+              }] : []),
+              ...(h.extraRows.get(pid) ?? []),
+            ];
           },
           subscribePackageSourceRoots: (listener: (projectId: string) => void) => {
             h.listeners.add(listener);
@@ -683,3 +688,128 @@ it('exact source/path instance preserves owning scope and trust; invalid/missing
   await rescanProjectPackages('u1', pid);
   expect(loader.getStatus(sourceId)?.definition.access?.trust).toBe('untrusted');
 });
+
+describe('the drop zone follows its `packages` source; a switched-off source lists its folders', () => {
+  const dropRow = (pid: string, enabled: boolean) => ({
+    slug: 'packages', uriRoot: 'packages://', containerRoot: path.join(h.projectsRoot, pid, '_packages'),
+    scope: { kind: 'project' }, packageFolders: [''], enabled, kind: 'folder',
+  });
+  const greyOf = (pid: string) => listAllActivatedPackages(pid).filter((p) => p.sourceDisabled);
+
+  it('(iii) no `packages` row → the drop loads; a switched-off `packages` source → it does not, and lists under the id it loads as', async () => {
+    const pid = 'drop-follows';
+    await writePkg(path.join(h.projectsRoot, pid, '_packages', 'drop-a'), 'drop-a', 'node');
+    const dropId = packageInstanceIdFor('packages://drop-a', pid);
+    h.extraRows.set(pid, [dropRow(pid, false)]);
+    await ensureProjectPackagesLoaded(pid);
+    expect(loader.isLoaded(dropId)).toBe(false);
+    expect(greyOf(pid)).toEqual([{ packageId: dropId, source: 'local-dir', sourceDisabled: true, sourceSlug: 'packages' }]);
+    expect(getProjectPackageScanner(path.join(h.projectsRoot, pid)).listenerCount).toBe(0);
+
+    h.trust.set(pid, { [dropId]: 'trusted' });
+    const deletions = h.deletions.length;
+    h.extraRows.set(pid, [dropRow(pid, true)]);
+    sourceChanged(pid);
+    await until(() => loader.isLoaded(dropId)); // the grey row's id IS the loaded id
+    expect(greyOf(pid)).toEqual([]);
+    expect(getProjectPackageScanner(path.join(h.projectsRoot, pid)).listenerCount).toBe(1);
+
+    // Switching off is not deletion: unloaded, listed again, its trust kept.
+    h.extraRows.set(pid, [dropRow(pid, false)]);
+    sourceChanged(pid);
+    await until(() => !loader.isLoaded(dropId));
+    await until(() => greyOf(pid).length === 1);
+    expect(h.deletions.length).toBe(deletions);
+    expect(h.trust.get(pid)?.[dropId]).toBe('trusted');
+    expect(getProjectPackageScanner(path.join(h.projectsRoot, pid)).listenerCount).toBe(0);
+
+    // Paired control: no `packages` row at all → the drop loads (a fresh project).
+    const fresh = 'drop-no-row';
+    await writePkg(path.join(h.projectsRoot, fresh, '_packages', 'drop-a'), 'drop-a', 'node');
+    await ensureProjectPackagesLoaded(fresh);
+    expect(loader.isLoaded(packageInstanceIdFor('packages://drop-a', fresh))).toBe(true);
+  });
+
+  it('(i) no source-roots service → the drop loads', async () => {
+    const pid = 'drop-no-service';
+    await writePkg(path.join(h.projectsRoot, pid, '_packages', 'drop-a'), 'drop-a', 'node');
+    const core = h.core as { services: Map<string, unknown> };
+    const services = core.services;
+    core.services = new Map();
+    try {
+      await ensureProjectPackagesLoaded(pid);
+    } finally {
+      core.services = services;
+    }
+    expect(loader.isLoaded(packageInstanceIdFor('packages://drop-a', pid))).toBe(true);
+  });
+
+  it('(ii) an unreadable source list loads nothing and leaves the project unactivated; the retry is spaced, then loads', async () => {
+    const pid = 'drop-enum-fails';
+    await writePkg(path.join(h.projectsRoot, pid, '_packages', 'drop-a'), 'drop-a', 'node');
+    const dropId = packageInstanceIdFor('packages://drop-a', pid);
+    h.failing.add(pid);
+    const t0 = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    try {
+      await ensureProjectPackagesLoaded(pid);
+      expect(loader.isLoaded(dropId)).toBe(false);
+      expect(listAllActivatedPackages(pid)).toEqual([]);
+      const asked = h.listCalls.filter((c) => c === pid).length;
+      // Every entry point during the outage: no new listing.
+      for (let i = 0; i < 14; i++) await ensureProjectPackagesLoaded(pid);
+      expect(h.listCalls.filter((c) => c === pid).length).toBe(asked);
+      h.failing.delete(pid);
+      now.mockReturnValue(t0 + 4_999);
+      await ensureProjectPackagesLoaded(pid);
+      expect(loader.isLoaded(dropId)).toBe(false);
+      now.mockReturnValue(t0 + 5_000);
+      await ensureProjectPackagesLoaded(pid);
+      expect(h.listCalls.filter((c) => c === pid).length).toBe(asked + 1);
+      expect(loader.isLoaded(dropId)).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('a switched-off source\'s folders list from their manifests (no definition, nothing loaded); a source change re-reads them, an unchanged folder mtime does not', async () => {
+    const pid = 'grey-folder';
+    const src = path.join(tmp, 'mounts', 'off-grey-folder');
+    await writePkg(path.join(src, 'grey-a'), 'grey-a', 'wasm');
+    const scope = { kind: 'user', userId: 'alice' };
+    h.extraRows.set(pid, [{ slug: 'offsrc', uriRoot: 'offsrc://', containerRoot: src, scope, packageFolders: [''], enabled: false, kind: 'folder' }]);
+    const loads = vi.spyOn(loader, 'load');
+    await ensureProjectPackagesLoaded(pid);
+    const greyId = packageInstanceId({ originUri: 'offsrc://grey-a', projectId: pid, scope: scope as never });
+    expect(greyOf(pid)).toEqual([{ packageId: greyId, source: 'local-dir', sourceDisabled: true, sourceSlug: 'offsrc' }]);
+    expect(loads.mock.calls.some((c) => (c[0] as { id: string }).id === greyId)).toBe(false);
+    loads.mockRestore();
+    // F37: the folder read is the manifest's name and version — no definition.
+    expect(await readPackageFolderManifests(src)).toEqual([{ slug: 'grey-a', packageRoot: path.join(src, 'grey-a'), name: 'grey-a', version: '0.1.0' }]);
+
+    // The SAME id the folder loads under once its source is on.
+    const pidOn = 'grey-folder-on';
+    h.extraRows.set(pidOn, [{ slug: 'offsrc', uriRoot: 'offsrc://', containerRoot: src, scope, packageFolders: [''], enabled: true, kind: 'folder' }]);
+    await ensureProjectPackagesLoaded(pidOn);
+    expect(listAllActivatedPackages(pidOn).map((p) => p.packageId)).toContain(packageInstanceId({ originUri: 'offsrc://grey-a', projectId: pidOn, scope: scope as never }));
+
+    // A manifest edit leaves the folder's mtime: a rescan keeps the cached rows, a source change re-reads.
+    const { listDisabledPackageRows } = await import('../projectPackages');
+    await editName(path.join(src, 'grey-a'), 'Renamed');
+    await rescanProjectPackages('u1', pid);
+    expect(listDisabledPackageRows(pid).map((r) => r.name)).toEqual(['grey-a']);
+    sourceChanged(pid);
+    await until(() => listDisabledPackageRows(pid)[0]?.name === 'Renamed');
+    // A new folder moves the mtime: the next rescan lists it.
+    await writePkg(path.join(src, 'grey-b'), 'grey-b', 'node');
+    await rescanProjectPackages('u1', pid);
+    expect(listDisabledPackageRows(pid).map((r) => r.name).sort()).toEqual(['Renamed', 'grey-b']);
+  });
+});
+
+async function editName(pkgDir: string, name: string): Promise<void> {
+  const pj = path.join(pkgDir, 'package.json');
+  const m = JSON.parse(await fs.readFile(pj, 'utf8')) as { neuralis: { name: string } };
+  m.neuralis.name = name;
+  await fs.writeFile(pj, JSON.stringify(m));
+}

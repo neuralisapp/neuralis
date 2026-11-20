@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+}));
+
 const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn(),
   listPackages: vi.fn(),
@@ -60,16 +69,15 @@ describe('GET /api/admin/feature-catalog — R2b project-aware override union', 
     mocks.ownerScope = new Map();
   });
 
-  it('surfaces an override-attached accessFeature under its declaring package group', async () => {
+  it('surfaces an override-attached accessFeature under its own segment, naming the package that carries it', async () => {
     mocks.requireAdmin.mockResolvedValue(adminCtx({ 'pkg-x': 'labs.access' }));
     const res = await GET(req('proj-1'));
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
-    const xGroup = body.groups.find((g: any) => g.packageId === 'pkg-x');
-    // pkg-x declares no providesFeatures — without the override union its group
-    // would be empty and dropped by the `g.features.length > 0` filter.
-    expect(xGroup).toBeDefined();
-    expect(xGroup.features).toContain('labs.access');
+    const labs = body.groups.find((g: any) => g.key === 'labs');
+    // pkg-x declares no providesFeatures — only the override makes the id grantable.
+    expect(labs).toMatchObject({ title: 'Labs', platformTier: false, features: ['labs.access'] });
+    expect(labs.entries[0].declaredBy).toEqual(['Package X']);
     // requireAdmin received the project id from the X-Project-Id header.
     expect(mocks.requireAdmin).toHaveBeenCalledWith('proj-1');
   });
@@ -78,10 +86,9 @@ describe('GET /api/admin/feature-catalog — R2b project-aware override union', 
     mocks.requireAdmin.mockResolvedValue(adminCtx());
     const res = await GET(req('proj-1'));
     const body = (await res.json()) as any;
-    const zGroup = body.groups.find((g: any) => g.packageId === 'pkg-z');
-    expect(zGroup.features).toContain('z.access');
-    // pkg-x has no manifest features and no override here ⇒ empty group dropped.
-    expect(body.groups.find((g: any) => g.packageId === 'pkg-x')).toBeUndefined();
+    expect(body.groups.find((g: any) => g.key === 'z').features).toContain('z.access');
+    // pkg-x has no manifest features and no override here ⇒ it names nothing.
+    expect(JSON.stringify(body)).not.toContain('Package X');
   });
 
   // O-2 — the header is REQUIRED. The old "no header ⇒ the caller's first
@@ -159,7 +166,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
 
   it('omits another project’s drop, and its declared title/description, from the groups', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
-    expect(body.groups.map((g: any) => g.packageId).sort()).toEqual(['agent-core', 'brain-core']);
+    expect(body.groups.map((g: any) => g.key)).toEqual(['core', 'files']);
     const raw = JSON.stringify(body);
     expect(raw).not.toContain('FOREIGN TITLE');
     expect(raw).not.toContain('FOREIGN DESC');
@@ -168,8 +175,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
 
   it('omits the foreign drop’s contribution NAME from a VISIBLE feature’s consumers', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
-    const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
+    const driveRead = body.groups.find((g: any) => g.key === 'files').entries.find((e: any) => e.id === 'files.read');
     // `files.read` is native and survives the group filter — which is
     // exactly why its consumers list was the leak channel.
     expect(driveRead.consumers.byKind.tool ?? []).not.toContain(FOREIGN_TOOL);
@@ -178,8 +184,7 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
 
   it('KEEPS the cross-native consumer (the still-works control)', async () => {
     const body = (await (await GET(req('proj-1'))).json()) as any;
-    const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
+    const driveRead = body.groups.find((g: any) => g.key === 'files').entries.find((e: any) => e.id === 'files.read');
     expect(driveRead.consumers.byKind.tool).toContain('delegate');
     expect(driveRead.consumers.total).toBe(1);
   });
@@ -187,9 +192,38 @@ describe('GET /api/admin/feature-catalog — R2C-006 project scoping', () => {
   it('shows the drop once it IS installed in this project', async () => {
     mocks.projectPackageIds = new Set(['foreign-drop']);
     const body = (await (await GET(req('proj-1'))).json()) as any;
-    expect(body.groups.map((g: any) => g.packageId)).toContain('foreign-drop');
-    const brain = body.groups.find((g: any) => g.packageId === 'brain-core');
-    const driveRead = brain.entries.find((e: any) => e.id === 'files.read');
+    expect(body.groups.map((g: any) => g.key)).toContain('foreign');
+    const driveRead = body.groups.find((g: any) => g.key === 'files').entries.find((e: any) => e.id === 'files.read');
     expect(driveRead.consumers.byKind.tool).toContain(FOREIGN_TOOL);
+  });
+});
+
+/**
+ * One entry per id, grouped by its first segment: a builtin's words win, every
+ * other declarer is named on the row, and the platform tier (the kernel label)
+ * sorts last whatever its letter.
+ */
+describe('GET /api/admin/feature-catalog — grouped by id segment', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.requireAdmin.mockResolvedValue(adminCtx());
+    mocks.ownerScope = new Map();
+  });
+
+  it('a builtin\'s title wins over a drop declaring the same id, and the drop is named; platform groups come last', async () => {
+    const defs = [
+      { id: 'drop', name: 'Labs Drop', requires: { providesFeatures: [{ id: 'files.read', title: 'DROP TITLE' }, { id: 'aaa.own', title: 'Own' }] } },
+      { id: 'brain-core', name: 'Brain Core', requires: { providesFeatures: [{ id: 'files.read', title: 'Read and search files', description: 'Open, list and search.' }, { id: 'platform.vector', title: 'Vector' }] } },
+      { id: 'agent-core', name: 'Agent Core', requires: { providesFeatures: [{ id: 'server.shell', title: 'Shell' }] } },
+    ];
+    mocks.listPackages.mockReturnValue(defs);
+    mocks.projectPackageIds = new Set(['drop']);
+    const body = (await (await GET(req('proj-1'))).json()) as any;
+    expect(body.groups.map((g: any) => [g.key, g.platformTier])).toEqual([['aaa', false], ['files', false], ['server', false], ['platform', true]]);
+    const read = body.groups.find((g: any) => g.key === 'files').entries;
+    expect(read).toEqual([expect.objectContaining({ id: 'files.read', title: 'Read and search files', description: 'Open, list and search.', declaredBy: ['Labs Drop'] })]);
+    expect(JSON.stringify(body)).not.toContain('DROP TITLE');
+    // A builtin-only id names no declarer.
+    expect(body.groups.find((g: any) => g.key === 'server').entries[0].declaredBy).toBeUndefined();
   });
 });

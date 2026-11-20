@@ -1,6 +1,15 @@
 import { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+}));
+
 const mocks = vi.hoisted(() => ({
   requireSession: vi.fn(async () => ({ id: 'user-1' })),
   resolveProjectAccess: vi.fn(),
@@ -86,7 +95,7 @@ describe('package metadata routes', () => {
     expect(response.status).toBe(200);
     // R2b — scope (userId/role/grantedFeatures) threaded for scope-isolated advertise.
     expect(mocks.getDockSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'], readHidden: { hiddenPackageIds: new Set(), hiddenFileKeys: new Set() } },
       ['files.read'],
     );
   });
@@ -97,7 +106,7 @@ describe('package metadata routes', () => {
     expect(response.status).toBe(200);
     expect(mocks.ensureProjectPackagesLoaded).toHaveBeenCalledWith('proj-1');
     expect(mocks.getCommandSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'], readHidden: { hiddenPackageIds: new Set(), hiddenFileKeys: new Set() } },
       ['files.read'],
     );
   });
@@ -107,7 +116,7 @@ describe('package metadata routes', () => {
 
     expect(response.status).toBe(200);
     expect(mocks.getWidgetSnapshot).toHaveBeenCalledWith(
-      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'] },
+      { host: 'neuralis-workspace', projectId: 'proj-1', userId: 'user-1', role: 'member', grantedFeatures: ['files.read'], readHidden: { hiddenPackageIds: new Set(), hiddenFileKeys: new Set() } },
       ['files.read'],
     );
   });

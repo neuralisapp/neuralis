@@ -39,7 +39,9 @@ import type {
   WidgetUiElement,
 } from '@neuralis/package-system/contracts';
 import type { SurfaceAssetKind } from '@neuralis/package-system';
+import { isManifestReadHidden, type ReadHidden } from '@neuralis/package-system/access';
 import { createHash } from 'node:crypto';
+import { loadReadHiddenView } from './packageReadFloor';
 import { getCommunityPackageRegistry } from './runtime';
 import { getPackageRuntimeManager } from './PackageRuntimeManager';
 import { BUILTIN_PACKAGE_IDS } from '../host/bootstrap';
@@ -58,6 +60,12 @@ export type PackageVisibilityScope = {
   grantedFeatures?: string[];
   /** R2b — owner/admin base-access feature OVERRIDE map (runtime instance id → feature id). */
   packageAccessFeature?: Record<string, string>;
+  /**
+   * The caller's READ verdict on loaded source packages (`loadReadHiddenView`).
+   * Required, with no "unknown" arm: a surface that skipped the read cannot
+   * compile. A project-less scope hides every candidate whatever this holds.
+   */
+  readHidden: ReadHidden;
 };
 
 type FeatureFiltered = {
@@ -121,7 +129,11 @@ export function passesProjectAndOwnerScope(
   scope: PackageVisibilityScope,
 ): boolean {
   const projectId = scope.projectId;
-  if (!projectId) return true;
+  // No project, nothing project-owned: a package that lives in a project (a
+  // `_packages/` drop or a loaded source package) is judged only inside its
+  // project, so a project-less snapshot carries builtins and installs alone —
+  // an allowlist, so a future id shape is not admitted by default.
+  if (!projectId) return BUILTIN_PACKAGE_IDS.has(definition.id);
   if (BUILTIN_PACKAGE_IDS.has(definition.id)) return true; // builtins never scope-hidden
   const manager = getPackageRuntimeManager();
   if (!manager.getProjectPackageIds(projectId).has(definition.id)) return false;
@@ -157,6 +169,8 @@ export function isPackageDefinitionVisible(
 ): boolean {
   if (!matchesHost(definition, scope.host)) return false;
   if (!passesProjectAndOwnerScope(definition, scope)) return false;
+  // A surface is a manifest contribution: the manifest's read verdict hides it.
+  if (isManifestReadHidden(scope.readHidden, definition.id)) return false;
   if (
     grantedFeatures &&
     !passesBaseAccessFeature(definition, grantedFeatures, resolveOverrideFeature(scope, definition.id))
@@ -537,6 +551,7 @@ async function resolveVisibleDefinition(
     role: session.role,
     grantedFeatures: session.grantedFeatures,
     packageAccessFeature,
+    readHidden: await loadReadHiddenView(session, session.projectId, [packageId]),
   };
   if (!isPackageDefinitionVisible(definition, scope, session.grantedFeatures)) return null;
   return { definition, scope, definitions };

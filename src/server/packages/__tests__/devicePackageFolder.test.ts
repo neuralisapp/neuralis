@@ -29,6 +29,9 @@ import { toResolvedRecord, type ResolvedPackageRecord } from '../packageRecords'
 import { getPackageRuntimeManager } from '../PackageRuntimeManager';
 import { passesProjectAndOwnerScope } from '../packageVisibility';
 
+/** The read verdict of a caller who may read every source package file. */
+const READ_ALL = { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() };
+
 let root = '';
 const logger = { info: () => {}, warn: () => {}, debug: () => {} };
 
@@ -93,11 +96,11 @@ describe('selectFlaggedPackageRoots — device folders and the folder re-check',
     }]);
     expect(opened).toEqual(['pkgs', '.claude']);
     expect(selected).toEqual([
-      { dir: '/home/bob/work/pkgs', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://pkgs', reader, device: 'dev_far' },
-      { dir: '/home/bob/work/.claude', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://.claude', reader, device: 'dev_far' },
+      { kind: 'folder', dir: '/home/bob/work/pkgs', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://pkgs', reader, device: 'dev_far' },
+      { kind: 'folder', dir: '/home/bob/work/.claude', ownerScope: { kind: 'project' }, plane: 'device', uriRoot: 'laptop://.claude', reader, device: 'dev_far' },
     ]);
     // Paired control: a folder this process opens carries no device.
-    expect(selectFlaggedPackageRoots([base])).toEqual([{ dir: '/projects/p1/acme', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' }]);
+    expect(selectFlaggedPackageRoots([base])).toEqual([{ kind: 'folder', dir: '/projects/p1/acme', ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'acme://' }]);
   });
 
   it('a package row names the device its origin lives on — at a segment boundary, never a bare prefix', () => {
@@ -352,7 +355,7 @@ describe('a member\'s USER-scope DEVICE folder — its packages serve their owne
     const manager = getPackageRuntimeManager();
     await manager.syncProjectPackagesToRuntime('p-dev', records);
     const bySlug = (slug: string) => records.find((r) => r.originUri?.startsWith(`${slug}://`))!.definition;
-    const visible = (slug: string, userId: string, grantedFeatures: string[]) => passesProjectAndOwnerScope(bySlug(slug), { host: 'neuralis-workspace', projectId: 'p-dev', userId, grantedFeatures });
+    const visible = (slug: string, userId: string, grantedFeatures: string[]) => passesProjectAndOwnerScope(bySlug(slug), { readHidden: READ_ALL, host: 'neuralis-workspace', projectId: 'p-dev', userId, grantedFeatures });
 
     for (const slug of ['mine', 'far']) {
       expect(manager.getPackageOwnerOrigin('p-dev', bySlug(slug).id), slug).toEqual({ plane: 'device' });

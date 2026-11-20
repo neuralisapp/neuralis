@@ -7,7 +7,7 @@
  * and the way a home a Docker install set up opens here: the real offline
  * `upgrade --apply`, then `up` 15, the adopt (`setup --native --yes`), `up` ready.
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createServer, connect, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -26,6 +26,7 @@ import { askSupervisorToStop, awaitDetachedReady, EXIT, hostChildEnv, hostPackag
 import { stopQdrantBinary } from '../setup/services.mts';
 import { authoredBaseEnv, bundleLayout } from '@neuralis/package-system/paths';
 import { createHash } from 'node:crypto';
+import { QDRANT_TARGET_VERSION } from '../setup/qdrantVersion.mts';
 
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
@@ -76,8 +77,15 @@ fs.writeFileSync(env.FAKE_HOST_COUNT + '.pid', String(process.pid));
 if (process.connected) fs.writeFileSync(env.FAKE_HOST_COUNT + '.ipc', 'connected');
 // The supervisor's stop over the ipc channel (the real host: followSupervisor → its SIGTERM path).
 process.on('message', (m) => { if (m === 'shutdown') { fs.writeFileSync(env.FAKE_HOST_COUNT + '.stopped', 'shutdown'); process.exit(0); } });
+let loadingSaid = false;
 http.createServer((req, res) => {
   if (req.url === '/api/health') {
+    if (env.FAKE_HOST_LOADING === '1' && !loadingSaid) {
+      loadingSaid = true;
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'initializing', phase: 'packages', instanceId: env.NEURALIS_INSTANCE_ID }));
+      return;
+    }
     const refused = env.FAKE_HOST_REFUSED === '1';
     res.writeHead(refused ? 503 : 200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(refused ? { status: 'error', error: 'bootstrap_failed', code: 'upgrade_required', instanceId: env.NEURALIS_INSTANCE_ID } : { status: 'ready', instanceId: env.NEURALIS_INSTANCE_ID }));
@@ -88,11 +96,20 @@ http.createServer((req, res) => {
 process.on('SIGTERM', () => { fs.writeFileSync(env.FAKE_HOST_COUNT + '.stopped', '1'); process.exit(0); });
 `;
 
-/** A fake Qdrant binary: `/healthz`, its env dumped into its cwd. */
+/**
+ * A fake Qdrant binary: `/healthz`, `GET /` with the bundle's version (or a `fake-version` file's), its env
+ * dumped into its cwd (the storage) and, at its start, what `<home>/qdrant-backups` held.
+ */
 const FAKE_QDRANT = `#!${process.execPath}
 const http = require('node:http');
-require('node:fs').writeFileSync('qdrant-env.json', JSON.stringify(process.env));
-http.createServer((req, res) => { res.end('ok'); }).listen(Number(process.env.QDRANT__SERVICE__HTTP_PORT), process.env.QDRANT__SERVICE__HOST);
+const fs = require('node:fs');
+fs.writeFileSync('qdrant-env.json', JSON.stringify(process.env));
+fs.writeFileSync('qdrant-saw-backups.json', JSON.stringify(fs.existsSync('../qdrant-backups') ? fs.readdirSync('../qdrant-backups') : []));
+const version = fs.existsSync('fake-version') ? fs.readFileSync('fake-version', 'utf8').trim() : '${QDRANT_TARGET_VERSION}';
+http.createServer((req, res) => {
+  if (req.url === '/') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ title: 'qdrant - vector search engine', version })); return; }
+  res.end('ok');
+}).listen(Number(process.env.QDRANT__SERVICE__HTTP_PORT), process.env.QDRANT__SERVICE__HOST);
 process.on('SIGTERM', () => process.exit(0));
 `;
 
@@ -163,6 +180,11 @@ function lines(out: string[]): Array<Record<string, unknown>> {
   return out.join('').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
+/** The state lines after the start's `starting` steps (the first test pins the steps themselves). */
+function afterSteps(out: string[]): Array<Record<string, unknown>> {
+  return lines(out).filter((l) => l.state !== 'starting');
+}
+
 async function waitFor(predicate: () => boolean, ms = 8_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!predicate()) {
@@ -172,12 +194,16 @@ async function waitFor(predicate: () => boolean, ms = 8_000): Promise<void> {
 }
 
 describe('up --foreground: the start, the ready line, the stop', () => {
-  it('starts Qdrant then the host, prints ONE ready line with the three origins, and stops on stdin EOF — exit 0, lock released', async () => {
-    const w = await world();
+  it('starts Qdrant then the host, prints its steps and ONE ready line with the three origins, and stops on stdin EOF — exit 0, lock released', async () => {
+    const w = await world({ env: { FAKE_HOST_LOADING: '1' } });
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps: FAST, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    const ready = lines(run.out);
+    // Each step is a real signal: the helper checked, the vector store answered, the host said it loads its packages.
+    expect(lines(run.out).filter((l) => l.state === 'starting')).toEqual([
+      { state: 'starting', step: 'checked' }, { state: 'starting', step: 'database' }, { state: 'starting', step: 'packages' },
+    ]);
+    const ready = afterSteps(run.out);
     expect(ready).toHaveLength(1);
     const lock = readHomeLock(w.home);
     expect(lock).toMatchObject({ kind: 'native', pid: process.pid, state: 'ready' });
@@ -266,8 +292,8 @@ describe('up --foreground: the start, the ready line, the stop', () => {
     const before = new Set(process.listeners('SIGTERM'));
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps: FAST, watchStdin: false });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(lines(run.out).map((l) => l.state)).toEqual(['restarting', 'ready']);
-    expect(lines(run.out)[0]).toMatchObject({ child: 'host', code: 3, attempt: 1 });
+    expect(afterSteps(run.out).map((l) => l.state)).toEqual(['restarting', 'ready']);
+    expect(afterSteps(run.out)[0]).toMatchObject({ child: 'host', code: 3, attempt: 1 });
     // The run's own SIGTERM handler (calling it directly: emitting the signal would reach the test runner's too).
     const added = process.listeners('SIGTERM').filter((l) => !before.has(l));
     expect(added).toHaveLength(1);
@@ -280,7 +306,7 @@ describe('up --foreground: the start, the ready line, the stop', () => {
     const w = await world({ env: { FAKE_HOST_CRASHES: '99' } });
     const run = io(w.home);
     expect(await runUp({ packageDir: w.packageDir, io: run.ctx, deps: FAST, watchStdin: true })).toBe(EXIT.CHILD_FAILED);
-    const states = lines(run.out);
+    const states = afterSteps(run.out);
     expect(states.map((l) => l.state)).toEqual(['restarting', 'restarting', 'failed']);
     expect(states.at(-1)).toEqual({ state: 'failed', child: 'host', code: 3 });
     expect(readHomeLock(w.home)).toMatchObject({ state: 'failed', failed: { child: 'host', code: 3 } });
@@ -443,7 +469,7 @@ describe('a home a Docker install set up opens here', () => {
     return out;
   }
 
-  it('ORACLE: `upgrade --apply` moves the secret from the install .env into the home → `up` 15 → the adopt → `up` ready, with users, projects, credentials and the Qdrant record untouched', async () => {
+  it('ORACLE: `upgrade --apply` moves the secret from the install .env into the home → `up` 15 → the adopt → `up` ready, with users, projects and credentials untouched, the adopt leaving the Qdrant record and the first start advancing it to the bundle\'s Qdrant', async () => {
     const w = await world({ setUp: false });
     // A home set up by an older Docker install: records, credential key files, a recorded Qdrant
     // version, a ledger current on every kind but the session secret's — and NO secret file.
@@ -507,7 +533,111 @@ describe('a home a Docker install set up opens here', () => {
       expect(env).not.toContain(SESSION_SECRET);
       expect(env).not.toContain('NEXTAUTH_SECRET');
     }
+    // The bundle's Qdrant is one minor ahead of the record: the start advanced it (an empty store: nothing to copy).
+    expect(JSON.parse(readFileSync(join(w.home, 'qdrant-version.json'), 'utf-8'))).toMatchObject({ version: QDRANT_TARGET_VERSION, previous: '1.19.1', source: 'upgrade' });
+    expect(existsSync(join(w.home, 'qdrant-backups'))).toBe(false);
   }, 90_000);
+});
+
+describe('the bundle\'s Qdrant against the home\'s recorded version', () => {
+  const RECORD = (version: string): string => JSON.stringify({ version, previous: null, source: 'fresh', recordedAt: '2026-10-01T00:00:00.000Z' });
+
+  /** A home whose store holds a segment and a 64 MiB sparse file (a Qdrant mmap file's shape). */
+  async function storeWorld(version: string): Promise<World & { storage: string; recordPath: string }> {
+    const w = await world();
+    const storage = join(w.home, 'qdrant-storage');
+    mkdirSync(join(storage, 'collections', 'brain'), { recursive: true });
+    writeFileSync(join(storage, 'collections', 'brain', 'segment.json'), '{"version":2}');
+    writeFileSync(join(storage, 'collections', 'brain', 'vectors.mmap'), '');
+    truncateSync(join(storage, 'collections', 'brain', 'vectors.mmap'), 64 * 1024 * 1024);
+    const recordPath = join(w.home, 'qdrant-version.json');
+    writeFileSync(recordPath, RECORD(version));
+    return { ...w, storage, recordPath };
+  }
+
+  async function start(w: World, deps: UpDeps = FAST): Promise<{ ready: Record<string, unknown>; err: string; qdrantPid: unknown }> {
+    const run = io(w.home);
+    const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
+    await waitFor(() => run.out.join('').includes('"ready"'), 15_000);
+    const qdrantPid = (readHomeLock(w.home) as { qdrantPid?: unknown } | null)?.qdrantPid;
+    run.stdin.end();
+    expect(await done).toBe(EXIT.OK);
+    return { ready: afterSteps(run.out)[0]!, err: run.err.join(''), qdrantPid };
+  }
+
+  it('current: starts as before — the record byte-unchanged, no copy', async () => {
+    const w = await storeWorld(QDRANT_TARGET_VERSION);
+    const before = readFileSync(w.recordPath, 'utf-8');
+    const { ready } = await start(w);
+    expect(ready).toMatchObject({ state: 'ready', vectors: 'qdrant' });
+    expect(ready.vectorsReason).toBeUndefined();
+    expect(readFileSync(w.recordPath, 'utf-8')).toBe(before);
+    expect(existsSync(join(w.home, 'qdrant-backups'))).toBe(false);
+  }, 30_000);
+
+  it('one minor behind: a cold, sparse copy exists BEFORE the bundle\'s Qdrant starts, and the record advances once it answers its version', async () => {
+    const w = await storeWorld('1.19.1');
+    const { ready, err } = await start(w);
+    expect(ready).toMatchObject({ state: 'ready', vectors: 'qdrant' });
+    expect(ready.vectorsReason).toBeUndefined();
+    const backups = readdirSync(join(w.home, 'qdrant-backups'));
+    expect(backups).toHaveLength(1);
+    expect(backups[0]).toMatch(new RegExp(`^1\\.19\\.1-to-${QDRANT_TARGET_VERSION.replace(/\./g, '\\.')}-\\d{4}-\\d{2}-\\d{2}T`));
+    // The fake Qdrant listed the backups at its own start: the copy came first.
+    expect(JSON.parse(readFileSync(join(w.storage, 'qdrant-saw-backups.json'), 'utf-8'))).toEqual(backups);
+    const tarFile = join(w.home, 'qdrant-backups', backups[0]!, 'qdrant-storage.tar');
+    const listing = await new Promise<string>((resolve) => {
+      const child = spawn('tar', ['-tf', tarFile]);
+      let text = '';
+      child.stdout.on('data', (d) => { text += String(d); });
+      child.on('close', () => resolve(text));
+    });
+    expect(listing).toContain('./collections/brain/segment.json');
+    expect(listing).not.toContain('qdrant-env.json'); // written by the Qdrant that started after the copy
+    // The 64 MiB hole is not written out (GNU tar `-S`).
+    expect(statSync(tarFile).size).toBeLessThan(1024 * 1024);
+    expect(statSync(tarFile).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(w.recordPath, 'utf-8'))).toMatchObject({ version: QDRANT_TARGET_VERSION, previous: '1.19.1', source: 'upgrade' });
+    expect(err).toContain(`Qdrant moved from 1.19.1 to ${QDRANT_TARGET_VERSION}; the copy of the store before it is in ${join(w.home, 'qdrant-backups', backups[0]!)}.`);
+    // Said BEFORE the copy runs (what, where, why).
+    const copying = err.indexOf(`This app's Qdrant moves from 1.19.1 to ${QDRANT_TARGET_VERSION}, and Qdrant's storage only moves forward: copying ${w.storage} to ${join(w.home, 'qdrant-backups', backups[0]!)} first`);
+    expect(copying).toBeGreaterThanOrEqual(0);
+    expect(copying).toBeLessThan(err.indexOf('Qdrant moved from'));
+  }, 30_000);
+
+  it('a server that answers another version leaves the record where it was', async () => {
+    const w = await storeWorld('1.19.1');
+    writeFileSync(join(w.storage, 'fake-version'), '1.19.1');
+    const before = readFileSync(w.recordPath, 'utf-8');
+    const { err } = await start(w);
+    expect(readFileSync(w.recordPath, 'utf-8')).toBe(before);
+    expect(err).toContain(`Qdrant answers 1.19.1 where this app ships ${QDRANT_TARGET_VERSION}; the recorded version stays 1.19.1.`);
+  }, 30_000);
+
+  it('more than one minor behind: no Qdrant starts, the reason names the release to install first, and the host still comes up', async () => {
+    const w = await storeWorld('1.18.3');
+    const before = readFileSync(w.recordPath, 'utf-8');
+    const { ready, err, qdrantPid } = await start(w);
+    expect(ready).toMatchObject({ state: 'ready', vectors: 'qdrant', vectorsReason: 'version' });
+    expect(qdrantPid).toBeUndefined();
+    expect(existsSync(join(w.storage, 'qdrant-env.json'))).toBe(false);
+    expect(err).toContain(`This app's vector store is on Qdrant 1.18.3; this app ships ${QDRANT_TARGET_VERSION}, and Qdrant moves one minor at a time. Install the Neuralis release that ships Qdrant 1.19.1 first and start it once, then this one.`);
+    // A record a Docker install wrote describes that install's store: its own command is the remedy.
+    expect(err).toContain('If a Docker install set this data folder up, the record describes that install\'s store: run `neuralis qdrant-upgrade` in its folder instead.');
+    expect(readFileSync(w.recordPath, 'utf-8')).toBe(before);
+    expect(existsSync(join(w.home, 'qdrant-backups'))).toBe(false);
+  }, 30_000);
+
+  it('less free space than the store occupies: no copy, no Qdrant, the reason named; the host still comes up', async () => {
+    const w = await storeWorld('1.19.1');
+    const before = readFileSync(w.recordPath, 'utf-8');
+    const { ready, err, qdrantPid } = await start(w, { ...FAST, qdrantHop: { ...FAST.qdrantHop, freeBytes: async () => 0 } });
+    expect(ready).toMatchObject({ state: 'ready', vectors: 'qdrant', vectorsReason: 'version' });
+    expect(qdrantPid).toBeUndefined();
+    expect(err).toMatch(/Qdrant 1\.19\.1 → \S+ needs a cold copy of .*qdrant-storage first: Needs \d+ MB free for the cold copy of the vector store; 0 MB is\. Nothing was changed\./);
+    expect(readFileSync(w.recordPath, 'utf-8')).toBe(before);
+    expect(existsSync(join(w.home, 'qdrant-backups'))).toBe(false);
+  }, 30_000);
 });
 
 describe('down and status', () => {
@@ -714,8 +844,8 @@ describe('up with Qdrant in Docker — this home\'s own compose file, or the Doc
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
     expect(started).toEqual(['/srv/docker-install']);
-    expect(lines(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'qdrant' });
-    expect(lines(run.out)[0]).not.toHaveProperty('vectorsReason');
+    expect(afterSteps(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'qdrant' });
+    expect(afterSteps(run.out)[0]).not.toHaveProperty('vectorsReason');
     expect(run.err.join('')).toContain('Started qdrant in /srv/docker-install');
     const hostEnv = JSON.parse(readFileSync(w.dump, 'utf-8')) as Record<string, string>;
     expect(hostEnv).toMatchObject({ QDRANT_URL: q.url, QDRANT_API_KEY: 'dkey', BRAIN_INFRA_MODE: 'local' });
@@ -738,7 +868,7 @@ describe('up with Qdrant in Docker — this home\'s own compose file, or the Doc
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps: { ...FAST, companion: async () => { throw new Error('no folder recorded: never called'); } }, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(lines(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'qdrant', vectorsReason: 'unauthorized' });
+    expect(afterSteps(run.out)[0]).toMatchObject({ state: 'ready', vectors: 'qdrant', vectorsReason: 'unauthorized' });
     expect(run.err.join('')).toContain('the host starts, and search and indexing stay unavailable until the key matches');
     expect(run.err.join('')).toContain('--refresh-qdrant');
     expect(run.err.join('')).not.toContain('in-memory');
@@ -765,8 +895,8 @@ describe('up with Qdrant in Docker — this home\'s own compose file, or the Doc
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
     expect(asked[0]).toBe(dir);
-    expect(lines(run.out).map((l) => l.state)).toEqual(['restarting', 'ready']);
-    expect(lines(run.out)[1]).toMatchObject({ vectors: 'qdrant', vectorsReason: 'unreachable' });
+    expect(afterSteps(run.out).map((l) => l.state)).toEqual(['restarting', 'ready']);
+    expect(afterSteps(run.out)[1]).toMatchObject({ vectors: 'qdrant', vectorsReason: 'unreachable' });
     // A failed start is not waited for: one probe, then the host (no `within N s` wait).
     expect(run.err.join('')).toContain(`Qdrant did not answer on http://127.0.0.1:${qport}; the host starts, and search and indexing continue by themselves when the vector store answers.`);
     expect(run.err.join('')).not.toContain('in-memory');
@@ -847,8 +977,8 @@ describe('the optional companions and the LAN switch', () => {
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(lines(run.out)[0]).toMatchObject({ state: 'ready', ollama: 'binary', tunnel: false });
-    expect(lines(run.out)[0]).not.toHaveProperty('publicApp');
+    expect(afterSteps(run.out)[0]).toMatchObject({ state: 'ready', ollama: 'binary', tunnel: false });
+    expect(afterSteps(run.out)[0]).not.toHaveProperty('publicApp');
     await waitFor(() => pulled.length === 1);
     expect(pulled).toEqual(['http://127.0.0.1:11435 qwen3-embedding:0.6b']);
     expect(installs).toBe(1);
@@ -878,7 +1008,7 @@ describe('the optional companions and the LAN switch', () => {
     const run = io(w.home);
     const done = runUp({ packageDir: w.packageDir, io: run.ctx, deps: FAST, watchStdin: true });
     await waitFor(() => run.out.join('').includes('"ready"'));
-    expect(lines(run.out)[0]).toMatchObject({ app: `http://127.0.0.1:${w.ports[0]}`, publicApp: 'https://app.example.com', ollama: 'none' });
+    expect(afterSteps(run.out)[0]).toMatchObject({ app: `http://127.0.0.1:${w.ports[0]}`, publicApp: 'https://app.example.com', ollama: 'none' });
     run.stdin.end();
     expect(await done).toBe(EXIT.OK);
   }, 30_000);

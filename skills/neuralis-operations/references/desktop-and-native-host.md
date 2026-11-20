@@ -105,7 +105,8 @@ already adopted) rewrites only the Qdrant lines from the recorded install again 
 moved port; until then the host runs without search and indexing (`vector.qdrant.unauthorized` in its log,
 `vectorsReason: unauthorized` on `up`'s `ready` line). A recorded `qdrant-version.json` is left as it
 is: it describes the Docker volume's store, and a binary copy shares it — a Docker `qdrant-upgrade`
-does not move the copy.
+does not move the copy, and the app's start that moves the copy to a newer bundle's Qdrant moves the
+record with it (`recovery-and-backup.md` §Upgrade Qdrant).
 
 ## A source clone run natively — `neuralis start`
 

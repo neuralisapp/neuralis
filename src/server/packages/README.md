@@ -18,10 +18,16 @@ SAME `ProjectPackageScanner` + `PackageRuntimeManager.syncProjectPackagesToRunti
 path (so every package is forced `untrusted`, reserved-id-banned, and held to the
 trust-escalation guard):
 
-1. **`_packages/`** — the default drop-zone, scanned **unconditionally** at
-   activation (it loads from ~10 route entry points before brain-core source
-   enumeration is guaranteed ready, so its load must never depend on a brain
-   call — boot-order safety). Implicitly project-scope.
+1. **`_packages/`** — the default drop-zone, read from its fixed path (project
+   scope; the only root whose folder the scanner creates) and following the
+   project's `packages` source switch: it loads while that source is on, when the
+   project has no `packages` source, and when no `package-source-roots` service
+   exists (a generic host). When the source enumeration FAILS, nothing new loads
+   and the project stays unactivated — a switched-off source must not load
+   because brain-core could not answer; the next activation attempt runs at the
+   first entry-point call at least 5 s after the failure, so an outage costs one
+   listing per project per 5 s, not one per entry point. The activation list is
+   keyed by root kind (`drop` | `folder`), never by position.
 2. **Any package folder of a source** — every folder an **enabled** brain-core
    `host` source lists in `packageFolders` (relative to its root, `''` = the whole
    source) is scanned **in addition**, at ANY scope (project / user / agent), when
@@ -54,6 +60,28 @@ trust-escalation guard):
    re-derives first, too. A directory several projects scan (a source pointed at
    another project's `_packages/`) holds ONE hub watcher whose change notifies
    every one of those projects.
+
+**A switched-off source's package folders are LISTED, never loaded.** Every
+package folder of a source with `enabled: false` on this disk (and the drop zone
+while `packages` is off) is read for its manifests only — name and version through
+the scanner's own folder test and manifest read (`readPackageFolderManifests`), no
+discovery and no definition — and joins `listAllActivatedPackages` as
+`{ sourceDisabled: true, sourceSlug }` under the instance id the folder loads as
+when the source is on (`packageFolderInstance`, the ONE derivation `toResolvedRecord`
+uses), so per-agent settings keep matching it. The rows are cached per project and
+folder, keyed on the folder's mtime, and dropped on every source-config change; a
+manifest edit that leaves the folder's mtime is picked up by the next source change
+or clear-cache. A switched-off device folder has no reader and lists nothing. The
+host decides no visibility for these rows: its own list (`listProjectPackageRows`)
+shows one, as `status: 'source-disabled'` with its manifest name and version as one
+line capped at 128 characters, only when brain-core admits it for the request's own
+session (`loadVisibleDisabledPackageIds`): the `package-source-roots` service's
+`listDisabledSourceSlugs` admits the source (source-level read, a path grant never
+admits) AND `readablePackageUris` passes the folder's `package.json` — the verdict
+the same folder is shown by when its source is on; a drop-zone row is exempt from
+that path question, as a loaded drop is. No service or a throwing one admits none;
+the row's scope is never the gate. brain-core hands no root for a switched-off
+source whose root resolves into another project, so nothing is listed there.
 
 This is **additive** and orthogonal to brain-core's markdown source-package
 discovery (the magpie): a flagged source still indexes + injects its markdown
@@ -98,7 +126,7 @@ The resolver rejects foreign projects and management routes recheck source scope
 against the real session. Source-root packages retain an empty relative path.
 
 The identity change is never performed by the running host. The project record kind
-`neuralis/project` is at format 2 and declared `upgrade: { mode: 'offline' }`: a boot over
+`neuralis/project` took format 2 with it (later offline steps raise it further — `server/store/dataFormats.ts` lists the chain) and is declared `upgrade: { mode: 'offline' }`: a boot over
 older data stops in the kernel ledger admission (`upgrade_required`, naming
 `pnpm neuralis:upgrade`) before any read, and the operator runs the offline upgrade on the
 stopped app. Its host module (`neuralis/scripts/upgrades/package-identity-v2.mts`) inventories
@@ -140,18 +168,40 @@ never rendered `[OFF]` (no existence inference):
   `[OFF]` is reserved for the caller's own S3 toggle; unioning them into the
   overview's `disabledPackageIds` leaked `[OFF]`+content). Every overview call site
   takes the split — the stream main build, the delegate children (which receive the
-  parent's set as `parentScopeHidden`), the background run's scope, the agent-setup
+  parent's view as `parentHidden`), the background run's scope, the agent-setup
   inspector and `prompt-polish.ts`. The MCP
   `PackageContributionHost` applies the same resolver to every advertise list.
 - **The agent-core `packages/overview` route** (the 4th advertise surface, easy to
   miss): the chat-config `PackageSelector`, the Package Constellation empty-state,
   and the agent `PackagesEditor` ALL read this ONE route, which builds from the
   caller-blind `state.runtime.getSnapshot()`. It applies S2 (`meetsRequires`) + S3,
-  and now also resolves `state.streamDeps.scopeHiddenResolver` to OMIT scope/
-  base-access-hidden ids from `packages[]`, `sourcePackages[]`, AND the
+  and now also resolves `state.streamDeps.packageHiddenResolver` to OMIT scope/
+  base-access/read-hidden ids from `packages[]`, `sourcePackages[]`, AND the
   `diagnostics` sub-route's entries + `summary.errors` (the "N failed to load"
   count is itself an existence-inference surface). Diagnostics validates no agent,
   so it passes `agentId: undefined` — a safe under-show on a `core.observe` panel.
+
+**The read floor (the third question, after rights and scope).** A loaded SOURCE
+package — one whose origin is a synced source, never a builtin and never the
+`_packages/` drop zone — is shown only as far as its source lets the caller READ its
+files: the same `uri-policy` verdict the markdown source-package lane already applies.
+`packageReadFloor.ts` plans the request's uris with the kernel `planReadFloor`
+(`@neuralis/package-system/access`), asks brain-core ONCE per request through the
+existing `'package-source-roots'` service (`readablePackageUris`, the caller's
+`priority`/`rolePriorities` included) and derives a `ReadHidden` with
+`deriveReadHidden`; an unavailable verdict hides every candidate (fail closed). It is a
+REQUIRED field of `PackageVisibilityScope` (`readHidden`, no `undefined` arm): the four
+snapshot routes, the asset/dock/app-scope gate (`resolveVisibleDefinition`), the
+feature catalog, the project package list and the notification materializer
+(`loadPackageReadVerdict` — an unjudged package keeps its entries) all pass it. An
+unreadable file is ABSENT; an unreadable `package.json` takes the manifest
+contributions (tools, surfaces, inline commands, name, description, version, icon, meta — the package lists
+under its folder name) while a readable file keeps the package; nothing readable hides
+it whole. A project-less snapshot (first paint) carries no project-owned package at all
+(only builtins and installs — no `_packages/` drop, no source package), and
+no client file descriptor carries the machine path `osUri`. A project with no
+candidate asks nothing. The two ladders (this one and agent-core's resolver) stay
+separate; they share the kernel derivation, never a merged implementation.
 
 The **base-access feature override** (`ProjectRecord.packageAccessFeature`,
 sibling of `packageTrust`) is **restrict-only** — it can only attach a required

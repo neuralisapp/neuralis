@@ -96,7 +96,7 @@ async function realUser(appRoot: string, userId: string): Promise<Json | null> {
   }
 }
 
-/** `<home>/device/device.json` — the one-host identity `neuralis device install` moves into its host's folder. */
+/** `<home>/device/device.json` — the one-host identity the device's start moves into its pairing's folder (`device/pairings/<deviceId>/`). */
 export function deviceIdentityFile(home: string): string {
   return join(home, 'device', 'device.json');
 }

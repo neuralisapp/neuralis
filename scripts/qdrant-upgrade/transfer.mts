@@ -21,7 +21,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { mkdir, rename, rm, statfs } from 'node:fs/promises';
+import { mkdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { authoredBaseEnv } from '@neuralis/package-system/paths';
@@ -29,7 +29,7 @@ import { ensureCompanion, readComposeStack, type ComposeAnswer, type CompanionSt
 import type { QdrantPorts } from '../setup/envFile.mts';
 import { qdrantImageRef } from '../setup/qdrantVersion.mts';
 import { qdrantBinarySpawn } from '../setup/services.mts';
-import { checkDisk, coldTar, HopDiedError, hostQdrantApi, listCollections, localTar, mustExec, processExec, readCollection, serverVersion, volumeBytes, waitReady, type Exec, type QdrantApi } from './upgrade.mts';
+import { checkDisk, coldTar, freeBytesOf, HopDiedError, hostQdrantApi, listCollections, localTar, mustExec, processExec, readCollection, serverVersion, volumeBytes, waitReady, type Exec, type QdrantApi } from './upgrade.mts';
 
 export type TransferPorts = {
   exec: Exec;
@@ -188,10 +188,7 @@ export function processTransferPorts(input: {
 }): TransferPorts {
   return {
     exec: processExec,
-    freeBytes: async (dir) => {
-      const fs = await statfs(dir);
-      return fs.bavail * fs.bsize;
-    },
+    freeBytes: freeBytesOf,
     log: input.log,
     dockerApi: hostQdrantApi(input.docker.url, input.docker.apiKey),
     readStack: (dir) => readComposeStack(dir),

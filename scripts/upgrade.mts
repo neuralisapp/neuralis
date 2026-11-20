@@ -263,10 +263,11 @@ export async function runUpgrade(opts: UpgradeOptions): Promise<UpgradeOutcome> 
     if (plan.blockers?.lines.length) remedies.add(plan.blockers.remedy);
   }
   // Dry run or apply alike: the list first, then one verdict — before any checkpoint or ledger write.
+  // The verdict carries the lines too: a caller that shows only the error (stderr) still names them.
   if (blockers.length > 0) {
     opts.log('Blocking (module: project · kind · file · field · reference · reason):');
     for (const line of blockers) opts.log(`  ${line}`);
-    throw new Error(`${blockers.length} blocking item(s) above: ${[...remedies].join('; ')}.`);
+    throw new Error(`${blockers.length} blocking item(s): ${[...remedies].join('; ')}.\n${blockers.map((line) => `  ${line}`).join('\n')}`);
   }
   if (!opts.apply) {
     opts.log('Dry run — nothing was changed. Re-run with --apply to upgrade.');

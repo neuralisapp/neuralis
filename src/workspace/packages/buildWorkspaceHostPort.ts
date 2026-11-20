@@ -10,6 +10,7 @@ import type {
   WorkspaceHostPort,
   WorkspaceAgentInfo,
   WorkspaceFileMark,
+  WorkspaceProjectMember,
   PackageRuntimeSnapshot,
   VisibleSkill,
 } from '@neuralis/package-system/contracts';
@@ -23,6 +24,7 @@ import { subscribeClientStateReset } from '../store/clientResetBus';
 import { getScopedSnapshot, onSnapshotChange } from './runtimeClient';
 
 const EMPTY_FILE_MARKS: Record<string, WorkspaceFileMark> = {};
+const EMPTY_PROJECT_MEMBERS: Record<string, WorkspaceProjectMember> = {};
 
 /**
  * Module CONSTANT, not a fresh `[]` per call — `useSyncExternalStore` compares
@@ -147,6 +149,13 @@ export const workspaceHostPort: WorkspaceHostPort = {
     // Keep the Zustand snapshot referentially stable. Projecting each agent
     // into a fresh object here makes React 19 loop on every render.
     useWorkspaceStore((s): Record<string, WorkspaceAgentInfo> => s.agents.byId),
+  // The store's own member record (stable reference); the port type narrows it
+  // to `{userId, name, role}`.
+  useProjectMembers: () =>
+    useWorkspaceStore((s): Record<string, WorkspaceProjectMember> => {
+      const projectId = s.session.projectId;
+      return (projectId ? s.projects.byId[projectId]?.members : undefined) ?? EMPTY_PROJECT_MEMBERS;
+    }),
 
   useFileMarks: (agentId) =>
     useWorkspaceStore((s) =>
@@ -220,8 +229,8 @@ export const workspaceHostPort: WorkspaceHostPort = {
 
   // The DERIVED skill catalog. Read `getScopedSnapshot` — NOT
   // `getCachedSnapshot` — because membership here is a VISIBILITY PROOF: the
-  // unscoped SSR seed carries every project's ungated skills, so reading it
-  // would advertise a foreign project's skills during first paint.
+  // unscoped SSR seed is scoped to no project, so reading it proves nothing
+  // about the active project's skills during first paint.
   useVisibleSkills: () => {
     const projectId = useWorkspaceStore((s) => s.session.projectId);
     const agentId = useWorkspaceStore((s) => s.session.agentId);

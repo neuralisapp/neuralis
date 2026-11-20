@@ -1,5 +1,6 @@
 import { ensureCommunityRuntime } from './runtime';
 import { getPackageSnapshot } from './snapshot';
+import { NO_READ_HIDDEN } from './packageReadFloor';
 import type { PackageRuntimeSnapshot } from '@neuralis/package-system/contracts';
 
 export async function getSSRSnapshot(): Promise<PackageRuntimeSnapshot> {
@@ -11,5 +12,7 @@ export async function getSSRSnapshot(): Promise<PackageRuntimeSnapshot> {
   // until the client refreshes from the authoritative, per-project filtered
   // snapshot (the `/api/packages/runtime` route, which DOES pass grantedFeatures).
   // Owners see a benign "less-then-more" flicker, never "more-then-less".
-  return getPackageSnapshot({ host: 'neuralis-workspace' }, []);
+  // Project-less, so no project-owned package (a `_packages/` drop or a loaded
+  // source package) is in it either — only builtins and installs.
+  return getPackageSnapshot({ host: 'neuralis-workspace', readHidden: NO_READ_HIDDEN }, []);
 }

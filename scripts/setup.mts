@@ -33,7 +33,7 @@
 
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { mkdir, writeFile, access, stat, readFile, statfs } from 'node:fs/promises';
+import { mkdir, writeFile, access, stat, readFile } from 'node:fs/promises';
 import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import { randomBytes, randomUUID, createCipheriv, createHash, hkdf } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -158,7 +158,7 @@ import {
 import { bundleLayout, installKindOf, nativeConfigDir, resolveNeuralisHome } from '@neuralis/package-system/paths';
 import { mintSessionSecret, readSessionSecretFile, sessionSecretPath, writeSessionSecretFile } from '../src/server/config/sessionSecretFile.ts';
 import { DISABLED_BUILTINS_KEY } from '../src/server/host/buildRefusals.ts';
-import { processExec } from './qdrant-upgrade/upgrade.mts';
+import { freeBytesOf, processExec } from './qdrant-upgrade/upgrade.mts';
 import { setupTunnelArgs } from './tunnel.mts';
 import { planTransfer, processTransferPorts, runTransfer, type TransferInput } from './qdrant-upgrade/transfer.mts';
 
@@ -244,7 +244,7 @@ async function askChoice(prompt: string, options: string[], defaultIdx = 0): Pro
 // ── Types ──────────────────────────────────────────────────────
 
 const DEFAULT_MACHINE_VARIANT: MachineVariant = {
-  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.4.1',
+  key: 'ubuntu-xfce', label: 'Ubuntu + XFCE', derivativeImage: 'neuralisapp/webtop-ubuntu-xfce:0.4.2',
 };
 
 // ── Inline crypto for CredentialStore writes ──────────────────
@@ -2353,7 +2353,7 @@ function composeInputFromExisting(
     tunnel: tunnelDomainOf(envVars) !== null,
     neuralisHome: hostHome,
     machine: {
-      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.4.1'),
+      image: machineEnv('NEURALIS_MACHINE_IMAGE', 'neuralisapp/webtop-ubuntu-xfce:0.4.2'),
       screen: machineEnv('NEURALIS_MACHINE_SCREEN', '1920x1080'),
       sidecarPort: Number(envVars.NEURALIS_MACHINE_SIDECAR_PORT) || 9400,
       cdpPort: Number(envVars.NEURALIS_MACHINE_CDP_PORT) || 9222,
@@ -2465,7 +2465,7 @@ async function runComposeOnly(
 
   // Every port the file publishes is free or this install's own (a regeneration
   // beside the running stack is the normal case); a busy one is refused, named.
-  const check = portCheck(installLayout(ctx.installDir, ctx.packageDir), env.docker);
+  const check = portCheck(installLayout(ctx.installDir, ctx.packageDir), env.dockerCause !== 'missing');
   const claims = portClaims({
     ports: { app: input.appPort, mcp: input.mcpPort, sandbox: input.sandboxPort },
     qdrantPort: input.qdrantMode === 'docker' ? input.qdrantPort : null,
@@ -2474,7 +2474,8 @@ async function runComposeOnly(
   const busy = await findBusyPorts(claims, { ownProject: input.composeProject, ...check });
   if (busy.length > 0) {
     const movable = busy.filter((b) => b.key !== 'codex');
-    throw busyPortRefusal(busy, await nextFreePorts(movable, claims.map((claim) => claim.port), { probe: check.probe, published: await check.published() }));
+    const table = await check.published();
+    throw busyPortRefusal(busy, await nextFreePorts(movable, claims.map((claim) => claim.port), { probe: check.probe, published: table }), table !== null);
   }
 
   if (input.qdrantMode === 'docker') {
@@ -2807,7 +2808,7 @@ async function copySource(home: string): Promise<{ recorded: Extract<RecordedQdr
 async function estimateCopy(home: string, ctx: CliContext): Promise<number> {
   const source = await copySource(home);
   try {
-    const plan = await planTransfer({ exec: processExec, freeBytes: async (dir) => { const fs = await statfs(dir); return fs.bavail * fs.bsize; }, log: () => {} }, source.input);
+    const plan = await planTransfer({ exec: processExec, freeBytes: freeBytesOf, log: () => {} }, source.input);
     ctx.stdout(`${JSON.stringify({ bytes: plan.bytes, freeBytes: plan.free, volume: plan.volume })}\n`);
     return 0;
   } catch (err) {
@@ -3205,7 +3206,7 @@ export async function run(cliArgs: string[], ctx: CliContext): Promise<number> {
       warn(`Another Compose project already answers to "neuralis" on this daemon.`);
       info(`Using project name ${c.bold}${composeProject.name}${c.reset} for this install.`);
     }
-    const ports = portCheck(layout, env.docker);
+    const ports = portCheck(layout, env.dockerCause !== 'missing');
     const qdrantAnswer = await answeringQdrant(env, carried, composeProject.name, ports);
 
     // 2c. The project gate runs BEFORE any credential is collected: on an

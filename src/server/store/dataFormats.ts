@@ -50,8 +50,10 @@ import { getEnv } from '../config/env';
  * every stored builtin role the manifests grant it (v3, role-grant revision
  * 20), then the two-word feature ids on every stored role, custom roles and
  * package overrides included (v4, role-grant revision 21), then an agent
- * level on every stored role that names none (v5, role-grant revision 22 —
- * `roleGrantFormatLockstep.test.ts`). Each step stamps the revision IT
+ * level on every stored role that names none (v5, role-grant revision 22),
+ * then one feature id per right on every stored role, package grant list and
+ * access override (v6, role-grant revision 23 — `roleGrantFormatLockstep.test.ts`).
+ * Each step stamps the revision IT
  * produces, never the live one.
  */
 export const PROJECT_UPGRADE_STEPS = {
@@ -59,15 +61,16 @@ export const PROJECT_UPGRADE_STEPS = {
   device: { to: 3, id: 'source-device-v1' },
   features: { to: 4, id: 'two-word-features-v1' },
   agents: { to: 5, id: 'written-role-agents-v1' },
+  features2: { to: 6, id: 'written-role-features-v1' },
 } as const;
 
 /** Kind name → declaration. The version is the on-disk format this build reads and writes. */
 export const HOST_DATA_FORMATS = {
   project: {
     kind: 'neuralis/project',
-    version: 5,
+    version: 6,
     files: ['app/projects'],
-    upgrade: [PROJECT_UPGRADE_STEPS.identity, PROJECT_UPGRADE_STEPS.device, PROJECT_UPGRADE_STEPS.features, PROJECT_UPGRADE_STEPS.agents],
+    upgrade: [PROJECT_UPGRADE_STEPS.identity, PROJECT_UPGRADE_STEPS.device, PROJECT_UPGRADE_STEPS.features, PROJECT_UPGRADE_STEPS.agents, PROJECT_UPGRADE_STEPS.features2],
   },
   projectPurged: { kind: 'neuralis/project-purged', version: 1, files: ['app/projects-purged'] },
   user: { kind: 'neuralis/user', version: 1, files: ['app/users'] },

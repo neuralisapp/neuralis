@@ -1,8 +1,10 @@
 /**
  * Per-project package activation.
  *
- * Lazily scans and loads `_packages/` for each project when first accessed.
- * Multiple projects can be active simultaneously — each gets its own scanner
+ * Lazily scans and loads each project's packages — its `_packages/` drop zone
+ * while the `packages` source is on, and every package folder of an enabled
+ * source — when first accessed, and lists the package folders of its
+ * switched-off sources without loading them. Multiple projects can be active simultaneously — each gets its own scanner
  * and watcher, and their packages are tracked separately in the runtime.
  */
 
@@ -11,9 +13,10 @@ import { join } from 'node:path';
 import { resolveProjectRoot } from '@neuralis/package-system/paths';
 import { getEnv } from '../config/env';
 import { getLogger } from '../logging/setup';
-import { getProjectPackageScanner, getScannerForDir, type ProjectPackageScanner } from './ProjectPackageScanner';
+import { stat } from 'node:fs/promises';
+import { getScannerForDir, readPackageFolderManifests, type PackageFolderManifest, type ProjectPackageScanner } from './ProjectPackageScanner';
 import { getPackageRuntimeManager, type PackageLoadError } from './PackageRuntimeManager';
-import { toResolvedRecord } from './packageRecords';
+import { packageFolderInstance, toResolvedRecord } from './packageRecords';
 import { getProjectById } from '../store/ProjectStore';
 import { getRuntime } from '../host/bootstrap';
 import type { InstalledPackageInfo, PackageReader, SourcePlane, SourceScope, PackageSourceRoot, PackageSourceRoots } from '@neuralis/package-system/contracts';
@@ -21,14 +24,28 @@ import type { InstalledPackageInfo, PackageReader, SourcePlane, SourceScope, Pac
 type Logger = ReturnType<ReturnType<typeof getLogger>['child']>;
 
 /**
+ * Which kind of root a scanner reads: the project's `_packages/` drop zone
+ * (its fixed path, created when missing) or a source's package folder.
+ */
+type RootKind = 'drop' | 'folder';
+/**
  * A scanner paired with the owning SOURCE scope of the directory it scans
  * (R2b). The default `_packages/` drop-zone is `{ kind: 'project' }`; a
  * source's package folder carries that source's own project/user/agent scope.
  * The scope is stamped onto every record so the runtime can isolate advertise.
  */
-type ScannerEntry = { scanner: ProjectPackageScanner; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; device?: string };
+type ScannerEntry = { kind: RootKind; scanner: ProjectPackageScanner; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; device?: string };
 /** A folder to scan; `reader` present ⇒ a device folder read over its link (`dir` is its path there, `device` its id). `plane` is the source's own. */
-type FlaggedRoot = { dir: string; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; reader?: PackageReader; device?: string };
+type FlaggedRoot = { kind: RootKind; dir: string; ownerScope: SourceScope; plane: SourcePlane; uriRoot: string; reader?: PackageReader; device?: string };
+/** A package folder of a switched-OFF source on this disk: listed from its manifests, never scanned or loaded. */
+type DisabledFolder = { sourceSlug: string; dir: string; ownerScope: SourceScope; uriRoot: string };
+/** One enumeration of the project's package roots: what loads, and what is listed only. */
+type PackageRoots = { roots: FlaggedRoot[]; disabled: DisabledFolder[] };
+/** A listed package folder of a switched-OFF source, under the instance id it loads as when the source is on. */
+export type DisabledPackageRow = { packageId: string; sourceSlug: string; name: string; version?: string; originUri: string; ownerScope: SourceScope };
+
+/** After an enumeration failure, the next activation attempt of that project waits this long. */
+const ENUMERATION_RETRY_MS = 5_000;
 
 type ActivationState = {
   /** Projects scanned + synced + watching. */
@@ -36,8 +53,8 @@ type ActivationState = {
   /** In-flight activations, so concurrent callers share one. */
   pending: Map<string, Promise<void>>;
   /**
-   * All package scanners per activated project (default `_packages/` FIRST,
-   * then each source's package folders), each paired with its owning
+   * All package scanners per activated project (the `_packages/` drop zone
+   * first while its source is on, then each source's package folders), each paired with its owning
    * source scope. The source of truth for re-collecting records on any sync and
    * for the installed-packages overview.
    */
@@ -46,6 +63,12 @@ type ActivationState = {
   rederiving: Map<string, Promise<boolean>>;
   /** The source-roots provider the change subscription is armed on (once per runtime). */
   subscribedTo: { roots: PackageSourceRoots; unsubscribe: () => void } | null;
+  /** When a project's activation last found its sources unreadable — the retry is spaced from it. */
+  failedAt: Map<string, number>;
+  /** Per project: the listed package folders of its switched-off sources. */
+  disabledRows: Map<string, DisabledPackageRow[]>;
+  /** Per project, per disabled folder: its manifests at the folder's last mtime. Dropped on a source change. */
+  disabledManifests: Map<string, Map<string, { mtimeMs: number; manifests: PackageFolderManifest[] }>>;
 };
 
 const GLOBAL_KEY = '__neuralis_project_package_activation__' as const;
@@ -56,18 +79,25 @@ const GLOBAL_KEY = '__neuralis_project_package_activation__' as const;
 function activationState(): ActivationState {
   const g = globalThis as Record<string, unknown>;
   if (!g[GLOBAL_KEY]) {
-    g[GLOBAL_KEY] = { activated: new Set(), pending: new Map(), scanners: new Map(), rederiving: new Map(), subscribedTo: null } satisfies ActivationState;
+    g[GLOBAL_KEY] = {
+      activated: new Set(), pending: new Map(), scanners: new Map(), rederiving: new Map(), subscribedTo: null,
+      failedAt: new Map(), disabledRows: new Map(), disabledManifests: new Map(),
+    } satisfies ActivationState;
   }
   return g[GLOBAL_KEY] as ActivationState;
 }
 
 /**
- * Ensure a project's `_packages/` are scanned, loaded into the runtime,
- * and watched for changes. Idempotent — subsequent calls are instant no-ops.
+ * Ensure a project's packages are scanned, loaded into the runtime, and
+ * watched for changes. Idempotent — subsequent calls are instant no-ops. A
+ * project whose sources could not be read is not activated; the next attempt
+ * runs at the first call {@link ENUMERATION_RETRY_MS} after the failure.
  */
 export async function ensureProjectPackagesLoaded(projectId: string): Promise<void> {
   const state = activationState();
   if (state.activated.has(projectId)) return;
+  const failedAt = state.failedAt.get(projectId);
+  if (failedAt !== undefined && Date.now() - failedAt < ENUMERATION_RETRY_MS) return;
 
   // Deduplicate concurrent calls for the same project
   const pending = state.pending.get(projectId);
@@ -84,27 +114,23 @@ export async function ensureProjectPackagesLoaded(projectId: string): Promise<vo
 }
 
 async function activateProject(projectId: string): Promise<void> {
-  const env = getEnv();
   const logger = getLogger().child('project-packages');
-  const projectRoot = resolveProjectRoot(env.projectsRoot, projectId);
+  const state = activationState();
 
-  const entries: ScannerEntry[] = [];
-
-  // C3 — the default `_packages/` drop-zone scanner ALWAYS runs, from the fixed
-  // path, with NO brain-core dependency. It loads at activation from ~10 route
-  // entry points before source enumeration is guaranteed ready, so its load
-  // must never depend on a brain-core call (boot-order hazard). The drop-zone is
-  // implicitly project-scope.
-  entries.push({ scanner: getProjectPackageScanner(projectRoot, logger), ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'packages://' });
-
-  // C2/R2b — source-driven: in ADDITION, every package folder of an enabled
-  // source this process opens gets its own scanner, carrying the source's OWN
-  // project/user/agent scope. The packages LOAD here; the per-caller advertise
-  // isolation (only the owning user/agent sees them) is enforced downstream at
-  // the snapshot + stream boundary via the stamped `ownerScope`.
-  for (const { dir, ownerScope, plane, uriRoot, reader, device } of (await listFlaggedPackageRoots(projectId, logger)) ?? []) {
-    entries.push({ scanner: getScannerForDir(dir, logger, reader, { projectId, scope: ownerScope, uriRoot }), ownerScope, plane, uriRoot, ...(device ? { device } : {}) });
+  // The drop zone and every package folder of an enabled source this process
+  // opens, each carrying its source's OWN project/user/agent scope. The
+  // packages LOAD here; the per-caller advertise isolation (only the owning
+  // user/agent sees them) is enforced downstream at the snapshot + stream
+  // boundary via the stamped `ownerScope`. Unreadable sources load nothing
+  // and leave the project unactivated — a switched-off `packages` source must
+  // not load its drop because brain-core could not answer.
+  const plan = await listPackageRoots(projectId, logger);
+  if (plan === null) {
+    state.failedAt.set(projectId, Date.now());
+    return;
   }
+  state.failedAt.delete(projectId);
+  const entries = plan.roots.map((root) => entryFor(projectId, root, logger));
 
   // A re-activation (after clear-cache) drops this project's listener from a
   // scanner the new list no longer holds.
@@ -116,10 +142,17 @@ async function activateProject(projectId: string): Promise<void> {
   // unloads packages no longer present, so all records must arrive together).
   await Promise.all(entries.map((e) => e.scanner.scan()));
   await syncFromScanners(projectId, entries, logger, { invalidate: true });
+  await refreshDisabledRows(projectId, plan.disabled);
 
   for (const entry of entries) watchEntry(projectId, entry, logger);
 
   activationState().activated.add(projectId);
+}
+
+/** The scanner entry of a root — one scanner per resolved dir (a device folder: per instance). */
+function entryFor(projectId: string, root: FlaggedRoot, logger: Logger): ScannerEntry {
+  const scanner = getScannerForDir(root.dir, logger, root.reader, { projectId, scope: root.ownerScope, uriRoot: root.uriRoot });
+  return { kind: root.kind, scanner, ownerScope: root.ownerScope, plane: root.plane, uriRoot: root.uriRoot, ...(root.device ? { device: root.device } : {}) };
 }
 
 /**
@@ -128,14 +161,14 @@ async function activateProject(projectId: string): Promise<void> {
  * this fires). The list is read AT FIRE TIME, so a source added since never
  * has its packages unloaded by a sync from an older list.
  */
-function watchEntry(projectId: string, { scanner, uriRoot }: ScannerEntry, logger: Logger): void {
+function watchEntry(projectId: string, { kind, scanner }: ScannerEntry, logger: Logger): void {
   scanner.startWatching(projectId, () => {
     const entries = activationState().scanners.get(projectId);
     if (!entries) return;
     syncFromScanners(projectId, entries, logger).catch((err) =>
       logger.warn('Watch-triggered package sync failed', { projectId, error: String(err) }),
     );
-  }, { createRoot: uriRoot === 'packages://' });
+  }, { createRoot: kind === 'drop' });
 }
 
 async function releaseDropped(projectId: string, previous: readonly ScannerEntry[], next: readonly ScannerEntry[]): Promise<void> {
@@ -145,13 +178,15 @@ async function releaseDropped(projectId: string, previous: readonly ScannerEntry
   }
 }
 
-const rootKey = (root: FlaggedRoot): string => JSON.stringify([root.dir, root.ownerScope, root.plane, root.uriRoot, root.reader?.id ?? 'local']);
+const rootKey = (root: Pick<FlaggedRoot, 'kind' | 'dir' | 'ownerScope' | 'plane' | 'uriRoot' | 'reader'>): string =>
+  JSON.stringify([root.kind, root.dir, root.ownerScope, root.plane, root.uriRoot, root.reader?.id ?? 'local']);
 
 /**
- * Re-derive an activated project's flagged roots and apply only the
- * difference: a new root is scanned and watched, a removed or unflagged one
- * loses this project's listener. An unchanged set touches no disk beyond the
- * one listing. Returns whether the scanner list changed; the caller syncs.
+ * Re-derive an activated project's package roots — the drop zone included,
+ * keyed like every other root — and apply only the difference: a new root is
+ * scanned and watched, a removed or switched-off one loses this project's
+ * listener. An unchanged set touches no disk beyond the one listing and the
+ * listed folders' mtimes. Returns whether the scanner list changed; the caller syncs.
  */
 function rederiveFlaggedRoots(projectId: string, logger: Logger): Promise<boolean> {
   const state = activationState();
@@ -160,21 +195,19 @@ function rederiveFlaggedRoots(projectId: string, logger: Logger): Promise<boolea
   const run = turn.then(async () => {
     const current = state.scanners.get(projectId);
     if (!current) return false;
-    const desired = await listFlaggedPackageRoots(projectId, logger);
+    const desired = await listPackageRoots(projectId, logger);
     if (desired === null) return false; // an unreadable inventory never drops a loaded source
-    const [dropZone, ...flagged] = current;
-    if (!dropZone) return false;
-    const held = new Map(flagged.map((e) => [rootKey({ dir: e.scanner.packagesDir, ownerScope: e.ownerScope, plane: e.plane, uriRoot: e.uriRoot, reader: e.scanner.reader }), e]));
-    const wanted = new Map(desired.map((root) => [rootKey(root), root]));
+    await refreshDisabledRows(projectId, desired.disabled);
+    const held = new Map(current.map((e) => [rootKey({ ...e, dir: e.scanner.packagesDir, reader: e.scanner.reader }), e]));
+    const wanted = new Map(desired.roots.map((root) => [rootKey(root), root]));
     if (held.size === wanted.size && [...wanted.keys()].every((key) => held.has(key))) return false;
-    const next: ScannerEntry[] = [dropZone, ...[...wanted].map(([key, root]) => held.get(key)
-      ?? { scanner: getScannerForDir(root.dir, logger, root.reader, { projectId, scope: root.ownerScope, uriRoot: root.uriRoot }), ownerScope: root.ownerScope, plane: root.plane, uriRoot: root.uriRoot, ...(root.device ? { device: root.device } : {}) })];
-    const added = next.slice(1).filter((e) => !flagged.includes(e));
+    const next: ScannerEntry[] = [...wanted].map(([key, root]) => held.get(key) ?? entryFor(projectId, root, logger));
+    const added = next.filter((e) => !current.includes(e));
     state.scanners.set(projectId, next);
     await Promise.all(added.map((e) => e.scanner.scan()));
     for (const entry of added) watchEntry(projectId, entry, logger);
     await releaseDropped(projectId, current, next);
-    logger.info('Flagged package sources re-derived', { projectId, added: added.length, dropped: flagged.filter((e) => !next.includes(e)).length });
+    logger.info('Package roots re-derived', { projectId, added: added.length, dropped: current.filter((e) => !next.includes(e)).length });
     return true;
   });
   state.rederiving.set(projectId, run);
@@ -192,6 +225,7 @@ function rederiveFlaggedRoots(projectId: string, logger: Logger): Promise<boolea
 function onSourceRootsChanged(projectId: string, logger: Logger): void {
   const state = activationState();
   if (!state.activated.has(projectId) && !state.pending.has(projectId)) return;
+  state.disabledManifests.delete(projectId);
   void (async () => {
     await ensureProjectPackagesLoaded(projectId);
     if (await rederiveFlaggedRoots(projectId, logger)) {
@@ -218,7 +252,7 @@ function armSourceRootsSubscription(roots: PackageSourceRoots, logger: Logger): 
  * brain-core and agent-core judged loadable) OR a `device` reader (another
  * device's folder, or any device's from inside a container — read over its
  * link, one reader per package folder), and is not the default `packages`
- * drop-zone (handled unconditionally by C3). User/agent-scoped sources
+ * drop-zone (its fixed path, `listPackageRoots`). User/agent-scoped sources
  * ARE included (R2b): they load, and their packages carry the source's scope so
  * advertise-time isolation can hide them from other callers. Loading is never
  * execution: a package from any non-native root keeps only its declarative
@@ -234,7 +268,7 @@ export function selectFlaggedPackageRoots(
 ): FlaggedRoot[] {
   const selected: FlaggedRoot[] = [];
   for (const r of roots) {
-    if (r.slug === 'packages') continue; // C3 — the default drop-zone is unconditional
+    if (r.slug === DROP_SOURCE_SLUG) continue; // the drop zone is read from its fixed path (`listPackageRoots`)
     if (r.packageFolders.length === 0) continue;
     if (!r.enabled) {
       logger?.debug?.('Skipping disabled package source', { slug: r.slug });
@@ -251,13 +285,13 @@ export function selectFlaggedPackageRoots(
       }
       const uriRoot = folder ? `${r.uriRoot}${folder}` : r.uriRoot;
       if (r.containerRoot) {
-        selected.push({ dir: folder ? join(r.containerRoot, ...folder.split('/')) : r.containerRoot, ownerScope: r.scope, plane: r.plane, uriRoot });
+        selected.push({ kind: 'folder', dir: folder ? join(r.containerRoot, ...folder.split('/')) : r.containerRoot, ownerScope: r.scope, plane: r.plane, uriRoot });
         continue;
       }
       if (!r.device) continue;
       try {
         const opened = r.device.openReader(folder);
-        selected.push({ dir: opened.root, ownerScope: r.scope, plane: r.plane, uriRoot, reader: opened.reader, device: r.device.id });
+        selected.push({ kind: 'folder', dir: opened.root, ownerScope: r.scope, plane: r.plane, uriRoot, reader: opened.reader, device: r.device.id });
       } catch (error) {
         logger?.warn('Skipping a device package folder that cannot be opened', { slug: r.slug, error: error instanceof Error ? error.message : String(error) });
       }
@@ -266,25 +300,63 @@ export function selectFlaggedPackageRoots(
   return selected;
 }
 
+/** The source whose switch the `_packages/` drop zone follows. */
+const DROP_SOURCE_SLUG = 'packages';
+
 /**
- * C2 — fetch the project's package-source candidates from brain-core and apply
- * the floor; arms the change subscription on first use. brain-core absent ⇒
- * only `_packages/` is active (graceful); an enumeration failure ⇒ `null`.
+ * (pure) The package folders of switched-OFF sources this process reads on
+ * its own disk — listed, never loaded. The drop zone is not here (it follows
+ * its source in `listPackageRoots`); a device folder of a switched-off source
+ * has no reader, so it lists nothing.
  */
-async function listFlaggedPackageRoots(projectId: string, logger: Logger): Promise<FlaggedRoot[] | null> {
+export function selectDisabledPackageFolders(roots: PackageSourceRoot[]): DisabledFolder[] {
+  const folders: DisabledFolder[] = [];
+  for (const r of roots) {
+    if (r.enabled || r.slug === DROP_SOURCE_SLUG || !r.containerRoot) continue;
+    for (const folder of r.packageFolders) {
+      if (!isPackageFolderPath(folder)) continue;
+      folders.push({
+        sourceSlug: r.slug,
+        dir: folder ? join(r.containerRoot, ...folder.split('/')) : r.containerRoot,
+        ownerScope: r.scope,
+        uriRoot: folder ? `${r.uriRoot}${folder}` : r.uriRoot,
+      });
+    }
+  }
+  return folders;
+}
+
+/**
+ * The project's package roots from brain-core's enumerated package sources,
+ * arming the change subscription on first use. The `_packages/` drop zone
+ * (fixed path, project scope) follows the `packages` source's switch: it
+ * loads when no source-roots service exists (a generic host) or the project
+ * has no `packages` source, and is listed only while that source is off. An
+ * enumeration failure answers `null` — the caller loads nothing new.
+ */
+async function listPackageRoots(projectId: string, logger: Logger): Promise<PackageRoots | null> {
+  const dropDir = join(resolveProjectRoot(getEnv().projectsRoot, projectId), '_packages');
+  const drop: FlaggedRoot = { kind: 'drop', dir: dropDir, ownerScope: { kind: 'project' }, plane: 'local', uriRoot: 'packages://' };
   try {
     const runtime = await getRuntime();
     await runtime.whenReady();
     const sourceRoots = runtime.services.get('package-source-roots');
     if (!sourceRoots) {
       logger.debug?.('package-source-roots unavailable — only _packages/ active', { projectId });
-      return [];
+      return { roots: [drop], disabled: [] };
     }
     armSourceRootsSubscription(sourceRoots, logger);
-    const roots = await sourceRoots.listPackageSourceRoots(projectId);
-    const selected = selectFlaggedPackageRoots(roots, logger);
-    if (selected.length > 0) logger.debug?.('Flagged package sources active', { projectId, count: selected.length });
-    return selected;
+    const rows = await sourceRoots.listPackageSourceRoots(projectId);
+    const dropOn = rows.find((r) => r.slug === DROP_SOURCE_SLUG)?.enabled !== false;
+    const flagged = selectFlaggedPackageRoots(rows, logger);
+    if (flagged.length > 0) logger.debug?.('Flagged package sources active', { projectId, count: flagged.length });
+    return {
+      roots: dropOn ? [drop, ...flagged] : flagged,
+      disabled: [
+        ...(dropOn ? [] : [{ sourceSlug: DROP_SOURCE_SLUG, dir: dropDir, ownerScope: drop.ownerScope, uriRoot: drop.uriRoot }]),
+        ...selectDisabledPackageFolders(rows),
+      ],
+    };
   } catch (err) {
     logger.warn('Failed to enumerate flagged package sources', { projectId, error: String(err) });
     return null;
@@ -292,7 +364,46 @@ async function listFlaggedPackageRoots(projectId: string, logger: Logger): Promi
 }
 
 /**
- * Re-derive the flagged roots, then re-read EVERY scanner of a project from
+ * Re-list the switched-off folders' packages. A folder whose mtime has not
+ * moved reuses its last manifests (a source change drops them all); a missing
+ * folder lists nothing. A folder that cannot form an instance id is skipped,
+ * like the scanner skips it.
+ */
+async function refreshDisabledRows(projectId: string, folders: readonly DisabledFolder[]): Promise<void> {
+  const state = activationState();
+  const previous = state.disabledManifests.get(projectId);
+  const cache = new Map<string, { mtimeMs: number; manifests: PackageFolderManifest[] }>();
+  const rows: DisabledPackageRow[] = [];
+  for (const folder of folders) {
+    const mtimeMs = await stat(folder.dir).then((s) => s.mtimeMs, () => null);
+    if (mtimeMs === null) continue;
+    const key = rootKey({ kind: 'folder', dir: folder.dir, ownerScope: folder.ownerScope, plane: 'local', uriRoot: folder.uriRoot });
+    const held = previous?.get(key);
+    const manifests = held?.mtimeMs === mtimeMs ? held.manifests : await readPackageFolderManifests(folder.dir);
+    cache.set(key, { mtimeMs, manifests });
+    for (const manifest of manifests) {
+      try {
+        const { packageId, originUri } = packageFolderInstance(manifest, projectId, folder.ownerScope, { directory: folder.dir, uriRoot: folder.uriRoot });
+        rows.push({ packageId, sourceSlug: folder.sourceSlug, name: manifest.name, ...(manifest.version ? { version: manifest.version } : {}), originUri, ownerScope: folder.ownerScope });
+      } catch { /* a folder name no instance URI can carry — the scanner skips it too */ }
+    }
+  }
+  state.disabledManifests.set(projectId, cache);
+  state.disabledRows.set(projectId, rows);
+}
+
+/**
+ * The listed package folders of the project's switched-off sources (no disk
+ * read). The host's own listing shows a row only where the caller's session
+ * reads the source at source level and the folder's manifest on the path axis
+ * (`loadVisibleDisabledPackageIds`).
+ */
+export function listDisabledPackageRows(projectId: string): readonly DisabledPackageRow[] {
+  return activationState().disabledRows.get(projectId) ?? [];
+}
+
+/**
+ * Re-derive the package roots, then re-read EVERY scanner of a project from
  * disk and run ONE combined sync — the rescan route's path. A rescan of one
  * scanner alone would hand the sync an incomplete desired set, and its unload
  * pass would drop every package another scanner owns. Activates the project
@@ -350,6 +461,7 @@ async function syncFromScanners(
  */
 export function resetProjectPackageActivation(projectId: string): void {
   activationState().activated.delete(projectId);
+  activationState().disabledManifests.delete(projectId);
   const entries = activationState().scanners.get(projectId);
   if (entries) {
     for (const { scanner } of entries) scanner.clearCache();
@@ -362,10 +474,15 @@ export function resetProjectPackageActivation(projectId: string): void {
  */
 export function listAllActivatedPackages(projectId?: string): InstalledPackageInfo[] {
   if (!projectId) return [];
-  return resolveScannerRecords(projectId, activationState().scanners.get(projectId) ?? []).records.map((resolved) => ({
+  const loaded: InstalledPackageInfo[] = resolveScannerRecords(projectId, activationState().scanners.get(projectId) ?? []).records.map((resolved) => ({
     packageId: resolved.packageId, source: resolved.sourceKind,
     installedAt: resolved.installedAt, updatedAt: resolved.updatedAt, sourceRoot: resolved.packageRoot,
   }));
+  // A switched-off source's folders: never loaded, listed under the id they load as.
+  const listed = listDisabledPackageRows(projectId).map((row): InstalledPackageInfo => ({
+    packageId: row.packageId, source: 'local-dir', sourceDisabled: true, sourceSlug: row.sourceSlug,
+  }));
+  return [...loaded, ...listed];
 }
 
 /**

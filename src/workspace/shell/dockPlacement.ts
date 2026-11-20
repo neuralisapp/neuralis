@@ -61,16 +61,16 @@ export type DockLayoutConfig = {
 
 /**
  * The first-run layout (and what an unreadable field falls back to): the apps
- * dock as a toolbar along the bottom centre, the agents dock down the middle of
- * the left edge, the chat on the right, widgets in Dim glass. The Dark theme
+ * dock down the middle of the left edge, the agents dock at the top right,
+ * the chat on the right, widgets in Dim glass and clear dock chrome. The Dark theme
  * on every surface is the theme owner's default (`DEFAULT_THEME`).
  */
 export const DEFAULT_DOCK_LAYOUT: DockLayoutConfig = {
-  primary: { dockId: 'primary', anchor: 'bottom', orientation: 'horizontal' },
-  secondary: { dockId: 'secondary', anchor: 'left', orientation: 'vertical' },
+  primary: { dockId: 'primary', anchor: 'left', orientation: 'vertical' },
+  secondary: { dockId: 'secondary', anchor: 'top-right', orientation: 'vertical' },
   chatPosition: 'end',
   defaultWidgetTransparency: 'dim',
-  defaultDockTransparency: 'opaque',
+  defaultDockTransparency: 'transparent',
   backgroundTransparency: 'dim',
   dockBackground: 'toolbar',
   autoPhone: true,

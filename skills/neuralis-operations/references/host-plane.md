@@ -20,21 +20,22 @@ container and never in platform config.
 
 ```bash
 npm install -g @neuralis/cli    # on the machine, as the user whose files the app should reach (Node.js 22.22+)
-neuralis device pair            # one sign-in in the browser; this machine becomes your device
+neuralis device pair            # one sign-in in the browser; this machine becomes your device (--sandboxed|--unconfined: below)
 neuralis device install         # the login service, the confinement helper, a ceiling with no folder
-neuralis device grant DIR       # let the app read DIR (--write to change it; --host URL with several hosts)
+neuralis device grant DIR       # let the app read DIR (--write to change it; --device ID with several pairings)
+neuralis device dismiss DIR     # drop a waiting request you will not grant (--write / --exec / --device ID as on grant)
 neuralis device status          # pairing, ceiling, helper, link, readiness, pending requests
 neuralis device run             # the broker in the foreground, instead of the service
 ```
 
-`install --unconfined` is the single-person mode (below). A macOS or Windows machine installs
-sandboxed once its OS sandbox prints all four probe rows (Seatbelt; on Windows 11 ≥ 26100.9278
-Microsoft Execution Containers — implemented, not yet proven on that hardware), and with
-`--unconfined` — your explicit act, which the install names — where it does not. An image-only server needs the npm CLI too: the installer's script refuses `device`. **The server is a device too.** After the upgrade that brought devices,
+Every command runs in the sandbox; your own may start without it per pairing (below). A macOS or
+Windows machine runs sandboxed once its OS sandbox prints all four probe rows (Seatbelt; on
+Windows 11 ≥ 26100.9278 Microsoft Execution Containers — implemented, not yet proven on that
+hardware); where it does not, `install` says `sandbox_unproven`. An image-only server needs the npm CLI too: the installer's script refuses `device`. **The server is a device too.** After the upgrade that brought devices,
 `neuralis device install` on the server adopts the broker it already had — its secret, its
 ceiling, its background runs — without pairing again (the offline upgrade registered it and
 wrote `~/.neuralis/device/device.json`; `device install`, or `device run`, moves it into
-`device/hosts/<hostKey>/` and writes the local socket's own secret `device/local-secret`).
+`device/pairings/<deviceId>/` and writes the local socket's own secret `device/local-secret`).
 
 The allowlist ships with **no folder**. That denies every host folder until the device's owner
 names the paths it may reach: "not configured" never means "unlimited". Its `exec` list starts
@@ -55,7 +56,7 @@ platform config, logs), `projects/` (every project's conversations and packages)
 `qdrant-backups/`, `build/` and `qdrant-version.json`: file requests answer all of them like a path
 outside the ceiling, for every caller, and a command or terminal run for another member never
 reaches them. The owner's own commands and terminal never reach `app/` and the backups either,
-with two exceptions: `projects/` stays theirs (a native host runs its owner's unconfined shell in
+with two exceptions: `projects/` stays theirs (a native host runs its owner's approved unsandboxed shell in
 the project's own folder, as a container does), and an installed package under
 `app/packages/node_modules` that the host names for the owner's command is read and run there,
 never written. `device grant` refuses a folder inside any of them; `device-scratch/`,
@@ -73,7 +74,7 @@ after a command started is not covered (a new top-level file is refused by Windo
 status` and the local `/readyz` list all three sets; `ceiling_covers_protected_path` names a folder
 opened to others that covers one. Residuals: a hardlink to one of those files already inside a
 granted folder, a bind mount, a sign-in folder moved after `install`, the rest of the desktop
-app's own folder (writable under a covering grant), and `unconfined` (the child can read the
+app's own folder (writable under a covering grant), and a start without the sandbox (the child can read the
 secret and rewrite all of it).
 
 Four independent things must all be true before a host command runs, and naming which
@@ -82,8 +83,8 @@ one is missing is the useful diagnosis:
 1. the device is paired and its broker is running and linked (`device status`);
 2. its ceiling covers the path being used;
 3. the source names that device, and the caller may use it — its owner with `device.own`, or
-   anyone else with the device-plane feature (`exec.device` for a shell, `terminal.device` for a
-   terminal tab) and only while the device's live verdict is `sandboxed`;
+   anyone else with the device-plane feature `device.others` (a shell and a terminal tab alike)
+   and only while the device's live verdict is `sandboxed`;
 4. the source's path rules allow the operation (read, write and exec are separate grants).
    `exec` decides where a command may START — the working directory, judged as a folder, so a
    rule on `X/**` covers `X` itself. It does not decide what runs: a command started in an
@@ -101,27 +102,30 @@ clamped to the device owner's ceiling, for every role. There is no privileged ti
 escapes it — unlike container-side execution, where a specific feature does bypass the static
 path gate. The read list and the write list are enforced separately, and neither is the list
 of paths the broker may *spawn* from; folding those together would publish the owner's
-toolchain as readable data. A sandboxed ceiling whose helper is missing or cannot prove itself
-is not ready (declared, never degraded).
+toolchain as readable data. A machine whose helper is missing or cannot prove itself stays
+ready but `sandbox_unproven` (declared, never degraded): every sandboxed spawn is refused by that
+name, and only the exception below runs.
 
-The one relaxation is the owner's, and it lives in the ceiling file, never in the
-application: `"confinement": "unconfined"`. In that mode every host command and host
-terminal runs bare as the device's own account, with that account's login environment —
-the agent reaches whatever is installed there (Docker, the node toolchain, `gh`, `claude`),
-exactly as a Claude Code session on the same machine would. That is root-equivalent on the
-machine, as that user; it is meant for a machine one person owns and runs, never a shared
-deployment. It loads only beside `trustedSingleOperator: true` in the same file (otherwise the
-broker stays sandboxed and `status` says why), every result reports `unconfined` so nobody
-mistakes a computed root list for an enforced one, and the read/write lists then say only where
-a shell may start. Plainly: an unconfined command can read the device secret and rewrite the
-ceiling, so the request channel below is a courtesy in that mode, not a boundary. Such a device
-serves its OWNER only — nobody else's commands run on an unconfined machine.
+The one exception is the owner's, per pairing, and it lives in the ceiling file, never in the
+application: `neuralis device grant --unconfined --device ID` (or the desktop hub's switch, or the
+pairing itself — `device pair` says yes for a loopback host, `--unconfined` for any other, `--sandboxed` never) writes
+an `owner-unconfined` record into that pairing's entry, and `--revoke` takes it back. Then YOUR
+OWN terminal from that host starts bare unless you pick Sandboxed, and your own foreground command when you ask for it, as this
+account, with its login environment — the agent reaches whatever is installed there (Docker,
+the node toolchain, `gh`, `claude`), exactly as a Claude Code session on the same machine
+would. That is root-equivalent on the machine, as that user — meant for a machine one person owns,
+never a shared deployment: an unconfined command can read the device secret and rewrite the
+ceiling, so the request channel below is a courtesy for it, not a boundary. Another member's commands, background runs and MCP
+servers never start bare, the result says `unconfined` so nobody mistakes it for an enforced
+root list, and taking the approval back ends those sessions at the broker's next ceiling read.
+The old whole-machine key `"confinement": "unconfined"` is never read: such a ceiling loads as
+deny-all (`legacy_machine_wide_unconfined`) until `device install` (or `device run`) converts
+it offline — every pairing then carries the approval, and `confinement` and
+`trustedSingleOperator` leave the file. `--unconfined` on `install` no longer exists.
 
 Linux ships the confinement helper inside the device client, checked against its manifest;
 macOS uses the OS's own Seatbelt and Windows x64 the bundled Microsoft Execution Containers
-binary — each proven per machine by the four-row probe. Where one does not prove itself, the
-device is unconfined only by its owner's explicit `--unconfined`, never inferred from the
-platform, and therefore owner-only.
+binary — each proven per machine by the four-row probe, never inferred from the platform.
 
 ## Operating it
 
@@ -165,8 +169,8 @@ ceiling (`ceiling_denied` — the working directory is probed against the ceilin
 anything spawns, so this is the answer a command gets, never a false "does not exist"), the
 broker records the request — the paths, the working directory, which list would need
 widening, and the `reason` the agent gave the command — in a file beside the device's
-directory (outside anything the app can read). `status` lists the pending requests; the owner
-answers with `neuralis device grant <dir> [--write] [--host <url>]` (or `--exec` for a toolchain root), which adds to the named list
+directory (outside anything the app can read). `status` lists the pending requests, each with the reason its last grant was refused, if one was; the owner
+answers with `neuralis device grant <dir> [--write] [--device <id>]` (or `--exec` for a toolchain root), which adds to the named list
 atomically, takes effect on the next request without a restart, and clears the requests it
 satisfied. `--exec` is for toolchain roots (a host `node`, `pnpm`, `cargo`, a CLI's launcher —
 `install` and `status` suggest the ones detected on the machine under `$suggestedExecRoots`,
@@ -174,6 +178,42 @@ which the broker never reads; the first ceiling already holds the folders of the
 `dist`, so a skill script and `neuralis request` run without a grant), `read` (the default) and `--write` for the data the command
 touches. An agent asks by running the command with a filled-in `reason` and telling the user
 what was refused; it never edits the ceiling file.
+
+## Stdio MCP servers on a device
+
+A stdio MCP server an agent's owner activates onto a device runs there through the broker,
+one command line (never a shell), under the same spawn plan as the owner's own shell on that
+machine. Before its first start the device's owner approves that exact command ON THE DEVICE;
+the device computes its identity (program, arguments, start folder, every non-secret env entry
+with its value, the secret env NAMES) and any change asks again. One approval covers every
+server id with the same command, arguments, folder and env, and another member's run of it too
+(sandboxed, only in a folder opened to them with `--others exec`).
+
+```bash
+neuralis device status                          # "MCP commands waiting": each in full, its id, whose run, ×count
+neuralis device grant --mcp ID [--device ID]    # approve that one waiting command, exactly as status showed it
+neuralis device grant --mcp ID_OR_HASH --revoke # take an approval back; a running copy ends within 30 s
+neuralis device grant --mcp-standing [--device ID] [--revoke]  # start YOUR OWN runs from that pairing's host without asking
+```
+
+- `status` prints, under each waiting command, what the yes allows on this machine: on a
+  device the command may run that program, sandboxed, and read that folder, plus the folders you
+  already allowed (an MCP server never starts without the sandbox); another member's run starts only sandboxed in a folder you opened to
+  others. The approval binds the command line, not the files it runs, what `npx -y` downloads
+  or which program `PATH` finds.
+- Approval alone opens that program and start folder for that one command (no `exec` root,
+  nothing for the shell or another command). Taking the folder back does not stop an approved
+  command — remove its approval.
+- The standing approval is off by default, per pairing, and never covers another member's run or
+  a command an agent activated: anything acting with your sign-in can otherwise bind any
+  command here, and it starts again at every later conversation. Every start under it is a
+  logged `auto` row with the full command.
+- Waiting commands are rows of the same request log as folder asks, each kind with its own half
+  of the 200-row cap; `grant --mcp` clears its row, and the host withdraws a row itself when the
+  server that asked is removed.
+- On a sandboxed WSL device a Windows `.exe` started from Linux does not start (the sandbox
+  refuses the interop launcher); run such a server on the Windows side paired as its own
+  device.
 
 ## Background host shells
 

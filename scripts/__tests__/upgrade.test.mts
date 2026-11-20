@@ -194,7 +194,10 @@ describe('neuralis:upgrade — the offline apply order', () => {
     calls().blocked = true;
     const before = homeFiles(f.opts.roots.home);
     for (const apply of [false, true]) {
-      await expect(runUpgrade({ ...f.opts, apply })).rejects.toThrow('1 blocking item(s) above: resolve it first.');
+      const error = await runUpgrade({ ...f.opts, apply }).then(() => undefined, (e: unknown) => e);
+      // The error alone (what stderr shows) names the remedy AND the line.
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('1 blocking item(s): resolve it first.\n  alpha-v2: main · agent · a.json · config.packages.overrides · ghost · unresolved');
     }
     expect(f.logs).toContain('  alpha-v2: main · agent · a.json · config.packages.overrides · ghost · unresolved');
     expect(calls().seen).toEqual([]);
@@ -332,15 +335,17 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
     // The zone module sorts AFTER the identity module: it moves the zones that one writes.
     const files = modules.map(({ file }) => file);
     expect(files.indexOf('package-zone-v1.mts')).toBeGreaterThan(files.indexOf('package-identity-v2.mts'));
-    // `neuralis/project` is a chain: the identity step (v2), the device step (v3), then the two-word
-    // feature ids (v4), in file order.
+    // `neuralis/project` is a chain, in file order: the identity step (v2), the device step (v3), the
+    // two-word feature ids (v4), the agent level (v5), one feature id per right (v6).
     expect(declared.filter((row) => row.kind === 'neuralis/project')).toEqual([
       { id: 'package-identity-v2', kind: 'neuralis/project', to: 2 },
       { id: 'source-device-v1', kind: 'neuralis/project', to: 3 },
       { id: 'two-word-features-v1', kind: 'neuralis/project', to: 4 },
       { id: 'written-role-agents-v1', kind: 'neuralis/project', to: 5 },
+      { id: 'written-role-features-v1', kind: 'neuralis/project', to: 6 },
     ]);
     expect(files.indexOf('written-role-agents-v1.mts')).toBeGreaterThan(files.indexOf('two-word-features-v1.mts'));
+    expect(files.indexOf('written-role-features-v1.mts')).toBeGreaterThan(files.indexOf('written-role-agents-v1.mts'));
     // `agent-core/conversation-messages`: the plane rename (v2), then the stored refusal codes (v3).
     expect(declared.filter((row) => row.kind === 'agent-core/conversation-messages')).toEqual([
       { id: 'source-to-host-v1', kind: 'agent-core/conversation-messages', to: 2 },
@@ -359,9 +364,11 @@ describe('the shipped upgrade modules', { timeout: 60_000 }, () => {
       { id: 'source-to-host-v1', kind: 'brain-core/source-config', to: 5 },
       { id: 'source-uri-subject-v1', kind: 'brain-core/source-config', to: 6 },
       { id: 'source-use-grants-v1', kind: 'brain-core/source-config', to: 7 },
+      { id: 'source-zone-merge-v1', kind: 'brain-core/source-config', to: 8 },
     ]);
     expect(files.indexOf('source-uri-subject-v1.mts')).toBeGreaterThan(files.indexOf('source-to-host-v1.mts'));
     expect(files.indexOf('source-use-grants-v1.mts')).toBeGreaterThan(files.indexOf('source-uri-subject-v1.mts'));
+    expect(files.indexOf('source-zone-merge-v1.mts')).toBeGreaterThan(files.indexOf('source-use-grants-v1.mts'));
     // `agent-core/agent`: package identity (a PINNED v2), then the private-agent record (v3).
     expect(declared.filter((row) => row.kind === 'agent-core/agent')).toEqual([
       { id: 'package-identity-v2', kind: 'agent-core/agent', to: 2 },

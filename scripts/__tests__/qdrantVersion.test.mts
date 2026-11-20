@@ -50,7 +50,7 @@ function probe(p: { storage: boolean | null; running?: string | null; installed?
 describe('the pinned release table', () => {
   it('holds one release per minor from 1.13 to the target, each with an image digest and every binary (Linux, macOS, Windows)', () => {
     const minors = QDRANT_RELEASES.map((r) => Number(r.version.split('.')[1]));
-    expect(minors).toEqual([13, 14, 15, 16, 17, 18, 19]);
+    expect(minors).toEqual([13, 14, 15, 16, 17, 18, 19, 20]);
     expect(QDRANT_RELEASES.at(-1)?.version).toBe(QDRANT_TARGET_VERSION);
     const targets = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'aarch64-apple-darwin', 'x86_64-apple-darwin', 'x86_64-pc-windows-msvc'] as const;
     for (const release of QDRANT_RELEASES) {
@@ -109,6 +109,11 @@ describe('the upgrade chain walks every minor, in order, forward only', () => {
     expect(qdrantUpgradeChain('1.19.1', '1.19.1')).toEqual([]);
   });
 
+  it('the target is the last row, and a 1.19 store reaches it in one hop', () => {
+    expect(QDRANT_RELEASES.at(-1)?.version).toBe('1.20.2');
+    expect(qdrantUpgradeChain('1.19.1')).toEqual(['1.20.2']);
+  });
+
   it('refuses backwards and unpinned ends', () => {
     expect(() => qdrantUpgradeChain('1.19.1', '1.13.6')).toThrow(/never moves backwards/);
     expect(() => qdrantUpgradeChain('1.12.4', '1.19.1')).toThrow(/not a pinned release/);
@@ -123,12 +128,12 @@ describe('the gap rule setup refuses on (docker AND binary)', () => {
   });
 
   it('one minor behind renders the recorded version; equal is current', () => {
-    expect(assessQdrantGap('1.18.3')).toEqual({ kind: 'behind', hops: 1 });
+    expect(assessQdrantGap('1.19.1')).toEqual({ kind: 'behind', hops: 1 });
     expect(assessQdrantGap(QDRANT_TARGET_VERSION)).toEqual({ kind: 'current' });
   });
 
   it('a newer or unpinned recorded version is refused', () => {
-    expect(assessQdrantGap('1.20.0').kind).toBe('refuse');
+    expect(assessQdrantGap('1.21.0').kind).toBe('refuse');
     expect(assessQdrantGap('1.12.4').kind).toBe('refuse');
   });
 });

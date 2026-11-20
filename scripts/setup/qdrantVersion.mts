@@ -11,8 +11,9 @@
  * The state lives in `<NEURALIS_HOME>/qdrant-version.json`, outside the app's
  * bind mounts. Setup writes it once — for a fresh install (no storage) the
  * version this release ships; for an existing install without the file, the
- * version it DETECTS on the storage — and afterwards only
- * `pnpm neuralis:qdrant-upgrade` advances it (or rolls it back). There is no
+ * version it DETECTS on the storage — and afterwards `pnpm neuralis:qdrant-upgrade`
+ * advances it (or rolls it back), and so does the desktop app's start when its
+ * bundle's Qdrant is one minor ahead (`qdrant-upgrade/bundleHop.mts`). There is no
  * default: an existing install whose version cannot be read is refused.
  */
 
@@ -23,7 +24,7 @@ import { dirname, join } from 'node:path';
 import { spell } from '../cli/spelling.mts';
 
 /** The version this release of the host is built and tested against. */
-export const QDRANT_TARGET_VERSION = '1.19.1';
+export const QDRANT_TARGET_VERSION = '1.20.2';
 
 export type QdrantBinaryTarget = 'x86_64-unknown-linux-musl' | 'aarch64-unknown-linux-musl' | 'aarch64-apple-darwin' | 'x86_64-apple-darwin' | 'x86_64-pc-windows-msvc';
 
@@ -36,8 +37,11 @@ export type QdrantRelease = {
 };
 
 /**
- * One release per minor, oldest first: the upgrade chain walks this table and
- * never skips a row. 1.16 runs the background RocksDB→Gridstore migration, so
+ * One release per minor so far, oldest first: the upgrade chain walks this table
+ * and never skips a row. A version a shipped release recorded as its target is
+ * never removed: an install's record must stay pinned (an unpinned record is
+ * refused by `assessQdrantGap`, and the desktop app has no command that repairs
+ * it). A patch move adds its row beside the old one; the chain then hops both. 1.16 runs the background RocksDB→Gridstore migration, so
  * no hop may start before the previous one has settled.
  * Refresh: `docker buildx imagetools inspect qdrant/qdrant:v<ver>` for the
  * digest; the release's asset digests (or `sha256sum` of the archive where the
@@ -125,6 +129,17 @@ export const QDRANT_RELEASES: readonly QdrantRelease[] = [
       'aarch64-apple-darwin': 'e060209dfefc9d977ddcec48521349f505f8fd1ce21f2a3db444140870522fe4',
       'x86_64-apple-darwin': 'ba7cbada9a90aefdbd7f92de4e093cd25328206bd65e9e96657bd6133d272637',
       'x86_64-pc-windows-msvc': '9b6f69bd85f6abed4bc13f943099f55c6ffd55f5dd90388635320d8fbb569eb0',
+    },
+  },
+  {
+    version: '1.20.2',
+    imageDigest: 'sha256:d277592721d2e3b73f9b797b53cf05e6a5bb2134f6d13fdbda4ca51782afbcac',
+    binarySha256: {
+      'x86_64-unknown-linux-musl': '7c3e956b97830a9faa6391540330380c2fa4aa2f92df99bd8d1880a703b922af',
+      'aarch64-unknown-linux-musl': 'c0c16a08440213b89facfbd2dd3cf4cd6fa222c1260b057a0ea77b41a75774c0',
+      'aarch64-apple-darwin': '385b244e6283968b2be926358541b5bc19b9ada7ea9586e900684388bc912d5f',
+      'x86_64-apple-darwin': '73a6538ccccb892ec2c6fa3431faf1e73fba7eb2179079adbd0c65ae4c55bf6a',
+      'x86_64-pc-windows-msvc': '7a5290b9ef1b204b250a1626ddafec580647ba3cc62ba1630b3a8efdc2718b32',
     },
   },
 ];

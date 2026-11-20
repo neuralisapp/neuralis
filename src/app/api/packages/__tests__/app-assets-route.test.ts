@@ -13,6 +13,15 @@
 import type { SessionContext } from '@neuralis/package-system/contracts';
 import { NextRequest } from 'next/server';
 import { beforeEach, afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// The read floor has its own suite (`server/packages/__tests__/packageReadFloor.test.ts`);
+// here every caller may read every source package file.
+vi.mock('@/server/packages/packageReadFloor', () => ({
+  NO_READ_HIDDEN: { hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() },
+  loadReadHiddenView: async () => ({ hiddenPackageIds: new Set<string>(), hiddenFileKeys: new Set<string>() }),
+  loadPackageReadVerdict: async () => 'visible',
+  isPackageReadVisible: async () => true,
+}));
 import { mkdtemp, mkdir, readFile, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -815,7 +824,8 @@ describe('mint cost — the loaded instance, never a rescan of every scanner', (
     vi.doUnmock('@/server/packages/projectPackages');
     vi.doMock('@/server/config/env', () => ({ getEnv: () => ({ projectsRoot }) }));
     vi.doMock('@/server/logging/setup', () => ({ getLogger: () => ({ child: () => logger }) }));
-    vi.doMock('@/server/host/bootstrap', () => ({ getRuntime: async () => { throw new Error('no runtime in a unit test'); } }));
+    // A runtime with no source-roots service: the drop zone loads (a generic host).
+    vi.doMock('@/server/host/bootstrap', () => ({ getRuntime: async () => ({ whenReady: async () => undefined, services: { get: () => undefined } }) }));
     vi.doMock('@/server/store/ProjectStore', () => ({ getProjectById: async () => ({ id: 'proj-1' }) }));
     Scanner = (await import('@/server/packages/ProjectPackageScanner')).ProjectPackageScanner;
     realMint = (await import('../[slug]/app-scope/route')).POST;

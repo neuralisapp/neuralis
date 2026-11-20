@@ -24,6 +24,7 @@ import {
   pruneBackups,
   runDockerRollback,
   runDockerUpgrade,
+  tarStorageDir,
   withKeyEnvFile,
   type Exec,
   type QdrantApi,
@@ -669,6 +670,27 @@ describe('localTar — the host-side archive step runs the kernel\'s tar', () =>
 
   it('a Windows without SystemRoot is refused by name, never guessed', () => {
     expect(() => localTar('win32', {})).toThrow(/SystemRoot is not set.*Nothing was changed/);
+  });
+
+  it('the cold copy of a storage dir keeps sparse holes: `-S` for GNU tar only — bsdtar reads holes by default and takes `-S` in extract mode only', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nrs-tar-'));
+    try {
+      for (const [banner, flags] of [['tar (GNU tar) 1.35', ['-C', '/s', '-S', '-cf']], ['bsdtar 3.7.7 - libarchive 3.7.7', ['-C', '/s', '-cf']]] as const) {
+        const calls: string[][] = [];
+        const file = join(dir, `${flags.length}.tar`);
+        const exec: Exec = async (_cmd, args) => {
+          calls.push(args);
+          if (args[0] === '--version') return { code: 0, out: `${banner}\n`, err: '' };
+          writeFileSync(file, 'x'.repeat(10240));
+          return { code: 0, out: '', err: '' };
+        };
+        expect(await tarStorageDir({ exec }, '/s', file)).toBe(10240);
+        expect(calls[1]).toEqual([...flags, file, '.']);
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
